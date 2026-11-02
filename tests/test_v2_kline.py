@@ -176,3 +176,88 @@ def test_ui_has_entry_attribution_and_no_tradingview_brand():
         assert "tradingview" not in text.lower()
     for forbidden in ("charting_library", "tradingview.com/widget", "s3.tradingview.com", "TradingView.widget"):
         assert forbidden.lower() not in (index + app).lower()
+
+
+# ------------------------------------------------------------------ V2-KLINE-RT
+
+@pytest.fixture
+def _fresh_live():
+    kline.clear_live_cache()
+    yield
+    kline.clear_live_cache()
+
+
+def test_latest_crypto_okx_poll_5s(monkeypatch, _fresh_live):
+    seen = []
+    monkeypatch.setattr(kline, "live_okx", lambda base: seen.append(base) or kline._bar(1, 1, 2, 0.5, 1.5, 3))
+    out = kline.latest("BTC-USDT")
+    assert seen == ["BTC"] and out["provider"] == "okx"
+    assert out["poll_seconds"] == 5 and out["delayed"] is False and out["mode"] == "poll"
+    assert out["bar"]["close"] == 1.5
+
+
+def test_latest_crypto_falls_back(monkeypatch, _fresh_live):
+    def boom(base):
+        raise TimeoutError
+    monkeypatch.setattr(kline, "live_okx", boom)
+    monkeypatch.setattr(kline, "live_coinbase", lambda base: kline._bar(1, 1, 1, 1, 2, 0))
+    out = kline.latest("ETHUSD")
+    assert out["provider"] == "coinbase" and out["fallback_errors"] == ["okx: TimeoutError"]
+
+
+@pytest.mark.parametrize("sym,canonical", [("XAUUSD", "GC=F"), ("NVDA", "NVDA")])
+def test_latest_stock_metal_60s_delayed_and_cached(monkeypatch, _fresh_live, sym, canonical):
+    calls = []
+    monkeypatch.setattr(kline, "live_yahoo", lambda s: calls.append(s) or kline._bar(1, 1, 1, 1, 1, 0))
+    clock = [5000.0]
+    monkeypatch.setattr(kline.time, "time", lambda: clock[0])
+    first = kline.latest(sym)
+    assert first["poll_seconds"] == 60 and first["delayed"] is True and calls == [canonical]
+    clock[0] += 30
+    assert kline.latest(sym)["cached"] is True and len(calls) == 1
+    clock[0] += 30
+    assert kline.latest(sym)["cached"] is False and len(calls) == 2
+
+
+def test_latest_all_fail_is_chinese_and_leaks_nothing(monkeypatch, _fresh_live):
+    def boom(s):
+        raise RuntimeError("secret-token sk-abc https://x?key=1")
+    monkeypatch.setattr(kline, "live_yahoo", boom)
+    with pytest.raises(kline.KlineError) as err:
+        kline.latest("NVDA")
+    assert "稍后会自动重试" in str(err.value) and "sk-" not in str(err.value) and "key=" not in str(err.value)
+
+
+def test_latest_does_not_touch_history_cache(monkeypatch, _fresh_live):
+    calls = []
+    monkeypatch.setattr(kline, "fetch_yahoo", lambda s: calls.append(s) or _bars(3))
+    monkeypatch.setattr(kline, "live_yahoo", lambda s: kline._bar(1, 1, 1, 1, 1, 0))
+    kline.kline("NVDA")
+    kline.latest("NVDA")
+    assert kline.kline("NVDA")["cached"] is True and len(calls) == 1
+
+
+def test_api_kline_latest_endpoint(monkeypatch, _fresh_live):
+    from webui import server
+
+    monkeypatch.setattr(kline, "live_yahoo", lambda s: kline._bar(1, 1, 1, 1, 1, 0))
+    sent = {}
+
+    class H:
+        def _json(self, data, status=200):
+            sent["data"], sent["status"] = data, status
+
+    handler_cls = next(v for v in vars(server).values() if isinstance(v, type) and hasattr(v, "_kline_latest"))
+    handler_cls._kline_latest(H(), "XAGUSD")
+    assert sent["status"] == 200 and sent["data"]["canonical"] == "SI=F"
+    handler_cls._kline_latest(H(), "")
+    assert sent["status"] == 400
+    src = (Path(__file__).resolve().parents[1] / "webui" / "server.py").read_text(encoding="utf-8")
+    assert '"/api/kline/latest"' in src
+
+
+def test_rt_has_visibility_pause_and_no_external_socket():
+    app = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "visibilitychange" in app and 'visibilityState !== "hidden"' in app
+    assert "new WebSocket" not in app  # the browser only talks to this console; the server polls vendors
+    assert "知情" in app and "tradingview" not in app.lower()

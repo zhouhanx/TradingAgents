@@ -2413,3 +2413,65 @@ test('W83: a ticker made only of zero-width characters is empty in the wizard', 
     assert.equal(ui.ui.state.step, 2);
   } finally { ui.dom.window.close(); }
 });
+
+// V2-KLINE-RT: the K 线行情 page polls the newest bar only while visible.
+async function klineSetup(asset, pollSeconds) {
+  const bars = [{time: 1761955200, open: 10, high: 11, low: 9, close: 10.5, volume: 5}, {time: 1762041600, open: 10.5, high: 12, low: 10, close: 11, volume: 6}];
+  const latest = {asset_type: asset, poll_seconds: pollSeconds, delayed: asset !== 'crypto', bar: {time: 1762041600, open: 10.5, high: 13, low: 10, close: 12.5, volume: 9}};
+  const ui = await setup({
+    '/api/kline': {symbol: 'X', canonical: 'X', asset_type: asset, tf: '1D', provider: asset === 'crypto' ? 'okx' : 'yahoo', provider_symbol: 'X', is_future: asset === 'commodity', bars},
+    '/api/kline/latest': latest,
+  });
+  const updates = [];
+  const series = {setData() {}, update: (p) => updates.push(p), priceScale: () => ({applyOptions() {}})};
+  ui.window.LightweightCharts = {createChart: () => ({addCandlestickSeries: () => series, addHistogramSeries: () => series,
+    timeScale: () => ({fitContent() {}}), subscribeCrosshairMove() {}, remove() {}})};
+  let visibility = 'visible';
+  Object.defineProperty(ui.doc, 'visibilityState', {configurable: true, get: () => visibility});
+  const timers = new Map(); let next = 1;
+  ui.window.setTimeout = (fn, ms) => { timers.set(next, {fn, ms}); return next++; };
+  ui.window.clearTimeout = (id) => { timers.delete(id); };
+  const flush = async () => { for (let i = 0; i < 8; i++) await settle(); };
+  const runTimers = async () => { const due = [...timers.entries()]; timers.clear(); for (const [, t] of due) t.fn(); await flush(); };
+  const setVisible = async (value) => { visibility = value; ui.doc.dispatchEvent(new ui.window.Event('visibilitychange')); await flush(); };
+  await ui.click('.nav-item[data-page=kline]'); await flush();
+  const latestCalls = () => ui.calls.filter((c) => c.path.startsWith('/api/kline/latest')).length;
+  return {...ui, updates, timers, runTimers, setVisible, latestCalls};
+}
+
+test('K 线行情 stock/metal polls every 60 s as 知情 and pauses while the tab is hidden (V2-KLINE-RT)', async () => {
+  const ui = await klineSetup('commodity', 60);
+  try {
+    assert.deepEqual([...ui.timers.values()].map((t) => t.ms), [0]);
+    await ui.runTimers();
+    assert.equal(ui.latestCalls(), 1);
+    assert.equal(ui.updates.at(-2).close, 12.5, 'the forming bar replaces the last candle');
+    assert.equal(ui.doc.querySelector('#kline-price').textContent, '12.50');
+    assert.deepEqual([...ui.timers.values()].map((t) => t.ms), [60000]);
+    assert.match(ui.doc.querySelector('#kline-live').textContent, /知情.*60 秒/);
+    assert.match(ui.doc.querySelector('#kline-note').textContent, /知情.*延时行情.*不是逐笔/);
+    await ui.setVisible('hidden');
+    assert.equal(ui.timers.size, 0, 'hidden: no poll scheduled');
+    assert.match(ui.doc.querySelector('#kline-live').textContent, /已暂停/);
+    await ui.runTimers();
+    assert.equal(ui.latestCalls(), 1);
+    await ui.setVisible('visible');
+    assert.deepEqual([...ui.timers.values()].map((t) => t.ms), [0], 'visible again: polls at once');
+    await ui.runTimers();
+    assert.equal(ui.latestCalls(), 2);
+  } finally { ui.dom.window.close(); }
+});
+
+test('K 线行情 crypto polls about every 5 s and stops when leaving the page (V2-KLINE-RT)', async () => {
+  const ui = await klineSetup('crypto', 5);
+  try {
+    await ui.runTimers();
+    assert.deepEqual([...ui.timers.values()].map((t) => t.ms), [5000]);
+    assert.match(ui.doc.querySelector('#kline-live').textContent, /实时.*5 秒/);
+    assert.doesNotMatch(ui.doc.querySelector('#page').textContent, /tradingview/i);
+    await ui.click('.nav-item[data-page=reports]');
+    await ui.runTimers();
+    assert.equal(ui.latestCalls(), 1, 'a timer firing after leaving the page does not poll');
+    assert.equal(ui.timers.size, 0);
+  } finally { ui.dom.window.close(); }
+});

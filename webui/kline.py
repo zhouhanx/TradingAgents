@@ -5,7 +5,10 @@ resampled to weekly or monthly candles on request. Stocks and metals/commodity
 futures read the project's existing Yahoo source (the same canonical symbol the
 analysis uses, e.g. XAUUSD -> GC=F). Crypto reads OKX first, then Coinbase, then
 Yahoo. Answers are cached in memory per (provider chain, symbol) for a short TTL.
-Realtime updates are a separate batch (V2-KLINE-RT); nothing here streams.
+V2-KLINE-RT: ``latest(symbol)`` answers ``/api/kline/latest`` with the newest
+(still forming) daily bar. The page polls it while visible: crypto every few
+seconds from OKX's public REST (Coinbase, then Yahoo as fallbacks; no keys),
+stocks and metals/futures every 60 s from Yahoo (a delayed quote, not ticks).
 """
 
 from __future__ import annotations
@@ -26,6 +29,12 @@ CACHE_TTL_SECONDS = 300
 HTTP_TIMEOUT = 8.0
 
 OKX_URL = "https://www.okx.com/api/v5/market/history-candles"
+OKX_LIVE_URL = "https://www.okx.com/api/v5/market/candles"
+# V2-KLINE-RT: how often the page asks for the newest bar, and how long the
+# server reuses one answer (several tabs share it; the vendor sees at most one
+# request per window).
+RT_POLL_SECONDS = {"crypto": 5, "stock": 60, "commodity": 60}
+RT_CACHE_SECONDS = {"crypto": 3, "stock": 55, "commodity": 55}
 COINBASE_URL = "https://api.exchange.coinbase.com/products/{product}/candles"
 
 _cache: dict[tuple[str, str], tuple[float, dict]] = {}
@@ -194,4 +203,101 @@ def kline(symbol: str, tf: str | None = None) -> dict:
         "cached": cached,
         "fetched_at": daily["fetched_at"],
         "bars": resample(daily["bars"], tf),
+    }
+
+
+# ------------------------------------------------------------------ V2-KLINE-RT
+
+_live_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+
+
+def clear_live_cache() -> None:
+    with _lock:
+        _live_cache.clear()
+
+
+def live_okx(base: str) -> dict | None:
+    resp = requests.get(OKX_LIVE_URL, params={"instId": f"{base}-USDT", "bar": "1Dutc", "limit": "1"}, timeout=HTTP_TIMEOUT)
+    resp.raise_for_status()
+    body = resp.json()
+    if str(body.get("code")) != "0":
+        raise RuntimeError(f"OKX: {body.get('msg') or body.get('code')}")
+    rows = body.get("data") or []
+    if not rows:
+        return None
+    row = rows[0]
+    return _bar(int(row[0]) // 1000, row[1], row[2], row[3], row[4], row[5])
+
+
+def live_coinbase(base: str) -> dict | None:
+    end = datetime.now(UTC)
+    resp = requests.get(
+        COINBASE_URL.format(product=f"{base}-USD"),
+        params={"granularity": 86400, "start": (end - timedelta(days=2)).isoformat(), "end": end.isoformat()},
+        headers={"User-Agent": "TradingAgents-WebUI"},
+        timeout=HTTP_TIMEOUT,
+    )
+    resp.raise_for_status()
+    rows = resp.json()
+    if not rows:
+        return None
+    t, low, high, op, close, vol = max(rows, key=lambda r: r[0])
+    return _bar(t, op, high, low, close, vol)
+
+
+def live_yahoo(canonical: str) -> dict | None:
+    import yfinance as yf
+
+    from tradingagents.dataflows.vendors.yahoo.common import yf_retry
+
+    frame = yf_retry(lambda: yf.Ticker(canonical).history(period="5d", interval="1d", auto_adjust=True, actions=False))
+    if frame is None or frame.empty:
+        return None
+    idx, row = frame.index[-1], frame.iloc[-1]
+    if any(row.get(k) != row.get(k) for k in ("Open", "High", "Low", "Close")):
+        return None
+    day = datetime(idx.year, idx.month, idx.day, tzinfo=UTC)
+    return _bar(day.timestamp(), row["Open"], row["High"], row["Low"], row["Close"], row.get("Volume", 0))
+
+
+def _live_fetcher(name: str) -> Callable[[str], dict | None]:
+    return {"okx": live_okx, "coinbase": live_coinbase, "yahoo": live_yahoo}[name]
+
+
+def latest(symbol: str) -> dict:
+    """The newest daily bar and how often the page should ask again."""
+    info = route(symbol)
+    asset = info["asset_type"]
+    key = (asset, info["canonical"])
+    now = time.time()
+    with _lock:
+        hit = _live_cache.get(key)
+    cached = bool(hit and now - hit[0] < RT_CACHE_SECONDS[asset])
+    if cached:
+        answer = hit[1]
+    else:
+        errors, answer = [], None
+        for name, ident in info["providers"]:
+            try:
+                bar = _live_fetcher(name)(info["base"] if name in ("okx", "coinbase") else ident)
+            except Exception as exc:  # noqa: BLE001 - the next provider is the fallback
+                errors.append(f"{name}: {type(exc).__name__}")
+                continue
+            if bar:
+                answer = {"provider": name, "provider_symbol": ident, "bar": bar, "fallback_errors": errors, "fetched_at": int(now)}
+                break
+            errors.append(f"{name}: 无数据")
+        if answer is None:
+            raise KlineError("暂时拿不到最新行情（" + "；".join(errors) + "），稍后会自动重试。")
+        with _lock:
+            _live_cache[key] = (now, answer)
+    return {
+        "symbol": (symbol or "").strip().upper(),
+        "canonical": info["canonical"],
+        "asset_type": asset,
+        "mode": "poll",
+        "poll_seconds": RT_POLL_SECONDS[asset],
+        "delayed": asset != "crypto",
+        "cached": cached,
+        **answer,
     }

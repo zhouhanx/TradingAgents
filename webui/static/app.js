@@ -4644,7 +4644,7 @@ function renderKline() {
       <div class="kline-head"><b id="kline-name">${escapeHtml(ks.symbol)}</b><span class="kline-tag kline-tag--future" id="kline-future" hidden></span><span class="kline-price" id="kline-price">—</span><span class="kline-change" id="kline-change"></span></div>
       <div class="kline-ohlc" id="kline-ohlc"></div>
       <div class="kline-chart" id="kline-chart"><p class="kline-status" id="kline-status" role="status">正在加载…</p></div>
-      <div class="kline-foot"><span id="kline-note">展示近 1 年日线；当前为静态数据，刷新页面或切换周期时更新。</span><span>图表：Lightweight Charts（开源组件，<a href="/vendor/lightweight-charts.LICENSE.txt" target="_blank" rel="noopener">Apache-2.0 许可证</a>）</span></div>
+      <div class="kline-foot"><span id="kline-note">展示近 1 年日线。</span><span class="kline-live" id="kline-live" hidden></span><span>图表：Lightweight Charts（开源组件，<a href="/vendor/lightweight-charts.LICENSE.txt" target="_blank" rel="noopener">Apache-2.0 许可证</a>）</span></div>
     </section>`;
   const form = document.querySelector("#kline-form");
   form.addEventListener("submit", (event) => { event.preventDefault(); ks.symbol = document.querySelector("#kline-symbol").value.trim() || ks.symbol; loadKline(); });
@@ -4668,6 +4668,9 @@ function renderKline() {
 
 async function loadKline() {
   const ks = klineState();
+  stopKlineRt();
+  klineRt.seq += 1;
+  klineRt.candles = null;
   const token = (ks.token || 0) + 1;
   ks.token = token;
   document.querySelectorAll("#kline-tf [data-tf]").forEach((b) => b.classList.toggle("on", b.dataset.tf === ks.tf));
@@ -4704,7 +4707,7 @@ function drawKline(lib, data) {
   future.hidden = !data.is_future;
   future.textContent = data.is_future ? `期货标注 ${data.canonical} · 近月合约，换月可能跳空` : "";
   const tfLabel = (KLINE_TFS.find(([v]) => v === data.tf) || [, "日线"])[1];
-  document.querySelector("#kline-note").textContent = `${tfLabel}，展示近 1 年；当前为静态数据，切换周期或刷新时更新。`;
+  document.querySelector("#kline-note").textContent = `${tfLabel}，展示近 1 年；${data.asset_type === "crypto" ? "最后一根约每 5 秒刷新。" : "知情：最新价约每 60 秒刷新一次，为延时行情，不是逐笔实时。"}`;
   const bars = data.bars || [];
   const host = document.querySelector("#kline-chart");
   if (klineChart) { try { klineChart.remove(); } catch (_) { /* detached */ } klineChart = null; }
@@ -4739,6 +4742,114 @@ function drawKline(lib, data) {
   ohlcEl.textContent = ohlc(last);
   chart.subscribeCrosshairMove((param) => {
     const point = param && param.seriesData && param.seriesData.get(candles);
-    ohlcEl.textContent = point ? ohlc(point) : ohlc(last);
+    const newest = klineRt.bars[klineRt.bars.length - 1] || last;
+    ohlcEl.textContent = point ? ohlc(point) : ohlc(newest);
   });
+  klineRt.candles = candles;
+  klineRt.volume = volume;
+  klineRt.bars = bars.map((b) => ({ ...b }));
+  klineRt.symbol = data.symbol;
+  klineRt.tf = data.tf;
+  klineRt.firstOpen = bars[0].open;
+  klineRt.pollMs = (data.asset_type === "crypto" ? 5 : 60) * 1000;
+  klineRt.delayed = data.asset_type !== "crypto";
+  startKlineRt();
 }
+
+// V2-KLINE-RT: while the K 线行情 page is open and the tab is visible, poll
+// /api/kline/latest (crypto ~5 s via OKX public REST, stocks/metals ~60 s
+// delayed Yahoo quotes) and fold the newest bar into the last candle. A hidden
+// tab stops polling; becoming visible again polls at once and resumes.
+const klineRt = { timer: null, bars: [], candles: null, volume: null, pollMs: 60000, delayed: true, inFlight: false, seq: 0 };
+
+function klineRtActive() {
+  return state.page === "kline" && document.visibilityState !== "hidden" && Boolean(klineRt.candles);
+}
+
+function stopKlineRt() {
+  if (klineRt.timer) clearTimeout(klineRt.timer);
+  klineRt.timer = null;
+}
+
+function setKlineLive(text, paused = false) {
+  const el = document.querySelector("#kline-live");
+  if (!el) return;
+  el.hidden = false;
+  el.textContent = text;
+  el.classList.toggle("kline-live--paused", paused);
+}
+
+function startKlineRt() {
+  stopKlineRt();
+  klineRt.seq += 1;
+  if (!klineRtActive()) {
+    if (state.page === "kline" && klineRt.candles) setKlineLive("已暂停（页面不可见）", true);
+    return;
+  }
+  setKlineLive(klineRt.delayed ? "知情 · 约 60 秒更新" : "实时 · 约 5 秒更新");
+  scheduleKlineRt(0);
+}
+
+function scheduleKlineRt(delay) {
+  stopKlineRt();
+  const seq = klineRt.seq;
+  klineRt.timer = setTimeout(() => tickKlineRt(seq), delay);
+}
+
+async function tickKlineRt(seq) {
+  if (seq !== klineRt.seq) return;
+  if (!klineRtActive()) { stopKlineRt(); return; }
+  try {
+    const data = await api(`/api/kline/latest?symbol=${encodeURIComponent(klineRt.symbol)}`);
+    if (seq !== klineRt.seq || !klineRtActive()) return;
+    applyKlineBar(data.bar);
+    if (data.poll_seconds) klineRt.pollMs = data.poll_seconds * 1000;
+    setKlineLive(data.delayed ? "知情 · 约 60 秒更新" : "实时 · 约 5 秒更新");
+  } catch (error) {
+    if (seq !== klineRt.seq) return;
+    setKlineLive(`更新失败，稍后重试：${error.message}`, true);
+  }
+  if (seq === klineRt.seq && klineRtActive()) scheduleKlineRt(klineRt.pollMs);
+}
+
+function klinePeriodKey(time, tf) {
+  const d = new Date(time * 1000);
+  if (tf === "1M") return `${d.getUTCFullYear()}-${d.getUTCMonth()}`;
+  if (tf === "1W") return String(Math.floor((time / 86400 + 3) / 7));  // ISO weeks start on Monday
+  return String(time);
+}
+
+function applyKlineBar(bar) {
+  if (!bar || !klineRt.candles) return;
+  const bars = klineRt.bars;
+  const last = bars[bars.length - 1];
+  let next;
+  if (last && klinePeriodKey(last.time, klineRt.tf) === klinePeriodKey(bar.time, klineRt.tf)) {
+    if (klineRt.tf === "1D") {
+      next = { ...bar };
+    } else {
+      next = { ...last, high: Math.max(last.high, bar.high), low: Math.min(last.low, bar.low), close: bar.close };
+    }
+    bars[bars.length - 1] = next;
+  } else if (!last || bar.time > last.time) {
+    next = { ...bar };
+    bars.push(next);
+  } else {
+    return;
+  }
+  klineRt.candles.update({ time: next.time, open: next.open, high: next.high, low: next.low, close: next.close });
+  if (klineRt.tf === "1D") klineRt.volume.update({ time: next.time, value: next.volume, color: next.close >= next.open ? "rgba(38,166,154,.35)" : "rgba(239,83,80,.35)" });
+  const price = document.querySelector("#kline-price");
+  if (price) price.textContent = klinePrice(next.close);
+  const change = (next.close / klineRt.firstOpen - 1) * 100;
+  const changeEl = document.querySelector("#kline-change");
+  if (changeEl) {
+    changeEl.textContent = `${change >= 0 ? "+" : ""}${change.toFixed(2)}%（1Y）`;
+    changeEl.classList.toggle("kline-change--down", change < 0);
+  }
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (state.page !== "kline") { stopKlineRt(); return; }
+  startKlineRt();
+});

@@ -214,6 +214,11 @@ class Handler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             self._call(lambda: service.asset_options((query.get("ticker") or [""])[0]))
             return
+        if parsed.path == "/api/kline/latest":
+            # V2-KLINE-RT: the newest bar for the page's visible-only polling; same token rule.
+            query = parse_qs(parsed.query)
+            self._kline_latest((query.get("symbol") or [""])[0])
+            return
         if parsed.path == "/api/kline":
             # V2-KLINE: K 线行情 bars; read-only, same session-token rule as every API read.
             query = parse_qs(parsed.query)
@@ -413,6 +418,14 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             self._json(kline_data.kline(symbol, tf or None))
+        except kline_data.KlineError as exc:
+            self._json({"error": str(exc)}, 400)
+
+    def _kline_latest(self, symbol: str) -> None:
+        from webui import kline as kline_data
+
+        try:
+            self._json(kline_data.latest(symbol))
         except kline_data.KlineError as exc:
             self._json({"error": str(exc)}, 400)
 
