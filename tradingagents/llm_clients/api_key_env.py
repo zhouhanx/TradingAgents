@@ -11,6 +11,8 @@ prompts for it automatically instead of failing on first API call.
 
 from __future__ import annotations
 
+from .subscriptions import SUBSCRIPTIONS
+
 PROVIDER_API_KEY_ENV: dict[str, str | None] = {
     "openai":     "OPENAI_API_KEY",
     "anthropic":  "ANTHROPIC_API_KEY",
@@ -35,8 +37,8 @@ PROVIDER_API_KEY_ENV: dict[str, str | None] = {
     "kimi":       "MOONSHOT_API_KEY",
     "groq":       "GROQ_API_KEY",
     "nvidia":     "NVIDIA_API_KEY",
-    # A ChatGPT plan authenticates with the person's sign-in, not a key.
-    "chatgpt":    None,
+    # Subscription credentials are isolated from API-key accounts.
+    **dict.fromkeys(SUBSCRIPTIONS),
     # Local runtimes do not authenticate.
     "ollama":     None,
     # Generic OpenAI-compatible endpoint: the client reads this when set (keyed

@@ -8,9 +8,12 @@ canonical pattern:
    not support structured output (rare; mostly older Ollama models), the
    wrap is skipped and the agent uses free-text generation instead.
 2. At invocation, run the structured call and render the result back to
-   markdown. If the structured call itself fails for any reason
-   (malformed JSON from a weak model, transient provider issue), fall
-   back to a plain ``llm.invoke`` so the pipeline never blocks.
+   markdown. If the structured call fails to produce a usable result
+   (malformed JSON from a weak model, no parsed result), fall back to a
+   plain ``llm.invoke`` so the pipeline never blocks. So does a bounded
+   call the model refused with 400/422 (no structured-output support). Any
+   other model call that failed under the call policy (already retried
+   within its budget) is raised instead of being run again.
 
 Centralising the pattern here keeps the agent factories small and ensures
 all three agents log the same warnings when fallback fires.
@@ -74,11 +77,38 @@ def invoke_structured(structured_llm: Any | None, prompt: Any, agent_name: str) 
             raise ValueError("structured output returned no parsed result")
         return result
     except Exception as exc:
+        if _model_call_failed(exc):
+            # The model call itself failed under the call policy, which has
+            # already retried it within its budget. A free-text rerun would
+            # repeat every retry and double the budget (RUN-002 MF1).
+            raise
         logger.warning(
             "%s: structured-output invocation failed (%s); retrying once as free text",
             agent_name, exc,
         )
         return None
+
+
+# A model that rejects the structured request itself (tools / response_format
+# not supported) answers 400 or 422 at once; one free-text request is the
+# pre-RUN-002 behaviour and costs no retries or budget (W25).
+_STRUCTURED_REJECTED = (400, 422)
+
+
+def _model_call_failed(exc: BaseException) -> bool:
+    """Whether ``exc`` is a policy-managed model call that already gave up.
+
+    A parse or schema failure (no call annotation) earns the free-text
+    fallback, and so does a bounded call the server refused with 400/422,
+    which was not retried. A timeout, connection, rate-limit, 5xx, auth or
+    other failure of a bounded call is raised as it is (MF1).
+    """
+    from tradingagents.llm_clients.call_policy import KIND_OTHER, call_info, http_status
+
+    info = call_info(exc)
+    if info is None:
+        return False
+    return not (info.get("kind") == KIND_OTHER and http_status(exc) in _STRUCTURED_REJECTED)
 
 
 def invoke_structured_or_freetext(

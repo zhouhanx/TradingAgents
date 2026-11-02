@@ -10,10 +10,12 @@ from rich.panel import Panel
 
 from cli import updates
 from cli.display import (
+    WELCOME_TITLE,
     console,
 )
 from cli.prefs import load_last_run, sanitize, save_last_run
 from cli.prompts import (
+    TICKER_PROMPT_DEFAULT,
     ask_anthropic_effort,
     ask_gemini_thinking_config,
     ask_glm_region,
@@ -40,6 +42,66 @@ from cli.prompts import (
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.llm_clients.factory import REASONING_EFFORT_PROVIDERS
 from tradingagents.llm_clients.openai_client import check_endpoint
+
+WELCOME_SUBTITLE = "Multi-Agents LLM Financial Trading Framework"
+WELCOME_BODY = "TradingAgents: Multi-Agents LLM Financial Trading Framework - CLI"
+WORKFLOW_LABEL = "Workflow Steps:"
+WORKFLOW_STEPS = "I. Analyst Team → II. Research Team → III. Trader → IV. Risk Management → V. Portfolio Management"
+WELCOME_CREDIT = "Built by [Tauric Research](https://github.com/TauricResearch)"
+WELCOME_CREDIT_URL = "https://github.com/TauricResearch"
+
+DATE_PROMPT = "Enter the analysis date (YYYY-MM-DD)"
+
+
+TICKER_FLAG_PREFIX = "✓ Ticker from --ticker:"
+DATE_FLAG_PREFIX = "✓ Analysis date from --date:"
+DETECTED_ASSET_PREFIX = "Detected asset type:"
+OUTPUT_LANGUAGE_ENV_PREFIX = "✓ Output language from environment:"
+LLM_PROVIDER_ENV_PREFIX = "✓ LLM provider from environment:"
+BACKEND_URL_PREFIX = "✓ Backend URL:"
+THINKING_AGENTS_ENV_PREFIX = "✓ Thinking agents from environment:"
+SELECTED_ANALYSTS_PREFIX = "Selected analysts:"
+GEMINI_THINKING_ENV_LABEL = "Gemini thinking mode"
+OPENAI_REASONING_ENV_LABEL = "Reasoning effort"
+ANTHROPIC_EFFORT_ENV_LABEL = "Claude effort"
+
+
+def ticker_flag_sentence(ticker: str) -> str:
+    return f"{TICKER_FLAG_PREFIX} {ticker}"
+
+
+def analysis_date_flag_sentence(date: str) -> str:
+    return f"{DATE_FLAG_PREFIX} {date}"
+
+
+def detected_asset_sentence(asset_type: str) -> str:
+    return f"{DETECTED_ASSET_PREFIX} {asset_type}"
+
+
+def output_language_env_sentence(language: str) -> str:
+    return f"{OUTPUT_LANGUAGE_ENV_PREFIX} {language}"
+
+
+def llm_provider_env_sentence(provider: str) -> str:
+    return f"{LLM_PROVIDER_ENV_PREFIX} {provider}"
+
+
+def backend_url_sentence(url) -> str:
+    return f"{BACKEND_URL_PREFIX} {url}"
+
+
+def thinking_agents_env_sentence(quick, deep) -> str:
+    return f"{THINKING_AGENTS_ENV_PREFIX} quick={quick}, deep={deep}"
+
+
+def thinking_env_sentence(label: str, value) -> str:
+    return f"✓ {label} from environment: {value}"
+
+
+def selected_analysts_sentence(names) -> str:
+    return f"{SELECTED_ANALYSTS_PREFIX} {', '.join(names)}"
+
+
 
 
 def get_user_selections(flags=None):
@@ -71,6 +133,11 @@ def unattended_gaps(flags) -> list[str]:
     return gaps
 
 
+
+def tier_model_sentence(tier: str, provider: str, variable: str) -> str:
+    return f"The {tier} tier runs on {provider}; set {variable} to one of its models."
+
+
 def _check_tier_providers(main_provider: str, backend_url: str | None = None) -> None:
     """Check each provider the model tiers use (#1440) before the run.
 
@@ -87,7 +154,7 @@ def _check_tier_providers(main_provider: str, backend_url: str | None = None) ->
         if not on_main:
             variable = f"TRADINGAGENTS_{tier.upper()}_THINK_LLM"
             if not os.environ.get(variable):
-                console.print(f"[red]The {tier} tier runs on {provider}; set {variable} to one of its models.[/red]")
+                console.print(f"[red]{tier_model_sentence(tier, provider, variable)}[/red]")
                 raise typer.Exit(code=1)
         # The tier's endpoint, as create_tier_client resolves it.
         url = DEFAULT_CONFIG.get(f"{tier}_think_backend_url") or (backend_url if on_main else None)
@@ -118,19 +185,17 @@ def _prompt_selections(prefs, flags):
         welcome_ascii = f.read()
 
     welcome_content = f"{welcome_ascii}\n"
-    welcome_content += "[bold green]TradingAgents: Multi-Agents LLM Financial Trading Framework - CLI[/bold green]\n\n"
-    welcome_content += "[bold]Workflow Steps:[/bold]\n"
-    welcome_content += "I. Analyst Team → II. Research Team → III. Trader → IV. Risk Management → V. Portfolio Management\n\n"
-    welcome_content += (
-        "[dim]Built by [Tauric Research](https://github.com/TauricResearch)[/dim]"
-    )
+    welcome_content += f"[bold green]{WELCOME_BODY}[/bold green]\n\n"
+    welcome_content += f"[bold]{WORKFLOW_LABEL}[/bold]\n"
+    welcome_content += f"{WORKFLOW_STEPS}\n\n"
+    welcome_content += f"[dim]{WELCOME_CREDIT}[/dim]"
 
     welcome_box = Panel(
         welcome_content,
         border_style="green",
         padding=(1, 2),
-        title="Welcome to TradingAgents",
-        subtitle="Multi-Agents LLM Financial Trading Framework",
+        title=WELCOME_TITLE,
+        subtitle=WELCOME_SUBTITLE,
     )
     console.print(Align.center(welcome_box))
     console.print()
@@ -146,7 +211,7 @@ def _prompt_selections(prefs, flags):
         box_content = f"[bold]{title}[/bold]\n"
         box_content += f"[dim]{prompt}[/dim]"
         if default:
-            box_content += f"\n[dim]Default: {default}[/dim]"
+            box_content += f"\n[dim]{question_default_line(default)}[/dim]"
         return Panel(box_content, border_style="blue", padding=(1, 2))
 
     def thinking_value_or_prompt(env_var, config_key, label, box_title, box_body, prompt_fn):
@@ -158,7 +223,9 @@ def _prompt_selections(prefs, flags):
         """
         if os.environ.get(env_var):
             value = DEFAULT_CONFIG[config_key]
-            console.print(f"[green]✓ {label} from environment:[/green] {value}")
+            sentence = thinking_env_sentence(label, value)
+            prefix, rest = sentence.split(": ", 1)
+            console.print(f"[green]{prefix}:[/green] {rest}")
             return value
         console.print(create_question_box(box_title, box_body))
         return prompt_fn()
@@ -166,13 +233,13 @@ def _prompt_selections(prefs, flags):
     # Step 1: Ticker symbol
     if flags.get("ticker") is not None:
         selected_ticker = _from_flag(parse_ticker, flags["ticker"])
-        console.print(f"[green]✓ Ticker from --ticker:[/green] {selected_ticker}")
+        console.print(f"[green]{TICKER_FLAG_PREFIX}[/green] {selected_ticker}")
     else:
         console.print(
             create_question_box(
                 "Step 1: Ticker Symbol",
                 "Enter the ticker, with exchange suffix when needed (e.g. SPY, 0700.HK, BTC-USD)",
-                "SPY",
+                ticker_question_default(),
             )
         )
         selected_ticker = get_ticker()
@@ -181,19 +248,19 @@ def _prompt_selections(prefs, flags):
     # "stock" on every run.
     if asset_type.value != "stock":
         console.print(
-            f"[green]Detected asset type:[/green] {asset_type.value}"
+            f"[green]{DETECTED_ASSET_PREFIX}[/green] {asset_type.value}"
         )
 
     # Step 2: Analysis date
     if flags.get("date") is not None:
         analysis_date = _from_flag(parse_analysis_date, flags["date"])
-        console.print(f"[green]✓ Analysis date from --date:[/green] {analysis_date}")
+        console.print(f"[green]{DATE_FLAG_PREFIX}[/green] {analysis_date}")
     else:
-        default_date = datetime.datetime.now().strftime("%Y-%m-%d")
+        default_date = analysis_date_question_default()
         console.print(
             create_question_box(
                 "Step 2: Analysis Date",
-                "Enter the analysis date (YYYY-MM-DD)",
+                DATE_PROMPT,
                 default_date,
             )
         )
@@ -203,7 +270,7 @@ def _prompt_selections(prefs, flags):
     if os.environ.get("TRADINGAGENTS_OUTPUT_LANGUAGE"):
         output_language = DEFAULT_CONFIG["output_language"]
         console.print(
-            f"[green]✓ Output language from environment:[/green] {output_language}"
+            f"[green]{OUTPUT_LANGUAGE_ENV_PREFIX}[/green] {output_language}"
         )
     else:
         console.print(
@@ -226,7 +293,7 @@ def _prompt_selections(prefs, flags):
         )
         selected_analysts = select_analysts(asset_type, prefs.get("analysts"))
     console.print(
-        f"[green]Selected analysts:[/green] {', '.join(analyst.value for analyst in selected_analysts)}"
+        f"[green]{SELECTED_ANALYSTS_PREFIX}[/green] {', '.join(analyst.value for analyst in selected_analysts)}"
     )
 
     # Step 5: Research depth (skipped when both round counts are set via env).
@@ -258,8 +325,8 @@ def _prompt_selections(prefs, flags):
         backend_url = resolve_backend_url(
             selected_llm_provider, env_url=DEFAULT_CONFIG["backend_url"]
         )
-        console.print(f"[green]✓ LLM provider from environment:[/green] {selected_llm_provider}")
-        console.print(f"[green]✓ Backend URL:[/green] {backend_url}")
+        console.print(f"[green]{LLM_PROVIDER_ENV_PREFIX}[/green] {selected_llm_provider}")
+        console.print(f"[green]{BACKEND_URL_PREFIX}[/green] {backend_url}")
     else:
         console.print(
             create_question_box(
@@ -304,7 +371,7 @@ def _prompt_selections(prefs, flags):
         selected_shallow_thinker = DEFAULT_CONFIG["quick_think_llm"]
         selected_deep_thinker = DEFAULT_CONFIG["deep_think_llm"]
         console.print(
-            f"[green]✓ Thinking agents from environment:[/green] "
+            f"[green]{THINKING_AGENTS_ENV_PREFIX}[/green] "
             f"quick={selected_shallow_thinker}, deep={selected_deep_thinker}"
         )
     else:
@@ -338,19 +405,19 @@ def _prompt_selections(prefs, flags):
     elif provider_lower == "google":
         thinking_level = thinking_value_or_prompt(
             "TRADINGAGENTS_GOOGLE_THINKING_LEVEL", "google_thinking_level",
-            "Gemini thinking mode", "Step 8: Thinking Mode",
+            GEMINI_THINKING_ENV_LABEL, "Step 8: Thinking Mode",
             "Configure Gemini thinking mode", ask_gemini_thinking_config,
         )
     elif provider_lower in REASONING_EFFORT_PROVIDERS:
         reasoning_effort = thinking_value_or_prompt(
             "TRADINGAGENTS_OPENAI_REASONING_EFFORT", "openai_reasoning_effort",
-            "Reasoning effort", "Step 8: Reasoning Effort",
+            OPENAI_REASONING_ENV_LABEL, "Step 8: Reasoning Effort",
             "Configure OpenAI reasoning effort level", ask_openai_reasoning_effort,
         )
     elif provider_lower == "anthropic":
         anthropic_effort = thinking_value_or_prompt(
             "TRADINGAGENTS_ANTHROPIC_EFFORT", "anthropic_effort",
-            "Claude effort", "Step 8: Effort Level",
+            ANTHROPIC_EFFORT_ENV_LABEL, "Step 8: Effort Level",
             "Configure Claude effort level", ask_anthropic_effort,
         )
 
@@ -371,13 +438,30 @@ def _prompt_selections(prefs, flags):
     }
 
 
+def question_default_line(default: str) -> str:
+    """Visible text of a selection box's default line, without Rich markup."""
+    return f"Default: {default}"
+
+
+def ticker_question_default() -> str:
+    """The ticker question box default. Blank interactive input uses the same symbol."""
+    return TICKER_PROMPT_DEFAULT
+
+
+def analysis_date_question_default(now=None) -> str:
+    """The analysis-date question box default, YYYY-MM-DD."""
+    moment = now or datetime.datetime.now()
+    return moment.strftime("%Y-%m-%d")
+
+
 def get_analysis_date():
     """Get the analysis date from user input."""
     while True:
         date_str = typer.prompt(
-            "", default=datetime.datetime.now().strftime("%Y-%m-%d")
+            "", default=analysis_date_question_default()
         )
         try:
             return parse_analysis_date(date_str)
         except ValueError as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            from cli.prompts import date_retry_error
+            console.print(f"[red]{date_retry_error(str(exc))}[/red]")

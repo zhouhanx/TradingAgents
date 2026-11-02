@@ -221,3 +221,13 @@ __marimo__/
 # Enterprise env file (secrets) and generated run reports
 .env.enterprise
 reports/
+
+# AWR local runtime state
+.awr/state.db
+.awr/state.db-*
+.awr/artifacts/
+.awr/mutations/
+.awr/cache/
+.awr/clients/
+.awr/executions/
+node_modules/

@@ -264,11 +264,40 @@ def test_an_answer_for_another_sign_in_attempt_is_ignored(home, openai):
     assert openai.posts == [] and not auth.AUTH_FILE.exists()
 
 
+# The test plays the browser coming back to 127.0.0.1. A plain urlopen() would follow
+# the user's proxy (HTTP_PROXY or the macOS system proxy via getproxies()) and never
+# reach the loopback listener, so the loopback leg never uses a proxy.
+_LOOPBACK = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def _status(url):
+    assert urllib.parse.urlparse(url).hostname == "127.0.0.1"
     try:
-        return urllib.request.urlopen(url, timeout=5).status
+        return _LOOPBACK.open(url, timeout=5).status
     except urllib.error.HTTPError as exc:
         return exc.code
+
+
+_PROXY = "http://198.18.0.3:1083"  # what Eric's Mac had as a system proxy; unreachable here
+
+
+def _with_a_system_proxy(monkeypatch):
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    for name in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.setenv(name, _PROXY)
+    # macOS reads the system proxy through getproxies(); emulate it on any platform.
+    monkeypatch.setattr(urllib.request, "getproxies", lambda: {"http": _PROXY, "https": _PROXY, "all": _PROXY})
+    monkeypatch.setattr(urllib.request, "proxy_bypass", lambda host: False)
+
+
+@pytest.mark.unit
+def test_loopback_leg_ignores_a_system_or_env_proxy(home, openai, monkeypatch):
+    """M4: with a proxy configured (and no NO_PROXY), the browser leg still reaches 127.0.0.1."""
+    _with_a_system_proxy(monkeypatch)
+    # Sanity: the default opener really would use the proxy here.
+    assert urllib.request.ProxyHandler().proxies["http"] == _PROXY
+    test_the_browser_answer_reaches_the_loopback_and_strays_are_ignored(home, openai, monkeypatch)
 
 
 @pytest.mark.unit

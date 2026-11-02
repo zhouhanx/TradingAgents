@@ -13,14 +13,13 @@ from rich.live import Live
 from cli.display import (
     ANALYST_ORDER,
     AnalystWallTimeTracker,
-    classify_message_type,
+    apply_stream_chunk,
     console,
     create_layout,
     display_complete_report,
     message_buffer,
-    update_analyst_statuses,
+    record_stream_messages,
     update_display,
-    update_research_team_status,
 )
 from cli.selections import depth_from_env, get_user_selections, unattended_gaps
 from cli.stats_handler import StatsCallbackHandler
@@ -42,6 +41,46 @@ def _run_directory(config: dict, ticker: str, trade_date: str) -> Path:
     return Path(config["results_dir"]) / safe_ticker_component(ticker) / trade_date
 
 
+
+TOOL_CALL_LABEL = "Tool Call"
+MESSAGE_TOOL_LOG_NAME = "message_tool.log"
+
+
+def selected_ticker_message(ticker: str) -> str:
+    return f"Selected ticker: {ticker}"
+
+
+def completed_analysis_message(date: str) -> str:
+    return f"Completed analysis for {date}"
+
+
+def message_tool_message_line(timestamp: str, message_type: str, content: str) -> str:
+    """One message_tool.log row. Newlines become spaces; content is not truncated."""
+    shown = str(content).replace("\n", " ")
+    return f"{timestamp} [{message_type}] {shown}\n"
+
+
+def message_tool_call_line(timestamp: str, tool_name: str, args) -> str:
+    """One message_tool.log tool row: ``HH:MM:SS [Tool Call] name(k=v, ...)``."""
+    if isinstance(args, dict):
+        rendered = ", ".join(f"{key}={value}" for key, value in args.items())
+    else:
+        rendered = ""
+    return f"{timestamp} [{TOOL_CALL_LABEL}] {tool_name}({rendered})\n"
+
+
+def analysis_date_message(date: str) -> str:
+    return f"Analysis date: {date}"
+
+
+def checkpoint_resume_message(ticker: str, date: str) -> str:
+    return f"Resuming the saved run for {ticker} on {date}"
+
+
+def checkpoint_fresh_message(ticker: str, date: str) -> str:
+    return f"Starting fresh for {ticker} on {date}"
+
+
 def _announce_checkpoint_state(graph, ticker: str, trade_date: str) -> None:
     """Say whether this run resumed a saved one, where the user can see it.
 
@@ -50,10 +89,43 @@ def _announce_checkpoint_state(graph, ticker: str, trade_date: str) -> None:
     """
     if getattr(graph, "_resuming", False):
         message_buffer.add_message(
-            "System", f"Resuming the saved run for {ticker} on {trade_date}"
+            "System", checkpoint_resume_message(ticker, trade_date)
         )
     else:
-        message_buffer.add_message("System", f"Starting fresh for {ticker} on {trade_date}")
+        message_buffer.add_message("System", checkpoint_fresh_message(ticker, trade_date))
+
+
+
+def depth_override_notice(key: str, value, env_var: str) -> tuple[str, str]:
+    """The green prefix and the remainder of one partial environment override."""
+    return (
+        f"✓ {key} from environment:",
+        f" {value} (set by {env_var}, so the research depth you chose does not apply to it)",
+    )
+
+
+def depth_environment_lines(config: dict | None = None) -> list[str]:
+    """Visible lines the CLI prints when environment round counts own the depth.
+
+    Both variables skip the depth question. One variable keeps that count and
+    says the chosen depth does not apply to it.
+    """
+    source = config if config is not None else DEFAULT_CONFIG
+    if depth_from_env():
+        return [
+            "✓ Research depth from environment: "
+            f"{source['max_debate_rounds']} debate / "
+            f"{source['max_risk_discuss_rounds']} risk rounds"
+        ]
+    lines = []
+    for env_var, key in (
+        ("TRADINGAGENTS_MAX_DEBATE_ROUNDS", "max_debate_rounds"),
+        ("TRADINGAGENTS_MAX_RISK_ROUNDS", "max_risk_discuss_rounds"),
+    ):
+        if os.environ.get(env_var):
+            prefix, rest = depth_override_notice(key, source[key], env_var)
+            lines.append(prefix + rest)
+    return lines
 
 
 def _build_run_config(selections: dict, checkpoint: bool | None) -> dict:
@@ -75,10 +147,8 @@ def _build_run_config(selections: dict, checkpoint: bool | None) -> dict:
         elif depth_was_asked:
             # The depth question appeared (it is skipped only when both are
             # set), so say which half of the answer the environment overrode.
-            console.print(
-                f"[green]✓ {key} from environment:[/green] {config[key]} "
-                f"(set by {env_var}, so the research depth you chose does not apply to it)"
-            )
+            prefix, rest = depth_override_notice(key, config[key], env_var)
+            console.print(f"[green]{prefix}[/green]{rest}")
     config["quick_think_llm"] = selections["quick_think_llm"]
     config["deep_think_llm"] = selections["deep_think_llm"]
     config["backend_url"] = selections["backend_url"]
@@ -103,7 +173,7 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
     if not (sys.stdin and sys.stdin.isatty()):
         gaps = unattended_gaps(flags)
         if gaps:
-            console.print("[red]No terminal to answer the setup questions. Set:[/red]")
+            console.print(f"[red]{HEADLESS_SETUP_PREFIX}[/red]")
             for gap in gaps:
                 console.print(f"  {gap}")
             raise typer.Exit(code=1)
@@ -136,7 +206,7 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
     results_dir.mkdir(parents=True, exist_ok=True)
     report_dir = results_dir / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
-    log_file = results_dir / "message_tool.log"
+    log_file = results_dir / MESSAGE_TOOL_LOG_NAME
     log_file.touch(exist_ok=True)
 
     def save_message_decorator(obj, func_name):
@@ -146,9 +216,8 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
         def wrapper(*args, **kwargs):
             func(*args, **kwargs)
             timestamp, message_type, content = obj.messages[-1]
-            content = content.replace("\n", " ")  # Replace newlines with spaces
             with open(log_file, "a", encoding="utf-8") as f:
-                f.write(f"{timestamp} [{message_type}] {content}\n")
+                f.write(message_tool_message_line(timestamp, message_type, content))
         return wrapper
 
     def save_tool_call_decorator(obj, func_name):
@@ -157,10 +226,9 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
         @wraps(func)
         def wrapper(*args, **kwargs):
             func(*args, **kwargs)
-            timestamp, tool_name, args = obj.tool_calls[-1]
-            args_str = ", ".join(f"{k}={v}" for k, v in args.items())
+            timestamp, tool_name, tool_args = obj.tool_calls[-1]
             with open(log_file, "a", encoding="utf-8") as f:
-                f.write(f"{timestamp} [Tool Call] {tool_name}({args_str})\n")
+                f.write(message_tool_call_line(timestamp, tool_name, tool_args))
         return wrapper
 
     def save_report_section_decorator(obj, func_name):
@@ -190,15 +258,17 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
         # Initial display
         update_display(layout, stats_handler=stats_handler, start_time=start_time)
 
-        message_buffer.add_message("System", f"Selected ticker: {selections['ticker']}")
+        message_buffer.add_message("System", selected_ticker_message(selections["ticker"]))
         if selections["asset_type"] != "stock":
-            message_buffer.add_message("System", f"Detected asset type: {selections['asset_type']}")
+            from cli.selections import detected_asset_sentence
+            message_buffer.add_message("System", detected_asset_sentence(selections["asset_type"]))
         message_buffer.add_message(
-            "System", f"Analysis date: {selections['analysis_date']}"
+            "System", analysis_date_message(selections["analysis_date"])
         )
+        from cli.selections import selected_analysts_sentence
         message_buffer.add_message(
             "System",
-            f"Selected analysts: {', '.join(analyst.value for analyst in selections['analysts'])}",
+            selected_analysts_sentence(analyst.value for analyst in selections["analysts"]),
         )
         update_display(layout, stats_handler=stats_handler, start_time=start_time)
 
@@ -239,104 +309,13 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
         trace = []
         try:
             for messages, chunk in graph.stream_run(graph.checkpoint_input(init_agent_state), **args):
-                for message in messages:
-                    msg_id = getattr(message, "id", None)
-                    if msg_id is not None:
-                        if msg_id in message_buffer._processed_message_ids:
-                            continue
-                        message_buffer._processed_message_ids.add(msg_id)
-
-                    msg_type, content = classify_message_type(message)
-                    if content and content.strip():
-                        message_buffer.add_message(msg_type, content)
-
-                    if hasattr(message, "tool_calls") and message.tool_calls:
-                        for tool_call in message.tool_calls:
-                            if isinstance(tool_call, dict):
-                                message_buffer.add_tool_call(tool_call["name"], tool_call["args"])
-                            else:
-                                message_buffer.add_tool_call(tool_call.name, tool_call.args)
+                record_stream_messages(message_buffer, messages)
 
                 if chunk is None:   # a step inside an analyst's graph: messages only
                     update_display(layout, stats_handler=stats_handler, start_time=start_time)
                     continue
 
-                update_analyst_statuses(
-                    message_buffer,
-                    chunk,
-                    wall_time_tracker=analyst_wall_time_tracker,
-                )
-
-                # Research Team - Handle Investment Debate State
-                if chunk.get("investment_debate_state"):
-                    debate_state = chunk["investment_debate_state"]
-                    bull_hist = debate_state.get("bull_history", "").strip()
-                    bear_hist = debate_state.get("bear_history", "").strip()
-                    judge = (chunk.get("investment_plan") or "").strip()
-
-                    # Only update status when there's actual content
-                    if bull_hist or bear_hist:
-                        update_research_team_status("in_progress")
-                    if bull_hist:
-                        message_buffer.update_report_section(
-                            "investment_plan", f"### Bull Researcher Analysis\n{bull_hist}"
-                        )
-                    if bear_hist:
-                        message_buffer.update_report_section(
-                            "investment_plan", f"### Bear Researcher Analysis\n{bear_hist}"
-                        )
-                    if judge:
-                        message_buffer.update_report_section(
-                            "investment_plan", f"### Research Manager Decision\n{judge}"
-                        )
-                        update_research_team_status("completed")
-                        message_buffer.update_agent_status("Trader", "in_progress")
-
-                # Trading Team
-                if chunk.get("trader_investment_plan"):
-                    message_buffer.update_report_section(
-                        "trader_investment_plan", chunk["trader_investment_plan"]
-                    )
-                    if message_buffer.agent_status.get("Trader") != "completed":
-                        message_buffer.update_agent_status("Trader", "completed")
-                        message_buffer.update_agent_status("Aggressive Analyst", "in_progress")
-
-                # Risk Management Team - Handle Risk Debate State
-                if chunk.get("risk_debate_state"):
-                    risk_state = chunk["risk_debate_state"]
-                    agg_hist = risk_state.get("aggressive_history", "").strip()
-                    con_hist = risk_state.get("conservative_history", "").strip()
-                    neu_hist = risk_state.get("neutral_history", "").strip()
-                    judge = (chunk.get("final_trade_decision") or "").strip()
-
-                    if agg_hist:
-                        if message_buffer.agent_status.get("Aggressive Analyst") != "completed":
-                            message_buffer.update_agent_status("Aggressive Analyst", "in_progress")
-                        message_buffer.update_report_section(
-                            "final_trade_decision", f"### Aggressive Analyst Analysis\n{agg_hist}"
-                        )
-                    if con_hist:
-                        if message_buffer.agent_status.get("Conservative Analyst") != "completed":
-                            message_buffer.update_agent_status("Conservative Analyst", "in_progress")
-                        message_buffer.update_report_section(
-                            "final_trade_decision", f"### Conservative Analyst Analysis\n{con_hist}"
-                        )
-                    if neu_hist:
-                        if message_buffer.agent_status.get("Neutral Analyst") != "completed":
-                            message_buffer.update_agent_status("Neutral Analyst", "in_progress")
-                        message_buffer.update_report_section(
-                            "final_trade_decision", f"### Neutral Analyst Analysis\n{neu_hist}"
-                        )
-                    if judge and message_buffer.agent_status.get("Portfolio Manager") != "completed":
-                        message_buffer.update_agent_status("Portfolio Manager", "in_progress")
-                        message_buffer.update_report_section(
-                            "final_trade_decision", f"### Portfolio Manager Decision\n{judge}"
-                        )
-                        message_buffer.update_agent_status("Aggressive Analyst", "completed")
-                        message_buffer.update_agent_status("Conservative Analyst", "completed")
-                        message_buffer.update_agent_status("Neutral Analyst", "completed")
-                        message_buffer.update_agent_status("Portfolio Manager", "completed")
-
+                apply_stream_chunk(message_buffer, chunk, analyst_wall_time_tracker)
                 update_display(layout, stats_handler=stats_handler, start_time=start_time)
 
                 trace.append(chunk)
@@ -362,7 +341,7 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
             message_buffer.update_agent_status(agent, "completed")
 
         message_buffer.add_message(
-            "System", f"Completed analysis for {selections['analysis_date']}"
+            "System", completed_analysis_message(selections["analysis_date"])
         )
         message_buffer.add_message("System", analyst_wall_time_tracker.format_summary())
 
@@ -373,20 +352,35 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
         update_display(layout, stats_handler=stats_handler, start_time=start_time)
 
     # Post-analysis prompts (outside Live context for clean interaction)
-    console.print("\n[bold cyan]Analysis Complete![/bold cyan]\n")
+    console.print(f"\n[bold cyan]{ANALYSIS_COMPLETE}[/bold cyan]\n")
 
     # A decision nobody can read is not a position. Say so here rather than
     # leaving the run to look like a normal result.
     if is_review(run_rating(final_state)):
-        console.print(
-            "[yellow]No rating could be read from the final decision, so this run "
-            "is recorded for review rather than as a position. Re-run, or read the "
-            "decision text below and judge it yourself.[/yellow]\n"
-        )
+        console.print(f"[yellow]{REVIEW_SENTENCE}[/yellow]\n")
     console.print(f"[dim]{analyst_wall_time_tracker.format_summary()}[/dim]")
 
     _offer_reports(final_state, graph, selections["ticker"],
                    save=flags.get("save"), show=flags.get("show"), html=flags.get("html"))
+
+
+ANALYSIS_COMPLETE = "Analysis Complete!"
+REVIEW_SENTENCE = (
+    "No rating could be read from the final decision, so this run "
+    "is recorded for review rather than as a position. Re-run, or read the "
+    "decision text below and judge it yourself."
+)
+HEADLESS_SETUP_PREFIX = "No terminal to answer the setup questions. Set:"
+REPORT_SAVED_PREFIX = "✓ Report saved to:"
+COMPLETE_REPORT_PREFIX = "  Complete report:"
+HTML_REPORT_PREFIX = "  HTML report:"
+SAVE_ERROR_PREFIX = "Error saving report:"
+SAVE_REPORT_PROMPT = "Save report?"
+SAVE_PATH_PROMPT = "Save path (press Enter for default)"
+HTML_PROMPT = "Also save it as an HTML page?"
+SHOW_PROMPT = "Display full report on screen?"
+OPEN_BROWSER_PROMPT = "Open it in your browser?"
+BROWSER_FAILED_PREFIX = "Could not open a browser; the page is at:"
 
 
 def _yes(question: str) -> bool:
@@ -413,14 +407,14 @@ def _graphical_browser():
 def _open_page(page: Path) -> None:
     """Offer to open the saved page in a browser window, and say where it is if opening fails."""
     browser = _graphical_browser()
-    if browser is None or not _yes("Open it in your browser?"):
+    if browser is None or not _yes(OPEN_BROWSER_PROMPT):
         return
     try:
         opened = browser.open(page.as_uri())
     except (webbrowser.Error, OSError):
         opened = False
     if not opened:
-        console.print(f"  [dim]Could not open a browser; the page is at:[/dim] {page}")
+        console.print(f"  [dim]{BROWSER_FAILED_PREFIX}[/dim] {page}")
 
 
 def _offer_reports(final_state, graph, ticker, save=None, show=None, html=None):
@@ -432,7 +426,7 @@ def _offer_reports(final_state, graph, ticker, save=None, show=None, html=None):
     """
     asked = save is None
     if asked:
-        save = typer.prompt("Save report?", default="Y").strip().upper() in ("Y", "YES", "")
+        save = typer.prompt(SAVE_REPORT_PROMPT, default="Y").strip().upper() in ("Y", "YES", "")
     if save:
         # Under results_dir, not the working directory: in Docker the working
         # directory is inside the container and the report goes with it, while
@@ -440,25 +434,25 @@ def _offer_reports(final_state, graph, ticker, save=None, show=None, html=None):
         save_path = graph.default_report_path(ticker)
         if asked:   # someone at the prompt may pick another folder
             save_path = Path(typer.prompt(
-                "Save path (press Enter for default)", default=str(save_path)
+                SAVE_PATH_PROMPT, default=str(save_path)
             ).strip())
         if html is None:
-            html = _yes("Also save it as an HTML page?") if asked else True
+            html = _yes(HTML_PROMPT) if asked else True
         saved = False
         try:
             report_file = graph.save_reports(final_state, ticker, save_path, html=html)
             saved = True
-            console.print(f"\n[green]✓ Report saved to:[/green] {save_path.resolve()}")
-            console.print(f"  [dim]Complete report:[/dim] {report_file.name}")
+            console.print(f"\n[green]{REPORT_SAVED_PREFIX}[/green] {save_path.resolve()}")
+            console.print(f"[dim]{COMPLETE_REPORT_PREFIX}[/dim] {report_file.name}")
         except Exception as e:
-            console.print(f"[red]Error saving report: {e}[/red]")
+            console.print(f"[red]{SAVE_ERROR_PREFIX} {e}[/red]")
         if saved and html:
             page = (save_path / "complete_report.html").resolve()
-            console.print(f"  [dim]HTML report:[/dim] {page.name}")
+            console.print(f"[dim]{HTML_REPORT_PREFIX}[/dim] {page.name}")
             if asked:
                 _open_page(page)
 
     if show is None:
-        show = typer.prompt("\nDisplay full report on screen?", default="Y").strip().upper() in ("Y", "YES", "")
+        show = typer.prompt("\n" + SHOW_PROMPT, default="Y").strip().upper() in ("Y", "YES", "")
     if show:
         display_complete_report(final_state)

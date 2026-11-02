@@ -74,6 +74,19 @@ def _coerce_max_retries(value):
     return n
 
 
+def _coerce_call_budget(value):
+    """Validate an ``llm_call_budget`` value to positive seconds."""
+    if isinstance(value, bool):
+        raise ValueError(f"llm_call_budget must be a number of seconds, not a boolean: {value!r}")
+    try:
+        n = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"llm_call_budget must be a number of seconds, got {value!r}") from exc
+    if not n > 0:
+        raise ValueError(f"llm_call_budget must be > 0, got {value!r}")
+    return n
+
+
 def _coerce_max_tokens(value):
     """Validate a ``max_tokens`` value to a positive int (env vars are strings)."""
     if isinstance(value, bool):
@@ -130,6 +143,17 @@ def build_llm_kwargs(config: dict) -> dict[str, Any]:
     if max_tokens is not None and max_tokens != "":
         key = "max_output_tokens" if provider == "google" else "max_tokens"
         kwargs[key] = _coerce_max_tokens(max_tokens)
+
+    timeout = config.get("timeout")
+    if timeout not in (None, ""):
+        kwargs["timeout"] = float(timeout)
+
+    # Wall-clock budget for one model call, retries included (RUN-002). Set, it
+    # makes the OpenAI-compatible clients retry in one bounded layer; unset, they
+    # keep the SDK's own retries. Signed-in plans are always bounded.
+    budget = config.get("llm_call_budget")
+    if budget not in (None, ""):
+        kwargs["call_budget"] = _coerce_call_budget(budget)
 
     return kwargs
 

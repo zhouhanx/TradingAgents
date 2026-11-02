@@ -11,38 +11,68 @@ from pathlib import Path
 
 from tradingagents.agents.rating import run_rating
 
+ANALYSIS_DATE_LABEL = "Analysis date"
+RATING_LABEL = "Rating"
+GENERATED_LABEL = "Generated"
+DATA_VENDORS_LABEL = "Data vendors"
+MEMORY_LOG_LABEL = "Memory log"
+REPORT_TITLE_PREFIX = "Trading Analysis Report"
 
 def analyst_names(keys) -> list[str]:
     """The analysts as users select them: the sentiment analyst's key is "social"."""
     return ["sentiment" if key == "social" else key for key in keys or []]
 
 
+def model_line(settings: dict | None) -> str:
+    """The model clause written in the report header.
+
+    A tier on its own provider is named, matching the saved ``- TradingAgents``
+    line. Missing values stay ``?`` rather than being invented.
+    """
+    s = (settings or {}).get
+    deep_provider = s("deep_think_provider") or s("llm_provider", "?")
+    quick_provider = s("quick_think_provider") or s("llm_provider", "?")
+    if deep_provider == quick_provider:
+        models = f"{deep_provider}, deep {s('deep_think_llm', '?')}, quick {s('quick_think_llm', '?')}"
+    else:
+        models = (f"deep {deep_provider} {s('deep_think_llm', '?')}, "
+                  f"quick {quick_provider} {s('quick_think_llm', '?')}")
+    return f"TradingAgents {s('version', '?')}: {models}"
+
+
+def analysts_line(settings: dict | None) -> str:
+    """The analyst clause in the report header. Sentiment's key is shown as sentiment."""
+    s = (settings or {}).get
+    return (f"Analysts: {', '.join(analyst_names(s('analysts')))}; "
+            f"research debate rounds {s('max_debate_rounds', '?')}, "
+            f"risk debate rounds {s('max_risk_discuss_rounds', '?')}")
+
+
+def vendors_line(settings: dict | None) -> str | None:
+    """The vendor clause, or None when the run has no vendor settings to name."""
+    s = (settings or {}).get
+    vendors = {**(s("data_vendors") or {}), **(s("tool_vendors") or {})}
+    if not vendors:
+        return None
+    return f"{DATA_VENDORS_LABEL}: " + ", ".join(f"{key} {value}" for key, value in vendors.items())
+
+
 def _header(ticker: str, final_state: dict, settings: dict | None) -> str:
     """The report's title and what produced it: analysis date, version, models, analysts, vendors."""
-    lines = [f"# Trading Analysis Report: {ticker}", ""]
+    lines = [f"# {REPORT_TITLE_PREFIX}: {ticker}", ""]
     if final_state.get("trade_date"):
-        lines.append(f"- Analysis date: {final_state['trade_date']}")
+        lines.append(f"- {ANALYSIS_DATE_LABEL}: {final_state['trade_date']}")
     if final_state.get("final_trade_decision"):
-        lines.append(f"- Rating: {run_rating(final_state)}")
-    lines.append(f"- Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append(f"- {RATING_LABEL}: {run_rating(final_state)}")
+    lines.append(f"- {GENERATED_LABEL}: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     if settings:
-        s = settings.get
-        deep_provider = s("deep_think_provider") or s("llm_provider", "?")
-        quick_provider = s("quick_think_provider") or s("llm_provider", "?")
-        if deep_provider == quick_provider:
-            models = f"{deep_provider}, deep {s('deep_think_llm', '?')}, quick {s('quick_think_llm', '?')}"
-        else:   # each tier on its own provider (#1440)
-            models = (f"deep {deep_provider} {s('deep_think_llm', '?')}, "
-                      f"quick {quick_provider} {s('quick_think_llm', '?')}")
-        lines.append(f"- TradingAgents {s('version', '?')}: {models}")
-        lines.append(f"- Analysts: {', '.join(analyst_names(s('analysts')))}; "
-                     f"research debate rounds {s('max_debate_rounds', '?')}, "
-                     f"risk debate rounds {s('max_risk_discuss_rounds', '?')}")
-        vendors = {**(s("data_vendors") or {}), **(s("tool_vendors") or {})}
+        lines.append(f"- {model_line(settings)}")
+        lines.append(f"- {analysts_line(settings)}")
+        vendors = vendors_line(settings)
         if vendors:
-            lines.append("- Data vendors: " + ", ".join(f"{k} {v}" for k, v in vendors.items()))
+            lines.append(f"- {vendors}")
     if final_state.get("memory_note"):
-        lines.append(f"- Memory log: {final_state['memory_note']}")
+        lines.append(f"- {MEMORY_LOG_LABEL}: {final_state['memory_note']}")
     return "\n".join(lines) + "\n\n"
 
 

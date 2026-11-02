@@ -1,0 +1,10 @@
+# PKG-001 / W99: ship only the intended WebUI static files (top-level + icons/),
+# never nested trees such as static/node_modules/. Explicit globs; prune junk.
+include tradingagents.sh
+include webui/static/*.html webui/static/*.css webui/static/*.js
+include webui/static/*.svg webui/static/*.png
+recursive-include webui/static/icons *
+prune webui/node_modules
+prune webui/static/node_modules
+exclude webui/package.json webui/package-lock.json webui/API-NOTES.md
+global-exclude __pycache__ *.py[cod] .DS_Store *.map

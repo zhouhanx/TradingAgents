@@ -207,6 +207,9 @@ def upgrade_command(dist=None) -> str | None:
     return f"git -C {target} pull && {install} {'-e ' if editable else ''}{target}"
 
 
+WHATS_NEW_TITLE = "What's new"
+
+
 def show(console) -> None:
     """Print what's new from the cache, under the welcome panel."""
     from rich.panel import Panel
@@ -216,5 +219,5 @@ def show(console) -> None:
 
     lines = messages(read_cache(), running=__version__, upgrade=upgrade_command)
     if lines:
-        console.print(Panel(Text("\n".join(lines)), border_style="cyan", padding=(1, 2), title="What's new"))
+        console.print(Panel(Text("\n".join(lines)), border_style="cyan", padding=(1, 2), title=WHATS_NEW_TITLE))
         console.print()

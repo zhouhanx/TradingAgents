@@ -1,0 +1,6 @@
+{
+  "name": "tradingagents-webui-checks",
+  "private": true,
+  "scripts": { "test": "node --test ../tests/webui_interactions.cjs" },
+  "devDependencies": { "jsdom": "^29.0.0" }
+}

@@ -44,6 +44,30 @@ def _own_file_locations():
 _own_file_locations()
 
 
+# One fixed terminal for the whole suite, whatever the caller's shell has (Eric's has
+# COLUMNS=0; agents run with TERM=dumb, FORCE_COLOR=0, NO_COLOR=1). Several tests
+# compare text captured in-process (Rich/typer, sized when the CLI is imported) with
+# the output of a ``python -m cli.main`` subprocess or a CliRunner, and Rich/typer
+# wrap, box-split or colour that text by COLUMNS/LINES/TERM/FORCE_COLOR. Pinned here,
+# before the package is imported, and again around every test (``_pinned_terminal``)
+# so subprocesses and CliRunner inherit the same values. A test of terminal handling
+# sets its own with monkeypatch.
+PINNED_TERMINAL = {"COLUMNS": "220", "LINES": "50", "TERM": "xterm-256color"}
+UNPINNED_TERMINAL = ("FORCE_COLOR", "NO_COLOR", "TERMINAL_WIDTH", "CLICOLOR_FORCE", "PY_COLORS",
+                     "TTY_COMPATIBLE", "TTY_INTERACTIVE", "JUPYTER_COLUMNS", "JUPYTER_LINES",
+                     "_TYPER_FORCE_DISABLE_TERMINAL", "TYPER_USE_RICH")
+
+
+def _pin_terminal(setenv=os.environ.__setitem__, delenv=lambda name: os.environ.pop(name, None)):
+    for name, value in PINNED_TERMINAL.items():
+        setenv(name, value)
+    for name in UNPINNED_TERMINAL:
+        delenv(name)
+
+
+_pin_terminal()
+
+
 def pytest_configure(config):
     for marker in ("unit", "integration", "smoke"):
         config.addinivalue_line("markers", f"{marker}: {marker}-level tests")
@@ -54,6 +78,13 @@ def pytest_configure(config):
     import yfinance
 
     yfinance.set_tz_cache_location(tempfile.mkdtemp(prefix="tradingagents-tests-yf-"))
+
+
+@pytest.fixture(autouse=True)
+def _pinned_terminal(monkeypatch):
+    """Re-pin the terminal around every test, so one that changed os.environ directly
+    cannot leak its COLUMNS/TERM into the next test's subprocesses."""
+    _pin_terminal(monkeypatch.setenv, lambda name: monkeypatch.delenv(name, raising=False))
 
 
 @pytest.fixture(autouse=True)

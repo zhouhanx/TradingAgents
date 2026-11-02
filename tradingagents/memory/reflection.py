@@ -2,6 +2,13 @@
 
 from typing import Any
 
+ALPHA_VS_LABEL = "Alpha vs"
+
+
+def alpha_vs_line(benchmark_name: str, alpha_return: float) -> str:
+    """The alpha sentence sent to the reflection model. It is not a log field."""
+    return f"{ALPHA_VS_LABEL} {benchmark_name}: {alpha_return:+.1%}"
+
 
 class Reflector:
     """Handles reflection on trading decisions."""
@@ -55,7 +62,7 @@ class Reflector:
                 "human",
                 (
                     f"Raw return over {holding_days} trading days: {raw_return:+.1%}\n"
-                    f"Alpha vs {benchmark_name}: {alpha_return:+.1%}\n\n"
+                    f"{alpha_vs_line(benchmark_name, alpha_return)}\n\n"
                     f"Final Decision:\n{final_decision}"
                 ),
             ),

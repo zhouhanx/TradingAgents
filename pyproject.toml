@@ -35,6 +35,7 @@ dev = [
     "ruff>=0.16",
     "pytest>=8.0",
     "pytest-subtests>=0.13",
+    "setuptools>=61.0",   # PKG-001: tests build the wheel and sdist
 ]
 # Amazon Bedrock support (AWS SigV4 auth + boto3). Optional so the core install
 # stays lean: pip install "tradingagents[bedrock]".
@@ -44,16 +45,28 @@ bedrock = [
 
 [project.scripts]
 tradingagents = "cli.main:app"
+# PKG-001: tradingagents.sh runs this installed entry point; tradingagents-web
+# starts the WebUI console straight from the installed package.
+tradingagents-launcher = "cli.launcher:main"
+tradingagents-web = "webui.server:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "tradingagents.__version__"}
 
 [tool.setuptools.packages.find]
-include = ["tradingagents*", "cli*"]
+include = ["tradingagents*", "cli*", "webui*"]
+exclude = ["webui.node_modules*"]
 
 [tool.setuptools.package-data]
 cli = ["static/*"]
 tradingagents = ["assets/*.svg"]
+# PKG-001: the WebUI's static files ship with the package. Its fonts are the
+# system font stacks in console.css/app.css (no font files, no external requests).
+webui = ["static/*.html", "static/*.css", "static/*.js", "static/icons/*"]
+
+[tool.setuptools.exclude-package-data]
+# package.json / package-lock.json / node_modules only drive the DOM tests (npm test).
+webui = ["package.json", "package-lock.json", "node_modules/*", "static/node_modules/*", "API-NOTES.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

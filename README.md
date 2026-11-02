@@ -135,9 +135,9 @@ uv venv --python 3.13
 source .venv/bin/activate
 ```
 
-Install the package and its dependencies (`uv pip install .` with uv):
+Install the package and its dependencies (`uv pip install -e ".[dev]"` with uv):
 ```bash
-pip install .
+pip install -e ".[dev]"
 ```
 
 ### Docker
@@ -331,6 +331,8 @@ _, decision = ta.propagate("NVDA", "2026-09-01", portfolio=portfolio)
 The CLI takes the same content as a JSON file: `tradingagents --portfolio my_book.json`.
 
 An empty `positions` list means a flat book, which is different from passing nothing. A run without a portfolio is never treated as flat.
+
+For `--portfolio` (and the WebUI's step-1 持仓 fields) every position needs `average_price` greater than 0. `quantity` is optional (negative means short, 0 is refused; leave it out when only the cost is known, and the agents see "held (size not given)"). Both must be JSON numbers. A holdings JSON imported in the WebUI is read as before WEBUI-006: a position may give only its `quantity` (the agents then see no average price), but it needs at least one of the two, and the same number checks apply. In the WebUI, an imported holdings JSON (保存与续跑 → 导入持仓 JSON) is used as is — cash and every position — instead of step 1's 是否持仓 answer; step 1 then shows 「已从 JSON 导入持仓，第 1 步填的不再使用」 read-only with 「清除导入」, and the confirm page names the source.
 
 ## Persistence and Recovery
 

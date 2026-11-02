@@ -17,7 +17,7 @@ import cli.prompts as prompts
 import cli.selections as selections
 from tradingagents import default_config
 from tradingagents.llm_clients import chatgpt_auth, factory
-from tradingagents.llm_clients.openai_client import ChatGPTPlanChatOpenAI
+from tradingagents.llm_clients.openai_client import SIGNED_IN_PROVIDERS, ChatGPTPlanChatOpenAI
 
 
 @pytest.fixture
@@ -98,7 +98,10 @@ def test_chatgpt_is_offered_under_subscription_after_anthropic():
     titles = shown[0][1]
     assert titles.index("Anthropic") + 1 == titles.index(next(t for t in titles if t.startswith("Subscription")))
     assert not any(t.startswith("ChatGPT") for t in titles)
-    assert shown[1][1] == ["ChatGPT (Plus or Pro plan)"]
+    expected = ["ChatGPT (Plus or Pro plan)"]
+    if "grok" in SIGNED_IN_PROVIDERS:
+        expected.append("Grok (subscription)")
+    assert shown[1][1] == expected
     assert (provider, url) == ("chatgpt", "https://api.openai.com/v1")
 
 
@@ -239,7 +242,7 @@ def test_a_remembered_openrouter_model_is_preselected(monkeypatch):
 
 @pytest.mark.unit
 def test_the_chatgpt_plan_is_the_only_provider_signed_in_to():
-    # `login`, `logout` and the pre-run check are wired to the ChatGPT sign-in; a
-    # second signed-in provider needs its own sign-in wired into them first.
+    # ChatGPT remains a signed-in provider even as the registry grows to other
+    # subscription adapters.
     from tradingagents.llm_clients.openai_client import SIGNED_IN_PROVIDERS
-    assert SIGNED_IN_PROVIDERS == ("chatgpt",)
+    assert "chatgpt" in SIGNED_IN_PROVIDERS

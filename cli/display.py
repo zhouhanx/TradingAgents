@@ -22,6 +22,85 @@ from tradingagents.graph.analyst_execution import (
 
 console = Console()
 
+WELCOME_TITLE = "Welcome to TradingAgents"
+LIVE_WELCOME_BODY = "Welcome to TradingAgents CLI"
+LIVE_CREDIT = "© [Tauric Research](https://github.com/TauricResearch)"
+PROGRESS_TITLE = "Progress"
+PROGRESS_COLUMNS = ("Team", "Agent", "Status")
+MESSAGES_TITLE = "Messages & Tools"
+MESSAGE_COLUMNS = ("Time", "Type", "Content")
+MESSAGE_LIMIT = 12
+CURRENT_REPORT_TITLE = "Current Report"
+WAITING_REPORT = "Waiting for analysis report..."
+COMPLETE_REPORT_RULE = "Complete Analysis Report"
+AGENTS_STAT = "Agents"
+LLM_STAT = "LLM"
+TOOLS_STAT = "Tools"
+TOKENS_STAT = "Tokens"
+TOKENS_EMPTY = "Tokens: --"
+# The endpoint would not report usage for some calls (it refused stream usage).
+TOKENS_UNKNOWN = "Tokens: 未知"
+TOKENS_PARTLY_UNKNOWN = "(部分未知)"
+REPORTS_STAT = "Reports"
+
+
+
+# Current Report panel titles. Keys are MessageBuffer.report_sections.
+LIVE_REPORT_SECTION_TITLES = {
+    "market_report": "Market Analysis",
+    "sentiment_report": "Social Sentiment",
+    "news_report": "News Analysis",
+    "fundamentals_report": "Fundamentals Analysis",
+    "investment_plan": "Research Team Decision",
+    "trader_investment_plan": "Trading Team Plan",
+    "final_trade_decision": "Portfolio Management Decision",
+}
+
+# Headings written into streamed debate and risk text. These are not the panel titles.
+STREAM_REPORT_HEADINGS = (
+    ("bull", "Bull Researcher Analysis"),
+    ("bear", "Bear Researcher Analysis"),
+    ("research_manager", "Research Manager Decision"),
+    ("aggressive", "Aggressive Analyst Analysis"),
+    ("conservative", "Conservative Analyst Analysis"),
+    ("neutral", "Neutral Analyst Analysis"),
+    ("portfolio_manager", "Portfolio Manager Decision"),
+)
+STREAM_REPORT_HEADING = dict(STREAM_REPORT_HEADINGS)
+
+
+# Progress panel teams, in the order the live view prints them.
+# The second value is the analyst key, or None for a role that always runs.
+LIVE_PROGRESS_TEAMS = (
+    ("Analyst Team", (
+        ("Market Analyst", "market"),
+        ("Sentiment Analyst", "social"),
+        ("News Analyst", "news"),
+        ("Fundamentals Analyst", "fundamentals"),
+    )),
+    ("Research Team", (
+        ("Bull Researcher", None),
+        ("Bear Researcher", None),
+        ("Research Manager", None),
+    )),
+    ("Trading Team", (
+        ("Trader", None),
+    )),
+    ("Risk Management", (
+        ("Aggressive Analyst", None),
+        ("Neutral Analyst", None),
+        ("Conservative Analyst", None),
+    )),
+    ("Portfolio Management", (
+        ("Portfolio Manager", None),
+    )),
+)
+
+
+def stream_report_section(key: str, body: str) -> str:
+    """The markdown heading the live view prefixes onto one streamed section."""
+    return f"### {STREAM_REPORT_HEADING[key]}\n{body}"
+
 
 class MessageBuffer:
     # Fixed teams that always run (not user-selectable)
@@ -140,17 +219,8 @@ class MessageBuffer:
                 latest_content = content
 
         if latest_section and latest_content:
-            section_titles = {
-                "market_report": "Market Analysis",
-                "sentiment_report": "Social Sentiment",
-                "news_report": "News Analysis",
-                "fundamentals_report": "Fundamentals Analysis",
-                "investment_plan": "Research Team Decision",
-                "trader_investment_plan": "Trading Team Plan",
-                "final_trade_decision": "Portfolio Management Decision",
-            }
             self.current_report = (
-                f"### {section_titles[latest_section]}\n{latest_content}"
+                f"### {LIVE_REPORT_SECTION_TITLES[latest_section]}\n{latest_content}"
             )
 
 
@@ -180,13 +250,56 @@ def format_tokens(n):
     return str(n)
 
 
+def format_footer_stats(message_buffer, stats_handler=None, start_time=None, now=None) -> str:
+    """The CLI footer line: Agents, LLM, Tools, Tokens, Reports, and elapsed time."""
+    # Agent progress - derived from agent_status dict
+    agents_completed = sum(
+        1 for status in message_buffer.agent_status.values() if status == "completed"
+    )
+    agents_total = len(message_buffer.agent_status)
+
+    # Report progress - based on agent completion (not just content existence)
+    reports_completed = message_buffer.get_completed_reports_count()
+    reports_total = len(message_buffer.report_sections)
+
+    stats_parts = [f"{AGENTS_STAT}: {agents_completed}/{agents_total}"]
+
+    # LLM and tool stats from callback handler
+    if stats_handler:
+        stats = stats_handler.get_stats()
+        stats_parts.append(f"{LLM_STAT}: {stats['llm_calls']}")
+        stats_parts.append(f"{TOOLS_STAT}: {stats['tool_calls']}")
+
+        # Token display with graceful fallback
+        unknown = stats.get("usage_unknown", 0)
+        if stats["tokens_in"] > 0 or stats["tokens_out"] > 0 or stats.get("usage_reported", 0):
+            tokens_str = f"{TOKENS_STAT}: {format_tokens(stats['tokens_in'])}\u2191 {format_tokens(stats['tokens_out'])}\u2193"
+            if unknown:
+                tokens_str += f" {TOKENS_PARTLY_UNKNOWN}"
+        elif unknown:
+            tokens_str = TOKENS_UNKNOWN
+        else:
+            tokens_str = TOKENS_EMPTY
+        stats_parts.append(tokens_str)
+
+    stats_parts.append(f"{REPORTS_STAT}: {reports_completed}/{reports_total}")
+
+    # Elapsed time
+    if start_time is not None:
+        elapsed = (now if now is not None else time.time()) - start_time
+        elapsed_str = f"\u23f1 {int(elapsed // 60):02d}:{int(elapsed % 60):02d}"
+        stats_parts.append(elapsed_str)
+
+    return " | ".join(stats_parts)
+
+
 def update_display(layout, spinner_text=None, stats_handler=None, start_time=None):
     # Header with welcome message
     layout["header"].update(
         Panel(
-            "[bold green]Welcome to TradingAgents CLI[/bold green]\n"
-            "[dim]© [Tauric Research](https://github.com/TauricResearch)[/dim]",
-            title="Welcome to TradingAgents",
+            f"[bold green]{LIVE_WELCOME_BODY}[/bold green]\n"
+            f"[dim]{LIVE_CREDIT}[/dim]",
+            title=WELCOME_TITLE,
             border_style="green",
             padding=(1, 2),
             expand=True,
@@ -203,22 +316,14 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
         padding=(0, 2),  # Add horizontal padding
         expand=True,  # Make table expand to fill available space
     )
-    progress_table.add_column("Team", style="cyan", justify="center", width=20)
-    progress_table.add_column("Agent", style="green", justify="center", width=20)
-    progress_table.add_column("Status", style="yellow", justify="center", width=20)
+    progress_table.add_column(PROGRESS_COLUMNS[0], style="cyan", justify="center", width=20)
+    progress_table.add_column(PROGRESS_COLUMNS[1], style="green", justify="center", width=20)
+    progress_table.add_column(PROGRESS_COLUMNS[2], style="yellow", justify="center", width=20)
 
     # Group agents by team - filter to only include agents in agent_status
     all_teams = {
-        "Analyst Team": [
-            "Market Analyst",
-            "Sentiment Analyst",
-            "News Analyst",
-            "Fundamentals Analyst",
-        ],
-        "Research Team": ["Bull Researcher", "Bear Researcher", "Research Manager"],
-        "Trading Team": ["Trader"],
-        "Risk Management": ["Aggressive Analyst", "Neutral Analyst", "Conservative Analyst"],
-        "Portfolio Management": ["Portfolio Manager"],
+        team: [agent for agent, _analyst in agents]
+        for team, agents in LIVE_PROGRESS_TEAMS
     }
 
     teams = {}
@@ -263,7 +368,7 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
         progress_table.add_row("─" * 20, "─" * 20, "─" * 20, style="dim")
 
     layout["progress"].update(
-        Panel(progress_table, title="Progress", border_style="cyan", padding=(1, 2))
+        Panel(progress_table, title=PROGRESS_TITLE, border_style="cyan", padding=(1, 2))
     )
 
     # Messages panel showing recent messages and tool calls
@@ -276,10 +381,10 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
         show_lines=True,  # Keep horizontal lines
         padding=(0, 1),  # Add some padding between columns
     )
-    messages_table.add_column("Time", style="cyan", width=8, justify="center")
-    messages_table.add_column("Type", style="green", width=10, justify="center")
+    messages_table.add_column(MESSAGE_COLUMNS[0], style="cyan", width=8, justify="center")
+    messages_table.add_column(MESSAGE_COLUMNS[1], style="green", width=10, justify="center")
     messages_table.add_column(
-        "Content", style="white", no_wrap=False, ratio=1
+        MESSAGE_COLUMNS[2], style="white", no_wrap=False, ratio=1
     )  # Make content column expand
 
     # Combine tool calls and messages
@@ -298,7 +403,7 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
     # Sort by timestamp descending (newest first)
     all_messages.sort(key=lambda x: x[0], reverse=True)
 
-    max_messages = 12
+    max_messages = MESSAGE_LIMIT
 
     recent_messages = all_messages[:max_messages]
 
@@ -309,7 +414,7 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
     layout["messages"].update(
         Panel(
             messages_table,
-            title="Messages & Tools",
+            title=MESSAGES_TITLE,
             border_style="blue",
             padding=(1, 2),
         )
@@ -320,7 +425,7 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
         layout["analysis"].update(
             Panel(
                 Markdown(message_buffer.current_report),
-                title="Current Report",
+                title=CURRENT_REPORT_TITLE,
                 border_style="green",
                 padding=(1, 2),
             )
@@ -328,50 +433,17 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
     else:
         layout["analysis"].update(
             Panel(
-                "[italic]Waiting for analysis report...[/italic]",
-                title="Current Report",
+                f"[italic]{WAITING_REPORT}[/italic]",
+                title=CURRENT_REPORT_TITLE,
                 border_style="green",
                 padding=(1, 2),
             )
         )
 
-    # Footer with statistics
-    # Agent progress - derived from agent_status dict
-    agents_completed = sum(
-        1 for status in message_buffer.agent_status.values() if status == "completed"
-    )
-    agents_total = len(message_buffer.agent_status)
-
-    # Report progress - based on agent completion (not just content existence)
-    reports_completed = message_buffer.get_completed_reports_count()
-    reports_total = len(message_buffer.report_sections)
-
-    stats_parts = [f"Agents: {agents_completed}/{agents_total}"]
-
-    # LLM and tool stats from callback handler
-    if stats_handler:
-        stats = stats_handler.get_stats()
-        stats_parts.append(f"LLM: {stats['llm_calls']}")
-        stats_parts.append(f"Tools: {stats['tool_calls']}")
-
-        # Token display with graceful fallback
-        if stats["tokens_in"] > 0 or stats["tokens_out"] > 0:
-            tokens_str = f"Tokens: {format_tokens(stats['tokens_in'])}\u2191 {format_tokens(stats['tokens_out'])}\u2193"
-        else:
-            tokens_str = "Tokens: --"
-        stats_parts.append(tokens_str)
-
-    stats_parts.append(f"Reports: {reports_completed}/{reports_total}")
-
-    # Elapsed time
-    if start_time:
-        elapsed = time.time() - start_time
-        elapsed_str = f"\u23f1 {int(elapsed // 60):02d}:{int(elapsed % 60):02d}"
-        stats_parts.append(elapsed_str)
-
+    stats_line = format_footer_stats(message_buffer, stats_handler, start_time)
     stats_table = Table(show_header=False, box=None, padding=(0, 2), expand=True)
     stats_table.add_column("Stats", justify="center")
-    stats_table.add_row(" | ".join(stats_parts))
+    stats_table.add_row(stats_line)
 
     layout["footer"].update(Panel(stats_table, border_style="grey50"))
 
@@ -379,7 +451,7 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
 def display_complete_report(final_state):
     """Display the complete analysis report sequentially (avoids truncation)."""
     console.print()
-    console.print(Rule("Complete Analysis Report", style="bold green"))
+    console.print(Rule(COMPLETE_REPORT_RULE, style="bold green"))
 
     # I. Analyst Team Reports
     analysts = []
@@ -437,11 +509,57 @@ def display_complete_report(final_state):
         console.print(Panel(Markdown(final_state["final_trade_decision"]), title="Portfolio Manager", border_style="blue", padding=(1, 2)))
 
 
-def update_research_team_status(status):
-    """Update status for research team members (not Trader)."""
-    research_team = ["Bull Researcher", "Bear Researcher", "Research Manager"]
-    for agent in research_team:
-        message_buffer.update_agent_status(agent, status)
+
+def apply_stream_chunk(buffer, chunk, wall_time_tracker=None) -> None:
+    """Update agent status from one streamed chunk, using the CLI live-view rules."""
+    if not chunk:
+        return
+    update_analyst_statuses(buffer, chunk, wall_time_tracker=wall_time_tracker)
+    if chunk.get("investment_debate_state"):
+        debate_state = chunk["investment_debate_state"]
+        bull_hist = debate_state.get("bull_history", "").strip()
+        bear_hist = debate_state.get("bear_history", "").strip()
+        judge = (chunk.get("investment_plan") or "").strip()
+        if bull_hist or bear_hist:
+            for agent in ("Bull Researcher", "Bear Researcher", "Research Manager"):
+                buffer.update_agent_status(agent, "in_progress")
+        if bull_hist:
+            buffer.update_report_section("investment_plan", stream_report_section("bull", bull_hist))
+        if bear_hist:
+            buffer.update_report_section("investment_plan", stream_report_section("bear", bear_hist))
+        if judge:
+            buffer.update_report_section("investment_plan", stream_report_section("research_manager", judge))
+            for agent in ("Bull Researcher", "Bear Researcher", "Research Manager"):
+                buffer.update_agent_status(agent, "completed")
+            buffer.update_agent_status("Trader", "in_progress")
+    if chunk.get("trader_investment_plan"):
+        buffer.update_report_section("trader_investment_plan", chunk["trader_investment_plan"])
+        if buffer.agent_status.get("Trader") != "completed":
+            buffer.update_agent_status("Trader", "completed")
+            buffer.update_agent_status("Aggressive Analyst", "in_progress")
+    if chunk.get("risk_debate_state"):
+        risk_state = chunk["risk_debate_state"]
+        agg_hist = risk_state.get("aggressive_history", "").strip()
+        con_hist = risk_state.get("conservative_history", "").strip()
+        neu_hist = risk_state.get("neutral_history", "").strip()
+        judge = (chunk.get("final_trade_decision") or "").strip()
+        if agg_hist:
+            if buffer.agent_status.get("Aggressive Analyst") != "completed":
+                buffer.update_agent_status("Aggressive Analyst", "in_progress")
+            buffer.update_report_section("final_trade_decision", stream_report_section("aggressive", agg_hist))
+        if con_hist:
+            if buffer.agent_status.get("Conservative Analyst") != "completed":
+                buffer.update_agent_status("Conservative Analyst", "in_progress")
+            buffer.update_report_section("final_trade_decision", stream_report_section("conservative", con_hist))
+        if neu_hist:
+            if buffer.agent_status.get("Neutral Analyst") != "completed":
+                buffer.update_agent_status("Neutral Analyst", "in_progress")
+            buffer.update_report_section("final_trade_decision", stream_report_section("neutral", neu_hist))
+        if judge and buffer.agent_status.get("Portfolio Manager") != "completed":
+            buffer.update_agent_status("Portfolio Manager", "in_progress")
+            buffer.update_report_section("final_trade_decision", stream_report_section("portfolio_manager", judge))
+            for agent in ("Aggressive Analyst", "Conservative Analyst", "Neutral Analyst", "Portfolio Manager"):
+                buffer.update_agent_status(agent, "completed")
 
 
 # Ordered list of analysts for status transitions
@@ -561,6 +679,32 @@ def classify_message_type(message) -> tuple[str, str | None]:
 
     # Fallback for unknown types
     return ("System", content)
+
+
+
+def record_stream_messages(buffer, messages) -> list[tuple[str, str]]:
+    """Store one stream step the way the CLI message panel does.
+
+    Returns newly stored ``(type, content)`` pairs. A repeated message id is skipped.
+    """
+    added = []
+    for message in messages or []:
+        msg_id = getattr(message, "id", None)
+        if msg_id is not None:
+            if msg_id in buffer._processed_message_ids:
+                continue
+            buffer._processed_message_ids.add(msg_id)
+        msg_type, content = classify_message_type(message)
+        if content and content.strip():
+            buffer.add_message(msg_type, content)
+            added.append((msg_type, content))
+        calls = getattr(message, "tool_calls", None) or []
+        for tool_call in calls:
+            if isinstance(tool_call, dict):
+                buffer.add_tool_call(tool_call.get("name"), tool_call.get("args"))
+            else:
+                buffer.add_tool_call(getattr(tool_call, "name", None), getattr(tool_call, "args", None))
+    return added
 
 
 def format_tool_args(args, max_length=80) -> str:

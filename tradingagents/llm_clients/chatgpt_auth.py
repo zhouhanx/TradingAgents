@@ -25,6 +25,11 @@ import requests
 
 from tradingagents.dataflows.files import locked
 from tradingagents.default_config import _TRADINGAGENTS_HOME
+from tradingagents.llm_clients.auth_file_schema import (
+    auth_read_problem,
+    file_problem,
+    read_auth_file_text,
+)
 
 ISSUER = "https://auth.openai.com"
 AUTHORIZE_URL = f"{ISSUER}/api/accounts/authorize"
@@ -33,6 +38,9 @@ REVOKE_URL = f"{ISSUER}/api/accounts/oauth/revoke"
 JWKS_URL = f"{ISSUER}/.well-known/jwks.json"
 API_BASE = "https://api.openai.com/v1"
 DYNAMIC_CLIENT_ID = "dynamic_agent_client"
+CHATGPT_LOGIN_PROMPT = "Continue with ChatGPT: open this address and sign in with your Plus or Pro plan:"
+CHATGPT_PASTE_PROMPT = "If the browser cannot reach this machine, paste here the address it ends up on."
+CHATGPT_PASTE_REJECTED = "That is not the address this sign-in ends on; paste the whole address."
 APP_NAME = "TradingAgents"
 SCOPE = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
 PLAN_SCOPE = "chatgpt.tokens.use.direct"
@@ -44,6 +52,7 @@ TIMEOUT = 30
 
 AUTH_FILE = Path(_TRADINGAGENTS_HOME) / "chatgpt-auth.json"
 LOGIN_HINT = "Not signed in to ChatGPT; run `tradingagents login chatgpt`."
+SIGNED_IN_FALLBACK = "your ChatGPT account"  # signed in, but the ID token carried no email
 
 
 _retry_after = 0.0            # no renewal attempt in this process before this time
@@ -61,10 +70,57 @@ class ChatGPTUnreachable(ChatGPTAuthError):
 
 def _read() -> dict:
     try:
-        data = json.loads(AUTH_FILE.read_text(encoding="utf-8"))
+        data = json.loads(read_auth_file_text(AUTH_FILE))
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _shape_problem(data: dict) -> str | None:
+    """The same shape ``sign_in`` writes: tokens with a non-empty access token and an
+    account with the client id that ``_refresh`` needs. Local check only."""
+    return file_problem(data, account_required_with_tokens=("client_id",))
+
+
+def auth_file_problem() -> str | None:
+    """Why the local credential file cannot be used, or ``None`` when it is absent or
+    well formed. Local read only; nothing is validated online.
+
+    ``_read`` treats a corrupt file as signed out so a new sign-in can replace it;
+    status displays and every signed-in check call this so a malformed file is never
+    reported as signed in or as signed out.
+    """
+    try:
+        raw = read_auth_file_text(AUTH_FILE)
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        return auth_read_problem(AUTH_FILE, exc)
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return f"{AUTH_FILE.name} is not valid JSON"
+    if not isinstance(data, dict):
+        return f"{AUTH_FILE.name} is not a JSON object"
+    problem = _shape_problem(data)
+    return f"{AUTH_FILE.name}: {problem}" if problem else None
+
+
+def _well_formed() -> dict:
+    """The auth file when it has the expected shape; otherwise only a usable host id,
+    so a malformed file reads as "no sign-in" to code that replaces or forgets it."""
+    data = _read()
+    if not _shape_problem(data):
+        return data
+    host_id = data.get("host_id")
+    return {"host_id": host_id} if isinstance(host_id, str) and host_id else {}
+
+
+def _refuse_malformed() -> None:
+    problem = auth_file_problem()
+    if problem:
+        raise ChatGPTAuthError(f"The local ChatGPT sign-in file could not be read ({problem}); "
+                               "run `tradingagents login chatgpt` again.")
 
 
 def _write(data: dict) -> None:
@@ -87,9 +143,20 @@ def _host_id(data: dict) -> str:
 
 
 def signed_in_as() -> str | None:
-    """The signed-in account's email, or None."""
-    data = _read()
-    return (data.get("account") or {}).get("email") if data.get("tokens") else None
+    """The signed-in account's email, or None (also for a malformed file; callers
+    that must tell the two apart ask ``auth_file_problem``)."""
+    data = _well_formed()
+    tokens = data.get("tokens")
+    if not isinstance(tokens, dict) or not (
+        isinstance(tokens.get("access_token"), str) and tokens["access_token"].strip()
+    ):
+        return None
+    # sign_in writes ``"email": null`` when the ID token carries no email claim; that
+    # file is still a valid sign-in, so it gets the same neutral label sign_in returns.
+    account = data.get("account")
+    email = account.get("email") if isinstance(account, dict) else None
+    # A whitespace-only email is not an address (QA W14): it gets the neutral label too.
+    return email.strip() if isinstance(email, str) and email.strip() else SIGNED_IN_FALLBACK
 
 
 # --- tokens --------------------------------------------------------------------------
@@ -215,12 +282,14 @@ def access_token(now: Callable[[], float] = time.time) -> str:
     token it rotated away must never be sent again. When OpenAI cannot be reached
     or is busy, a token that still works is used and renewal is tried again a minute later."""
     global _retry_after
+    _refuse_malformed()
     tokens = _read().get("tokens")
     if not tokens:
         raise ChatGPTAuthError(LOGIN_HINT)
     if not _due(tokens, now()):
         return tokens["access_token"]
     with locked(AUTH_FILE):
+        _refuse_malformed()
         data = _read()
         if not data.get("tokens"):
             raise ChatGPTAuthError(LOGIN_HINT)
@@ -246,6 +315,7 @@ def access_token(now: Callable[[], float] = time.time) -> str:
 def credential() -> Callable[[], str]:
     """The api_key callable for the chatgpt provider; raises now when nobody is signed in,
     so a run stops before it starts rather than at its first model call."""
+    _refuse_malformed()
     if not _read().get("tokens"):
         raise ChatGPTAuthError(LOGIN_HINT)
     return access_token
@@ -329,7 +399,7 @@ def sign_in(say: Callable[[str], None] = print, read_line: Callable[[], str] = i
     machine is remote or in a container, paste the address the browser ends up on.
     The pasted line is read in a thread that can outlive this call, so sign in as the
     last prompt of a process (``tradingagents login chatgpt``)."""
-    data = _read()
+    data = _well_formed()
     host_id = _host_id(data)
     account = data.get("account") or {}
     client_id = account.get("client_id") or DYNAMIC_CLIENT_ID
@@ -349,15 +419,15 @@ def sign_in(say: Callable[[str], None] = print, read_line: Callable[[], str] = i
             params["agent_name_hint"] = APP_NAME
         elif account.get("email"):
             params["login_hint"] = account["email"]
-        say("Continue with ChatGPT: open this address and sign in with your Plus or Pro plan:")
+        say(CHATGPT_LOGIN_PROMPT)
         say(f"{AUTHORIZE_URL}?{urllib.parse.urlencode(params, quote_via=urllib.parse.quote)}")
-        say("If the browser cannot reach this machine, paste here the address it ends up on.")
+        say(CHATGPT_PASTE_PROMPT)
 
         def read_pasted():
             try:
                 while not callback.received.is_set():
                     if not callback.accept(read_line()) and not callback.received.is_set():
-                        say("That is not the address this sign-in ends on; paste the whole address.")
+                        say(CHATGPT_PASTE_REJECTED)
             except (EOFError, OSError):
                 return
 
@@ -389,7 +459,7 @@ def sign_in(say: Callable[[str], None] = print, read_line: Callable[[], str] = i
                                "sign in again and approve plan usage.")
     AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
     with locked(AUTH_FILE):
-        replaced = _read().get("tokens")
+        replaced = _well_formed().get("tokens")
         _write({
             "host_id": host_id,
             "account": {"client_id": issued, "email": claims.get("email"), "subject": claims["sub"]},
@@ -397,16 +467,20 @@ def sign_in(say: Callable[[str], None] = print, read_line: Callable[[], str] = i
         })
     if replaced:
         _revoke(replaced, issued)
-    return claims.get("email") or "your ChatGPT account"
+    return claims.get("email") or SIGNED_IN_FALLBACK
 
 
 def sign_out() -> str | None:
     """Revoke the sign-in at OpenAI and forget it, keeping only this host's id.
     Returns None when nobody was signed in, "revoked", or "forgotten" when OpenAI
     could not be reached to revoke it."""
-    if not _read().get("tokens"):
+    if auth_file_problem() is None and not _read().get("tokens"):
         return None
     with locked(AUTH_FILE):
+        if auth_file_problem() is not None:
+            # Nothing usable to revoke; forget the malformed file locally.
+            _write(_well_formed() or {"host_id": _host_id({})})
+            return "forgotten"
         data = _read()
         tokens = data.get("tokens")
         if not tokens:

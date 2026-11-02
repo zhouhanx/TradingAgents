@@ -98,6 +98,25 @@ class RatingScore:
     mean_alpha: float
 
 
+PENDING_CELLS_SENTENCE = "Pending cells are not scored above; re-run to settle them."
+NO_DIRECTION_CLAIMED = "no direction claimed"
+
+
+def resolved_cells_line(resolved: int, pending: int, unscored: int = 0) -> str:
+    line = f"Resolved cells: {resolved} · pending: {pending}"
+    if unscored:
+        line += f" · unscored: {unscored}"
+    return line
+
+
+def alpha_measure_sentence(holding: str) -> str:
+    return (
+        f"Alpha is measured over {holding} from the first close after each analysis date. "
+        "One model sampling per cell, and text feeds are not archived, so "
+        "these figures are indicative rather than repeatable."
+    )
+
+
 @dataclass
 class BacktestSummary:
     resolved: int
@@ -106,24 +125,20 @@ class BacktestSummary:
     unscored: int = 0
     holding: str = ""
 
+
     def render(self) -> str:
-        lines = [f"Resolved cells: {self.resolved} · pending: {self.pending}"
-                 + (f" · unscored: {self.unscored}" if self.unscored else "")]
+        lines = [resolved_cells_line(self.resolved, self.pending, self.unscored)]
         for rating, score in self.by_rating.items():
             called = (f"called the direction {score.hit_rate:.0%}"
-                      if score.hit_rate is not None else "no direction claimed")
+                      if score.hit_rate is not None else NO_DIRECTION_CLAIMED)
             lines.append(
                 f"- {rating}: n={score.count}, {called}, "
                 f"mean alpha {score.mean_alpha:+.2%} vs the benchmark"
             )
         lines.append("")
         if self.pending:
-            lines.append("Pending cells are not scored above; re-run to settle them.")
-        lines.append(
-            f"Alpha is measured over {self.holding} from the first close after each analysis date. "
-            "One model sampling per cell, and text feeds are not archived, so "
-            "these figures are indicative rather than repeatable."
-        )
+            lines.append(PENDING_CELLS_SENTENCE)
+        lines.append(alpha_measure_sentence(self.holding))
         return "\n".join(lines)
 
 

@@ -16,6 +16,10 @@ class StatsCallbackHandler(BaseCallbackHandler):
         self.tool_calls = 0
         self.tokens_in = 0
         self.tokens_out = 0
+        # Calls whose token usage is unknown (the endpoint would not report it).
+        self.usage_unknown = 0
+        # Calls that did report usage, even 0/0 (W81: then the footer shows 0, not --).
+        self.usage_reported = 0
 
     def on_llm_start(
         self,
@@ -42,6 +46,8 @@ class StatsCallbackHandler(BaseCallbackHandler):
         try:
             generation = response.generations[0][0]
         except (IndexError, TypeError):
+            with self._lock:                 # W81: a finished call with no answer
+                self.usage_unknown += 1
             return
 
         usage_metadata = None
@@ -50,10 +56,22 @@ class StatsCallbackHandler(BaseCallbackHandler):
             if isinstance(message, AIMessage) and hasattr(message, "usage_metadata"):
                 usage_metadata = message.usage_metadata
 
+        # W75: a call that ended without usage is unknown, whether the endpoint
+        # refused the usage option (marked usage_unknown) or accepted/ignored it and
+        # sent none. "Tokens: --" stays only for a run with no finished model call.
+        if not usage_metadata:
+            with self._lock:
+                self.usage_unknown += 1
         if usage_metadata:
             with self._lock:
+                self.usage_reported += 1
                 self.tokens_in += usage_metadata.get("input_tokens", 0)
                 self.tokens_out += usage_metadata.get("output_tokens", 0)
+
+    def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
+        """W81: a call that failed was still a call; its usage is unknown."""
+        with self._lock:
+            self.usage_unknown += 1
 
     def on_tool_start(
         self,
@@ -73,4 +91,6 @@ class StatsCallbackHandler(BaseCallbackHandler):
                 "tool_calls": self.tool_calls,
                 "tokens_in": self.tokens_in,
                 "tokens_out": self.tokens_out,
+                "usage_unknown": self.usage_unknown,
+                "usage_reported": self.usage_reported,
             }

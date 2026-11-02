@@ -7,15 +7,24 @@ from pathlib import Path
 from tradingagents.agents.rating import parse_rating
 from tradingagents.dataflows.files import locked
 
+DECISION_MARKER = "DECISION:"
+REFLECTION_MARKER = "REFLECTION:"
+PENDING_STATUS = "pending"
+RESOLVED_PREFIX = "resolved:"
+ENTRY_END = "<!-- ENTRY_END -->"
+
 
 class TradingMemoryLog:
     """Append-only markdown log of trading decisions and reflections."""
 
     # HTML comment: cannot appear in LLM prose output, safe as a hard delimiter
-    _SEPARATOR = "\n\n<!-- ENTRY_END -->\n\n"
+    _SEPARATOR = f"\n\n{ENTRY_END}\n\n"
     # Precompiled patterns — avoids re-compilation on every load_entries() call
-    _DECISION_RE = re.compile(r"DECISION:\n(.*?)(?=\nREFLECTION:|\Z)", re.DOTALL)
-    _REFLECTION_RE = re.compile(r"REFLECTION:\n(.*?)$", re.DOTALL)
+    _DECISION_RE = re.compile(
+        rf"{re.escape(DECISION_MARKER)}\n(.*?)(?=\n{re.escape(REFLECTION_MARKER)}|\Z)",
+        re.DOTALL,
+    )
+    _REFLECTION_RE = re.compile(rf"{re.escape(REFLECTION_MARKER)}\n(.*?)$", re.DOTALL)
 
     def __init__(self, config: dict = None):
         cfg = config or {}
@@ -54,8 +63,8 @@ class TradingMemoryLog:
                     if line.startswith(f"[{trade_date} | {ticker} |") and line.endswith("]"):
                         return
             rating = rating or parse_rating(final_trade_decision)
-            tag = f"[{trade_date} | {ticker} | {rating} | pending]"
-            entry = f"{tag}\n\nDECISION:\n{final_trade_decision}{self._SEPARATOR}"
+            tag = f"[{trade_date} | {ticker} | {rating} | {PENDING_STATUS}]"
+            entry = f"{tag}\n\n{DECISION_MARKER}\n{final_trade_decision}{self._SEPARATOR}"
             with open(self._log_path, "a", encoding="utf-8") as f:
                 f.write(entry)
 
@@ -178,7 +187,7 @@ class TradingMemoryLog:
                 if (
                     not updated
                     and tag_line.startswith(pending_prefix)
-                    and tag_line.endswith("| pending]")
+                    and tag_line.endswith(f"| {PENDING_STATUS}]")
                 ):
                     fields = [f.strip() for f in tag_line[1:-1].split("|")]
                     rating = fields[2]
@@ -187,7 +196,7 @@ class TradingMemoryLog:
                     )
                     rest = "\n".join(lines[1:])
                     new_blocks.append(
-                        f"{new_tag}\n\n{rest.lstrip()}\n\nREFLECTION:\n{reflection}"
+                        f"{new_tag}\n\n{rest.lstrip()}\n\n{REFLECTION_MARKER}\n{reflection}"
                     )
                     updated = True
                 else:
@@ -230,7 +239,7 @@ class TradingMemoryLog:
                 matched = False
                 for (trade_date, ticker), upd in list(update_map.items()):
                     pending_prefix = f"[{trade_date} | {ticker} |"
-                    if tag_line.startswith(pending_prefix) and tag_line.endswith("| pending]"):
+                    if tag_line.startswith(pending_prefix) and tag_line.endswith(f"| {PENDING_STATUS}]"):
                         fields = [f.strip() for f in tag_line[1:-1].split("|")]
                         rating = fields[2]
                         raw_pct = f"{upd['raw_return']:+.1%}"
@@ -241,7 +250,7 @@ class TradingMemoryLog:
                         )
                         rest = "\n".join(lines[1:])
                         new_blocks.append(
-                            f"{new_tag}\n\n{rest.lstrip()}\n\nREFLECTION:\n{upd['reflection']}"
+                            f"{new_tag}\n\n{rest.lstrip()}\n\n{REFLECTION_MARKER}\n{upd['reflection']}"
                         )
                         del update_map[(trade_date, ticker)]
                         matched = True
@@ -270,7 +279,7 @@ class TradingMemoryLog:
         """
         tag = f"[{trade_date} | {ticker} | {rating} | {raw_pct} | {alpha_pct} | {holding_days}d"
         if resolution_date:
-            tag += f" | resolved:{resolution_date}"
+            tag += f" | {RESOLVED_PREFIX}{resolution_date}"
         return tag + "]"
 
     def _apply_rotation(self, blocks: list[str]) -> list[str]:
@@ -293,7 +302,7 @@ class TradingMemoryLog:
             is_resolved = (
                 tag_line.startswith("[")
                 and tag_line.endswith("]")
-                and not tag_line.endswith("| pending]")
+                and not tag_line.endswith(f"| {PENDING_STATUS}]")
             )
             decisions.append((block, is_resolved, tag_line[1:].split("|")[0].strip()))
 
@@ -322,14 +331,15 @@ class TradingMemoryLog:
         # became known, for point-in-time filtering (#1251).
         resolved = None
         for f in fields[6:]:
-            if f.startswith("resolved:"):
-                resolved = f[len("resolved:"):].strip()
+            if f.startswith(RESOLVED_PREFIX):
+                resolved = f[len(RESOLVED_PREFIX):].strip()
         entry = {
+            "tag": tag_line,
             "date": fields[0],
             "ticker": fields[1],
             "rating": fields[2],
-            "pending": fields[3] == "pending",
-            "raw": fields[3] if fields[3] != "pending" else None,
+            "pending": fields[3] == PENDING_STATUS,
+            "raw": fields[3] if fields[3] != PENDING_STATUS else None,
             "alpha": fields[4] if len(fields) > 4 else None,
             "holding": fields[5] if len(fields) > 5 else None,
             "resolved": resolved,
@@ -346,9 +356,9 @@ class TradingMemoryLog:
         alpha = e["alpha"] or "n/a"
         holding = e["holding"] or "n/a"
         tag = f"[{e['date']} | {e['ticker']} | {e['rating']} | {raw} | {alpha} | {holding}]"
-        parts = [tag, f"DECISION:\n{e['decision']}"]
+        parts = [tag, f"{DECISION_MARKER}\n{e['decision']}"]
         if e["reflection"]:
-            parts.append(f"REFLECTION:\n{e['reflection']}")
+            parts.append(f"{REFLECTION_MARKER}\n{e['reflection']}")
         return "\n\n".join(parts)
 
     def _format_reflection_only(self, e: dict) -> str:

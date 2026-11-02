@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from pydantic import ValidationError
 
 from tradingagents.agents.context import get_portfolio_context_from_state
 from tradingagents.portfolio import PortfolioContext, load_portfolio
@@ -21,7 +22,7 @@ HOLDING = {
     "currency": "USD",
     "positions": [
         {"ticker": "AAPL", "quantity": 120, "average_price": 150.0},
-        {"ticker": "MSFT", "quantity": 10},
+        {"ticker": "MSFT", "quantity": 10, "average_price": 400.0},
     ],
 }
 
@@ -41,7 +42,7 @@ def test_flat_book_says_no_position_rather_than_omitting_it():
 
 @pytest.mark.unit
 def test_a_ticker_held_under_another_spelling_is_matched():
-    text = PortfolioContext.model_validate({"positions": [{"ticker": "aapl", "quantity": 5}]}).render("AAPL")
+    text = PortfolioContext.model_validate({"positions": [{"ticker": "aapl", "quantity": 5, "average_price": 150.0}]}).render("AAPL")
     assert "No current position" not in text and "5" in text
 
 
@@ -53,7 +54,7 @@ def test_a_ticker_held_under_another_spelling_is_matched():
     ("0700.HK", "700.HK", "0700.HK"),
 ])
 def test_a_holding_under_a_broker_alias_is_the_analyzed_instrument(held, analyzed, canonical):
-    book = PortfolioContext.model_validate({"positions": [{"ticker": held, "quantity": 2}, {"ticker": "ethusdt", "quantity": 1}]})
+    book = PortfolioContext.model_validate({"positions": [{"ticker": held, "quantity": 2, "average_price": 10.0}, {"ticker": "ethusdt", "quantity": 1, "average_price": 3000.0}]})
     text = book.render(analyzed)
     assert f"Current position in {canonical}: 2 units" in text
     assert "Other positions: ETHUSDT 1" in text   # as listed
@@ -83,23 +84,23 @@ def test_load_rejects_a_malformed_file_with_a_clear_error(tmp_path):
 @pytest.mark.unit
 def test_one_instrument_held_under_two_spellings_shows_both_holdings():
     book = PortfolioContext.model_validate({"positions": [
-        {"ticker": "BTCUSDT", "quantity": 1}, {"ticker": "BTC-USD", "quantity": 2}]})
+        {"ticker": "BTCUSDT", "quantity": 1, "average_price": 60000.0}, {"ticker": "BTC-USD", "quantity": 2, "average_price": 62000.0}]})
     text = book.render("BTC-USD")
-    assert "Current position in BTC-USD: 1 units (listed as BTCUSDT)" in text
+    assert "Current position in BTC-USD: 1 units, average price 60,000.00 (listed as BTCUSDT)" in text
     assert "Current position in BTC-USD: 2 units" in text and "Other positions" not in text
 
 
 @pytest.mark.unit
 def test_a_holding_keeps_the_instrument_it_was_listed_as():
     # WTI is also an alias of crude oil futures; listed beside AAPL it is the stock as written.
-    text = PortfolioContext.model_validate({"positions": [{"ticker": "WTI", "quantity": 100}]}).render("AAPL")
+    text = PortfolioContext.model_validate({"positions": [{"ticker": "WTI", "quantity": 100, "average_price": 40.0}]}).render("AAPL")
     assert "Other positions: WTI 100" in text and "CL=F" not in text
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("book", [
     '{"cash": NaN}',
-    '{"positions": [{"ticker": "AAPL", "quantity": Infinity}]}',
+    '{"positions": [{"ticker": "AAPL", "quantity": Infinity, "average_price": 1}]}',
     '{"positions": [{"ticker": "AAPL", "quantity": 1, "average_price": "nan"}]}',
 ])
 def test_load_rejects_a_number_that_is_not_finite(tmp_path, book):
@@ -224,7 +225,7 @@ def test_completed_run_clears_the_checkpoint_it_wrote(tmp_path, monkeypatch):
 
     written = graph._run_signature("stock", book)  # what begin_checkpoint keys on
     cleared = []
-    monkeypatch.setattr(tg, "clear_checkpoint", lambda d, t, dt, signature: cleared.append(signature))
+    monkeypatch.setattr(tg, "clear_checkpoint", lambda d, t, dt, signature, scope=None: cleared.append(signature))
 
     graph._run_graph("AAPL", "2026-08-14", "stock", checkpoint_thread_id=None, portfolio=book)
 
@@ -245,7 +246,7 @@ def test_research_layer_sizes_against_a_standard_allocation():
 @pytest.mark.unit
 def test_partial_portfolio_states_only_what_it_was_given():
     """Cash omitted is not cash zero; the line is absent rather than invented."""
-    text = PortfolioContext.model_validate({"positions": [{"ticker": "AAPL", "quantity": 5}]}).render("AAPL")
+    text = PortfolioContext.model_validate({"positions": [{"ticker": "AAPL", "quantity": 5, "average_price": 150.0}]}).render("AAPL")
     assert "Cash" not in text
     assert "5" in text
 
@@ -281,3 +282,53 @@ def test_cli_passes_a_valid_portfolio_into_the_run(tmp_path, monkeypatch):
 
     assert result.exit_code == 0
     assert ran[0]["portfolio"].position_in("AAPL").quantity == 120
+
+
+# --- WEBUI-006 W41/W42: a holding needs its cost, its size is optional ---------
+
+@pytest.mark.unit
+@pytest.mark.parametrize("position", [
+    {"ticker": "AAPL", "quantity": 5},                              # no cost
+    {"ticker": "AAPL", "quantity": 5, "average_price": 0},          # cost 0
+    {"ticker": "AAPL", "quantity": 5, "average_price": -150},       # negative cost
+    {"ticker": "AAPL", "quantity": 0, "average_price": 150},        # size 0 (leave it out instead)
+    {"ticker": "AAPL", "quantity": True, "average_price": 150},     # not a number
+    {"ticker": "AAPL", "quantity": "5", "average_price": 150},      # a string, not a number
+    {"ticker": "AAPL", "average_price": "150"},
+])
+def test_cli_and_console_refuse_what_the_webui_form_refuses(tmp_path, position):
+    bad = tmp_path / "p.json"
+    bad.write_text(json.dumps({"positions": [position]}))
+    with pytest.raises(ValueError, match="portfolio"):
+        load_portfolio(bad)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("position, shown", [
+    ({"ticker": "AAPL", "average_price": 150}, "held (size not given), average price 150.00"),
+    ({"ticker": "AAPL", "quantity": 0.5, "average_price": 150}, "0.5 units, average price 150.00"),
+    ({"ticker": "AAPL", "quantity": -3, "average_price": 150}, "-3 units, average price 150.00"),   # short
+])
+def test_cli_accepts_a_cost_with_or_without_a_size(tmp_path, position, shown):
+    good = tmp_path / "p.json"
+    good.write_text(json.dumps({"positions": [position]}))
+    assert shown in load_portfolio(good).render("AAPL")
+
+
+# --- WEBUI-006 W50: an imported holdings JSON is read as before; the CLI needs the cost ---
+
+@pytest.mark.unit
+def test_an_imported_json_position_may_give_only_its_size_but_the_cli_needs_the_cost(tmp_path):
+    book = {"cash": 5000, "positions": [{"ticker": "AAPL", "quantity": 7}]}
+    text = PortfolioContext.model_validate(book).render("AAPL")
+    assert "- Current position in AAPL: 7 units\n" in text and "average price" not in text
+    path = tmp_path / "p.json"
+    path.write_text(json.dumps(book))
+    with pytest.raises(ValueError, match="average_price"):
+        load_portfolio(path)
+
+
+@pytest.mark.unit
+def test_a_position_with_neither_size_nor_cost_is_refused_everywhere():
+    with pytest.raises(ValidationError, match="quantity or its average_price"):
+        PortfolioContext.model_validate({"positions": [{"ticker": "AAPL"}]})

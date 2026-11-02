@@ -45,6 +45,9 @@ def _validate_trade_date(trade_date) -> str:
 # whether it checkpoints, and how often it retries a provider.
 _NOT_IN_SIGNATURE = frozenset({
     "results_dir", "data_cache_dir", "memory_log_path", "checkpoint_enabled", "llm_max_retries",
+    # How long a model call may take does not change what it writes: a run that
+    # timed out can resume under a longer bound (RUN-002).
+    "timeout", "llm_call_budget",
 })
 
 
@@ -204,12 +207,13 @@ class TradingAgentsGraph:
         if not self.config.get("checkpoint_enabled"):
             return None
         signature = self._run_signature(asset_type, portfolio)
-        self._checkpointer_ctx = get_checkpointer(self.config["data_cache_dir"], company_name)
+        scope = self.config.get("checkpoint_run_scope") or None
+        self._checkpointer_ctx = get_checkpointer(self.config["data_cache_dir"], company_name, scope)
         saver = self._checkpointer_ctx.__enter__()
         self.graph = self.workflow.compile(checkpointer=saver)
 
         step = checkpoint_step(
-            self.config["data_cache_dir"], company_name, str(trade_date), signature
+            self.config["data_cache_dir"], company_name, str(trade_date), signature, scope
         )
         self._resuming = step is not None
         if step is not None:
@@ -249,7 +253,7 @@ class TradingAgentsGraph:
         if self.config.get("checkpoint_enabled"):
             clear_checkpoint(
                 self.config["data_cache_dir"], company_name, str(trade_date),
-                self._run_signature(asset_type, portfolio),
+                self._run_signature(asset_type, portfolio), self.config.get("checkpoint_run_scope") or None,
             )
 
     def run_settings(self) -> dict:
