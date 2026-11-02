@@ -336,7 +336,7 @@ function bindUpdates() {
 const WIZARD_STEPS = [["分析对象", "标的和日期"], ["研究范围", "维度和深度"], ["模型选择", "快模型和深模型"], ["确认启动", "检查后启动"]];
 const WIZARD_TITLES = ["要分析哪个标的", "选择研究范围", "选择本次使用的模型", "检查一下，然后启动"];
 const WIZARD_HINTS = ["", "选择分析维度与研究深度。", "可沿用上次选择，或更换模型服务。", "启动后会自动打开查看状态，可以随时离开这个页面。"];
-const ASSET_ZH = {stock: "股票", crypto: "加密货币"};
+const ASSET_ZH = {stock: "股票", crypto: "加密货币", commodity: "贵金属/商品期货"};
 
 function todayLocal() {
   const today = new Date();
@@ -358,7 +358,9 @@ function assetSegHtml() {
 
 function assetHint() {
   if (!state.form.asset_type) return "填写代码后自动识别，例如 BTC-USD 是加密货币。";
-  return state.form.asset_type === "crypto" ? "按代码识别为加密货币，不做基本面分析。" : "按代码识别为股票。";
+  if (state.form.asset_type === "crypto") return "按代码识别为加密货币，不做基本面分析。";
+  if (state.form.asset_type === "commodity") return "按代码识别为贵金属/商品期货（如 XAUUSD→GC=F），不做公司基本面分析。";
+  return "按代码识别为股票。";
 }
 
 function paintAssetSeg() {
@@ -3375,7 +3377,7 @@ function ensureBacktest() {
 
 function backtestAnalystChoices() {
   const asset = ensureBacktest().asset_type;
-  return (state.catalog.analysts || []).filter((item) => asset !== "crypto" || item.value !== "fundamentals");
+  return (state.catalog.analysts || []).filter((item) => (asset !== "crypto" && asset !== "commodity") || item.value !== "fundamentals");
 }
 
 function backtestPayload() {
@@ -3422,6 +3424,9 @@ function backtestAnalystNote(asset) {
   if (asset === "crypto") {
     return `加密资产没有基本面分析师。命令行：${state.catalog?.confirmation_sentences?.unavailable_crypto || ""}。`;
   }
+  if (asset === "commodity") {
+    return "贵金属/商品期货没有基本面分析师（没有公司财报）。";
+  }
   return "当前不是 crypto。命令行不会打印加密资产不可用那句。";
 }
 
@@ -3449,7 +3454,7 @@ function renderBacktest() {
       <div class="field"><label>资产类型</label><div class="choice-row" id="bt-asset"></div></div>
       <div class="field"><label for="bt-every">每隔多少天分析一次</label><input id="bt-every" type="number" min="1" step="1" value="${escapeHtml(book.every)}"><p class="form-hint">间隔越小，分析次数越多，耗时和模型用量越高。</p></div>
       <details class="disclosure field--wide"><summary>分析维度与模型</summary>
-        <div class="field"><label>分析维度</label><div class="choice-row" id="bt-analysts"></div><p class="form-hint">${book.asset_type === "crypto" ? "加密资产不使用基本面分析。" : "默认使用全部分析维度。"}</p></div>
+        <div class="field"><label>分析维度</label><div class="choice-row" id="bt-analysts"></div><p class="form-hint">${book.asset_type === "crypto" ? "加密资产不使用基本面分析。" : book.asset_type === "commodity" ? "贵金属/商品期货不使用基本面分析。" : "默认使用全部分析维度。"}</p></div>
         <div class="model-settings-grid">${["quick", "deep"].map((tier) => `<section class="panel"><h3>${tier === "quick" ? "快模型" : "深模型"}</h3><div class="field"><label>供应商</label><div id="${tier}-providers"></div><input id="${tier}-provider" type="hidden" value="${escapeHtml(state.form[`${tier}_think_provider`] || "")}"></div><div class="field"><label>模型</label><div class="choice-row" id="${tier}-models"></div></div><details><summary>手动填写模型 ID</summary><input id="${tier}-model" value="${escapeHtml(state.form[`${tier}_think_llm`] || "")}" aria-label="${tier === "quick" ? "快模型" : "深模型"} ID"></details></section>`).join("")}</div>
         <div class="field" id="model-effort"></div>
       </details>
@@ -3466,7 +3471,7 @@ function renderBacktest() {
   bindTier("deep");
   showModelEffort();
   loadSelectedTierModels();
-  fillChoices("#bt-asset", [{value: "stock", zh: "股票"}, {value: "crypto", zh: "加密资产"}], book.asset_type, (value) => {
+  fillChoices("#bt-asset", [{value: "stock", zh: "股票"}, {value: "crypto", zh: "加密资产"}, {value: "commodity", zh: "贵金属/商品期货"}], book.asset_type, (value) => {
     book.tickers = document.querySelector("#bt-tickers").value;
     book.start = document.querySelector("#bt-start").value;
     book.end = document.querySelector("#bt-end").value;
@@ -3475,7 +3480,7 @@ function renderBacktest() {
     book.portfolio = document.querySelector("#bt-portfolio").value;
     syncBacktestModels();
     book.asset_type = value;
-    if (value === "crypto") book.analysts = book.analysts.filter((item) => item !== "fundamentals");
+    if (value === "crypto" || value === "commodity") book.analysts = book.analysts.filter((item) => item !== "fundamentals");
     renderBacktest();
   });
   fillChoices("#bt-analysts", analysts, book.analysts, (value, pressed) => {

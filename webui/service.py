@@ -525,7 +525,7 @@ def asset_options(ticker: str) -> dict:
         "ticker": symbol,
         "asset_type": asset.value,
         "analysts": [item.value for item in analysts],
-        "fundamentals_hidden": asset.value == "crypto",
+        "fundamentals_hidden": asset.value in ("crypto", "commodity"),
         "benchmark": resolve_benchmark(symbol, config),
         "benchmark_source": "TRADINGAGENTS_BENCHMARK_TICKER" if explicit else "benchmark_map",
     }
@@ -2638,7 +2638,7 @@ def recent_tickers(limit: int = 6) -> list[dict]:
         ticker = str(selections.get("ticker") or "").strip().upper()
         if ticker and ticker not in seen:
             asset = selections.get("asset_type")
-            seen[ticker] = {"ticker": ticker, "asset_type": asset if asset in ("stock", "crypto") else None}
+            seen[ticker] = {"ticker": ticker, "asset_type": asset if asset in ("stock", "crypto", "commodity") else None}
     if len(seen) < limit:
         for row in list_reports():
             ticker = str(row.get("ticker") or "").strip().upper()

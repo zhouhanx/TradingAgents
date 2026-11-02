@@ -13,3 +13,5 @@ class AnalystType(StrEnum):
 class AssetType(StrEnum):
     STOCK = "stock"
     CRYPTO = "crypto"
+    # V2-METALS: precious metals and other commodity futures (XAUUSD -> GC=F).
+    COMMODITY = "commodity"

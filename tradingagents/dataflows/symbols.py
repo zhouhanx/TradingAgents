@@ -52,7 +52,9 @@ _ALIASES = {
     # Precious metals (spot names -> COMEX/NYMEX futures)
     "XAUUSD": "GC=F", "XAU": "GC=F", "GOLD": "GC=F",
     "XAGUSD": "SI=F", "XAG": "SI=F", "SILVER": "SI=F",
-    "XPTUSD": "PL=F", "XPDUSD": "PA=F",
+    # V2-METALS: bare XPT/XPD and PLATINUM/PALLADIUM too
+    "XPTUSD": "PL=F", "XPT": "PL=F", "PLATINUM": "PL=F",
+    "XPDUSD": "PA=F", "XPD": "PA=F", "PALLADIUM": "PA=F",
     # Energy
     "WTICOUSD": "CL=F", "USOIL": "CL=F", "WTI": "CL=F",
     "BCOUSD": "BZ=F", "UKOIL": "BZ=F", "BRENT": "BZ=F",

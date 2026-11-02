@@ -3350,7 +3350,7 @@ def test_flag_help_matches_the_cli_help_text(monkeypatch):
     assert backtest["end"]["help"] == "Last analysis date, YYYY-MM-DD"
     assert backtest["every"]["help"] == "Days between analysis dates"
     assert backtest["analysts"]["help"].startswith("Comma-separated analysts to run")
-    assert backtest["asset_type"]["help"] == "stock or crypto"
+    assert backtest["asset_type"]["help"] == "stock, crypto or commodity"
     assert backtest["portfolio"]["help"] == "JSON file with holdings and cash, held constant across the grid"
     assert backtest["run_id"]["help"].startswith("Continue an earlier sweep")
     assert catalog["analyze_doc"].startswith("Run an analysis. This is what a bare `tradingagents` does.")

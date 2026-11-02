@@ -69,6 +69,8 @@ ANALYST_CHOICES = [
 ]
 
 CRYPTO_SUFFIXES = ("-USD", "-USDT", "-USDC", "-BTC", "-ETH")
+# V2-METALS: Yahoo futures symbols (GC=F gold, SI=F silver, CL=F crude ...).
+COMMODITY_SUFFIXES = ("=F",)
 
 
 # The style of every selection menu.
@@ -221,13 +223,21 @@ def detect_asset_type(ticker: str) -> AssetType:
     canonical = normalize_ticker_symbol(ticker)
     if canonical.endswith(CRYPTO_SUFFIXES):
         return AssetType.CRYPTO
+    # V2-METALS: metal / commodity futures (GC=F, SI=F, PL=F ...), which is
+    # also where the spot aliases land (XAUUSD, GOLD, XAG, PLATINUM ...).
+    if canonical.endswith(COMMODITY_SUFFIXES):
+        return AssetType.COMMODITY
     return AssetType.STOCK
+
+
+# Asset types with no company behind them: the fundamentals analyst is not offered.
+NO_FUNDAMENTALS = frozenset({AssetType.CRYPTO, AssetType.COMMODITY})
 
 
 def filter_analysts_for_asset_type(
     analysts: list[AnalystType], asset_type: AssetType
 ) -> list[AnalystType]:
-    if asset_type != AssetType.CRYPTO:
+    if asset_type not in NO_FUNDAMENTALS:
         return analysts
     return [
         analyst

@@ -124,7 +124,8 @@ def build_instrument_context(
     on the analysis date.
     """
     is_crypto = asset_type == "crypto"
-    instrument_label = "asset" if is_crypto else "instrument"
+    is_commodity = asset_type == "commodity"
+    instrument_label = "asset" if is_crypto else ("commodity futures contract" if is_commodity else "instrument")
     context = (
         f"The {instrument_label} to analyze is `{ticker}`. "
         "The tools serve this instrument; refer to it by this exact ticker in every report and recommendation, "
@@ -133,7 +134,7 @@ def build_instrument_context(
 
     identity = identity or {}
     name = identity.get("company_name") or identity.get("name")
-    label = "Name" if is_crypto else "Company"
+    label = "Name" if (is_crypto or is_commodity) else "Company"
     details = []
     if is_historical(trade_date):
         if name:
@@ -165,6 +166,15 @@ def build_instrument_context(
         context += (
             " Treat it as a crypto asset rather than a company, and do not "
             "assume company fundamentals are available."
+        )
+    if is_commodity:
+        context += (
+            " Treat it as a commodity future (e.g. a precious metal), not a company: "
+            "there are no company fundamentals, earnings or balance sheet. Drivers are "
+            "supply and demand, the US dollar, real interest rates, inflation and central-bank "
+            "or safe-haven flows. The price series is a rolling front-month future, so "
+            "contract rolls can show small jumps and futures can trade above or below spot "
+            "(contango / backwardation)."
         )
     return context
 
