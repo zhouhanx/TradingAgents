@@ -62,7 +62,7 @@ cli = ["static/*"]
 tradingagents = ["assets/*.svg"]
 # PKG-001: the WebUI's static files ship with the package. Its fonts are the
 # system font stacks in console.css/app.css (no font files, no external requests).
-webui = ["static/*.html", "static/*.css", "static/*.js", "static/icons/*"]
+webui = ["static/*.html", "static/*.css", "static/*.js", "static/icons/*", "static/vendor/*"]
 
 [tool.setuptools.exclude-package-data]
 # package.json / package-lock.json / node_modules only drive the DOM tests (npm test).

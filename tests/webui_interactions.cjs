@@ -144,7 +144,7 @@ test('analysis guides through four stages, validates, retains input and submits 
 test('all pages use full-width surfaces while retaining fluid containers', async () => {
   const ui = await setup();
   try {
-    const pages = ['analyze', 'runs', 'reports', 'backtest', 'accounts', 'models'];
+    const pages = ['analyze', 'runs', 'reports', 'kline', 'backtest', 'accounts', 'models'];
     assert.deepEqual([...ui.doc.querySelectorAll('.nav-item[data-page]')].map((item) => item.dataset.page), pages);
     for (const gone of ['settings', 'memory', 'help']) assert.equal(ui.doc.querySelector(`[data-page=${gone}]`), null, `${gone} page is folded away`);
     for (const page of pages) {

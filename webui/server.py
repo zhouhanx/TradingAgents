@@ -214,6 +214,11 @@ class Handler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             self._call(lambda: service.asset_options((query.get("ticker") or [""])[0]))
             return
+        if parsed.path == "/api/kline":
+            # V2-KLINE: K 线行情 bars; read-only, same session-token rule as every API read.
+            query = parse_qs(parsed.query)
+            self._kline((query.get("symbol") or [""])[0], (query.get("tf") or [""])[0])
+            return
         if parsed.path == "/api/models":
             query = parse_qs(parsed.query)
             provider = (query.get("provider") or [""])[0]
@@ -282,6 +287,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/reports/outline":
             query = parse_qs(parsed.query)
             self._call(lambda: service.report_outline((query.get("path") or [""])[0]))
+            return
+        if parsed.path in {"/vendor/lightweight-charts.js", "/vendor/lightweight-charts.LICENSE.txt"}:
+            self._static(STATIC / "vendor" / Path(parsed.path).name)
             return
         if parsed.path.startswith("/icons/"):
             self._static(STATIC / "icons" / Path(parsed.path).name)
@@ -399,6 +407,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "same-origin")
         self.end_headers()
         self.wfile.write(data)
+
+    def _kline(self, symbol: str, tf: str) -> None:
+        from webui import kline as kline_data
+
+        try:
+            self._json(kline_data.kline(symbol, tf or None))
+        except kline_data.KlineError as exc:
+            self._json({"error": str(exc)}, 400)
 
     def _static(self, path: Path) -> None:
         resolved = path.resolve()

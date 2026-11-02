@@ -310,7 +310,10 @@ def test_tradingagents_sh_runs_the_installed_entry_point(venv, tmp_path):
 URL = re.compile(r"""https?://[A-Za-z0-9.-]+|["'`(]//[A-Za-z0-9-]+\.[A-Za-z]""")
 
 
-@pytest.mark.parametrize("name", [n for n in _static_files() if n.endswith((".html", ".css", ".js"))])
+# V2-KLINE: the vendored chart library is checked on its own below (its license
+# header names its upstream sites; it makes no request of its own).
+@pytest.mark.parametrize("name", [n for n in _static_files()
+                                  if n.endswith((".html", ".css", ".js")) and "/vendor/" not in n])
 def test_static_files_make_no_external_requests(name):
     text = (ROOT / name).read_text(encoding="utf-8")
     assert "@import" not in text
@@ -323,6 +326,12 @@ def test_static_files_make_no_external_requests(name):
     allowed = {"http://www.w3.org", "http://localhost"}
     found = [m.group(0) for m in URL.finditer(text) if m.group(0) not in allowed]
     assert found == [], found
+
+
+def test_vendored_chart_library_names_only_its_license_and_home():
+    text = (STATIC / "vendor" / "lightweight-charts.js").read_text(encoding="utf-8")
+    assert sorted(set(URL.findall(text))) == ["http://www.w3.org", "https://www.apache.org", "https://www.tradingview.com"]
+    assert "fetch(" not in text and "XMLHttpRequest" not in text
 
 
 def test_font_stacks_end_in_a_generic_family():

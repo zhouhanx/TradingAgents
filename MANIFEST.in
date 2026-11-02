@@ -4,6 +4,7 @@ include tradingagents.sh
 include webui/static/*.html webui/static/*.css webui/static/*.js
 include webui/static/*.svg webui/static/*.png
 recursive-include webui/static/icons *
+include webui/static/vendor/lightweight-charts.js webui/static/vendor/lightweight-charts.LICENSE.txt
 prune webui/node_modules
 prune webui/static/node_modules
 exclude webui/package.json webui/package-lock.json webui/API-NOTES.md

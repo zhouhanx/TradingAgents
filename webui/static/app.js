@@ -284,7 +284,7 @@ function showPage(name, {runDetail = null, framework = null} = {}) {
   document.querySelectorAll(".nav-item").forEach((button) => {
     button.classList.toggle("nav-item--active", button.dataset.page === name);
   });
-  const renderers = { analyze: renderAnalyze, runs: renderRuns, reports: renderReports, backtest: renderBacktest, accounts: renderAccounts, models: renderModels };
+  const renderers = { analyze: renderAnalyze, runs: renderRuns, reports: renderReports, kline: renderKline, backtest: renderBacktest, accounts: renderAccounts, models: renderModels };
   if (!renderers[name]) {
     state.page = "analyze";
     pageEl.dataset.page = "analyze";
@@ -4590,3 +4590,155 @@ Promise.all([api("/api/catalog"), api("/api/auth/status"), api("/api/config"), a
 }).catch((error) => {
   pageEl.innerHTML = `<p class="error-banner">${escapeHtml(error.message)}</p>`;
 });
+
+
+// V2-KLINE: K 线行情. About a year of daily bars from /api/kline (stocks and
+// metals/futures from the existing Yahoo source; crypto OKX -> Coinbase -> Yahoo),
+// drawn with the open-source Lightweight Charts library bundled under /vendor/
+// (Apache-2.0). Realtime ticks are a separate batch (V2-KLINE-RT).
+const KLINE_ASSETS = [["stock", "股票"], ["crypto", "加密货币"], ["commodity", "贵金属/商品期货"]];
+const KLINE_TFS = [["1D", "日线"], ["1W", "周线"], ["1M", "月线"]];
+const KLINE_PROVIDER = { okx: "OKX", coinbase: "Coinbase", yahoo: "Yahoo Finance" };
+const KLINE_DEFAULT = { stock: "NVDA", crypto: "BTC-USDT", commodity: "XAUUSD" };
+let klineLibPromise = null;
+let klineChart = null;
+
+function loadKlineLib() {
+  if (window.LightweightCharts) return Promise.resolve(window.LightweightCharts);
+  if (!klineLibPromise) {
+    klineLibPromise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = "/vendor/lightweight-charts.js";
+      script.onload = () => resolve(window.LightweightCharts);
+      script.onerror = () => { klineLibPromise = null; reject(new Error("图表组件加载失败。")); };
+      document.head.appendChild(script);
+    });
+  }
+  return klineLibPromise;
+}
+
+function klineState() {
+  if (!state.kline) state.kline = { symbol: "XAUUSD", asset: "commodity", tf: "1D" };
+  return state.kline;
+}
+
+function klinePrice(n) {
+  if (!Number.isFinite(n)) return "—";
+  return Math.abs(n) >= 1000 ? n.toFixed(1) : Math.abs(n) >= 1 ? n.toFixed(2) : n.toPrecision(4);
+}
+
+function renderKline() {
+  const ks = klineState();
+  const seg = (id, items, current, attr) => `<div class="seg" id="${id}" role="group">${items.map(([value, label]) => `<button type="button" class="seg-item${value === current ? " on" : ""}" data-${attr}="${value}">${escapeHtml(label)}</button>`).join("")}</div>`;
+  pageEl.innerHTML = `
+    ${heading("", "K 线行情", "近 1 年行情走势。股票与贵金属/商品期货沿用分析所用的数据源；加密货币优先 OKX，其次 Coinbase。")}
+    <section class="panel kline-bar">
+      <form id="kline-form" class="kline-controls">
+        <input id="kline-symbol" value="${escapeHtml(ks.symbol)}" aria-label="标的代码" placeholder="例如 NVDA、XAUUSD、BTC-USDT">
+        ${seg("kline-asset", KLINE_ASSETS, ks.asset, "asset")}
+        ${seg("kline-tf", KLINE_TFS, ks.tf, "tf")}
+        <span class="kline-tag" id="kline-source">数据源：—</span>
+      </form>
+    </section>
+    <section class="panel kline-card">
+      <div class="kline-head"><b id="kline-name">${escapeHtml(ks.symbol)}</b><span class="kline-tag kline-tag--future" id="kline-future" hidden></span><span class="kline-price" id="kline-price">—</span><span class="kline-change" id="kline-change"></span></div>
+      <div class="kline-ohlc" id="kline-ohlc"></div>
+      <div class="kline-chart" id="kline-chart"><p class="kline-status" id="kline-status" role="status">正在加载…</p></div>
+      <div class="kline-foot"><span id="kline-note">展示近 1 年日线；当前为静态数据，刷新页面或切换周期时更新。</span><span>图表：Lightweight Charts（开源组件，<a href="/vendor/lightweight-charts.LICENSE.txt" target="_blank" rel="noopener">Apache-2.0 许可证</a>）</span></div>
+    </section>`;
+  const form = document.querySelector("#kline-form");
+  form.addEventListener("submit", (event) => { event.preventDefault(); ks.symbol = document.querySelector("#kline-symbol").value.trim() || ks.symbol; loadKline(); });
+  document.querySelector("#kline-symbol").addEventListener("change", () => form.requestSubmit());
+  document.querySelector("#kline-asset").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-asset]");
+    if (!button || button.dataset.asset === ks.asset) return;
+    ks.asset = button.dataset.asset;
+    ks.symbol = KLINE_DEFAULT[ks.asset];
+    document.querySelector("#kline-symbol").value = ks.symbol;
+    loadKline();
+  });
+  document.querySelector("#kline-tf").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-tf]");
+    if (!button) return;
+    ks.tf = button.dataset.tf;
+    loadKline();
+  });
+  loadKline();
+}
+
+async function loadKline() {
+  const ks = klineState();
+  const token = (ks.token || 0) + 1;
+  ks.token = token;
+  document.querySelectorAll("#kline-tf [data-tf]").forEach((b) => b.classList.toggle("on", b.dataset.tf === ks.tf));
+  const status = document.querySelector("#kline-status");
+  if (status) { status.hidden = false; status.textContent = "正在加载…"; status.classList.remove("error-banner"); }
+  let data;
+  let lib;
+  try {
+    [data, lib] = await Promise.all([
+      api(`/api/kline?symbol=${encodeURIComponent(ks.symbol)}&tf=${encodeURIComponent(ks.tf)}`),
+      loadKlineLib(),
+    ]);
+  } catch (error) {
+    if (state.page !== "kline" || ks.token !== token) return;
+    const box = document.querySelector("#kline-status");
+    if (box) { box.hidden = false; box.textContent = error.message; box.classList.add("error-banner"); }
+    return;
+  }
+  if (state.page !== "kline" || ks.token !== token) return;
+  drawKline(lib, data);
+}
+
+function drawKline(lib, data) {
+  const ks = klineState();
+  ks.asset = data.asset_type;
+  document.querySelectorAll("#kline-asset [data-asset]").forEach((b) => b.classList.toggle("on", b.dataset.asset === data.asset_type));
+  const provider = KLINE_PROVIDER[data.provider] || data.provider;
+  const source = data.asset_type === "crypto"
+    ? `数据源：${provider}${data.provider === "okx" ? "（主） · Coinbase（备用）" : "（备用）"}`
+    : data.asset_type === "commodity" ? `数据源：期货行情 ${data.provider_symbol}` : `数据源：股票日线 ${data.provider_symbol}`;
+  document.querySelector("#kline-source").textContent = source;
+  document.querySelector("#kline-name").textContent = data.symbol;
+  const future = document.querySelector("#kline-future");
+  future.hidden = !data.is_future;
+  future.textContent = data.is_future ? `期货标注 ${data.canonical} · 近月合约，换月可能跳空` : "";
+  const tfLabel = (KLINE_TFS.find(([v]) => v === data.tf) || [, "日线"])[1];
+  document.querySelector("#kline-note").textContent = `${tfLabel}，展示近 1 年；当前为静态数据，切换周期或刷新时更新。`;
+  const bars = data.bars || [];
+  const host = document.querySelector("#kline-chart");
+  if (klineChart) { try { klineChart.remove(); } catch (_) { /* detached */ } klineChart = null; }
+  host.innerHTML = "";
+  if (!bars.length) {
+    host.innerHTML = `<p class="kline-status">没有数据。</p>`;
+    return;
+  }
+  const chart = lib.createChart(host, {
+    autoSize: true,
+    layout: { background: { color: "#ffffff" }, textColor: "#5f6368", attributionLogo: false },
+    grid: { vertLines: { color: "#f0f3fa" }, horzLines: { color: "#f0f3fa" } },
+    rightPriceScale: { borderColor: "#e0e0e0" },
+    timeScale: { borderColor: "#e0e0e0" },
+    localization: { locale: "zh-CN" },
+  });
+  klineChart = chart;
+  const candles = chart.addCandlestickSeries({ upColor: "#26a69a", downColor: "#ef5350", borderVisible: false, wickUpColor: "#26a69a", wickDownColor: "#ef5350" });
+  candles.setData(bars.map((b) => ({ time: b.time, open: b.open, high: b.high, low: b.low, close: b.close })));
+  const volume = chart.addHistogramSeries({ priceFormat: { type: "volume" }, priceScaleId: "", color: "rgba(38,166,154,.35)" });
+  volume.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+  volume.setData(bars.map((b) => ({ time: b.time, value: b.volume, color: b.close >= b.open ? "rgba(38,166,154,.35)" : "rgba(239,83,80,.35)" })));
+  chart.timeScale().fitContent();
+  const last = bars[bars.length - 1];
+  const change = (last.close / bars[0].open - 1) * 100;
+  document.querySelector("#kline-price").textContent = klinePrice(last.close);
+  const changeEl = document.querySelector("#kline-change");
+  changeEl.textContent = `${change >= 0 ? "+" : ""}${change.toFixed(2)}%（1Y）`;
+  changeEl.classList.toggle("kline-change--down", change < 0);
+  const ohlc = (b) => `开 ${klinePrice(b.open)}  高 ${klinePrice(b.high)}  低 ${klinePrice(b.low)}  收 ${klinePrice(b.close)}`;
+  const ohlcEl = document.querySelector("#kline-ohlc");
+  ohlcEl.textContent = ohlc(last);
+  chart.subscribeCrosshairMove((param) => {
+    const point = param && param.seriesData && param.seriesData.get(candles);
+    ohlcEl.textContent = point ? ohlc(point) : ohlc(last);
+  });
+}
