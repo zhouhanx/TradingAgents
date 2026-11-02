@@ -10,7 +10,7 @@ import re
 import unicodedata
 from typing import Any
 
-from tradingagents.redaction import INVISIBLE_CLASS
+from tradingagents.redaction import _CLOUD, _GLUED_TAIL, DASH_CHARS, INVISIBLE_CLASS
 
 _SECRET_MARKERS = ("token", "api_key", "secret", "password", "authorization", "refresh",
                    # W88
@@ -100,13 +100,21 @@ def _is_code_field(key, value: Any) -> bool:
 # "/", NBSP and U+2010 count as separators too; rules 1 and 2 are unchanged.
 # D1d-r7 (W127/W128): the known prefix is found anywhere inside a run (NVDA/sk-proj-...),
 # in one linear pass; rules 1 and 2 are unchanged.
+# B1 (W129): U+2012-2015, U+2212, "+", "~", U+00B7, U+30FB (and the earlier NBSP,
+# U+2011, U+202F) count as separators too; rules 1 and 2 are unchanged.
+# B2 (W132): a known prefix inside a word starts a key only at a word start: the
+# start of the run, after a separator or ":", after a lower-case/digit -> letter or
+# upper-case -> lower-case change (NVDAsk-proj), or when a separator follows the
+# prefix (NVDASK-PROJ-...). ARTEMIS-GLOBAL-FUND-2026, PARTNERRE-PREFERRED-2026 and
+# ASKARI-BANK-LIMITED-PK are kept.
+# B3 (W131): separators at the end of a key stay after [redacted-key].
 # Long Bearer/Basic tokens and JWTs keep their earlier rule.
 _KEY_RUN = 16
 _SHORT_PIECE = 4
 _SHORT_TOTAL = 19
 _KEY_PREFIXES = ("skantapi03", "skant", "skproj", "sess", "sk", "xai", "ghp", "gho", "ghs", "rt", "pk")
 _SEPARATORS = re.compile(r"[-_./\u2010]")
-_WIDE_SEPS = re.compile("[\u00a0\u2011\u202f]")
+_WIDE_SEPS = re.compile("[\u00a0\u202f" + re.escape(DASH_CHARS) + "]")
 _RUN = re.compile(r"[A-Za-z0-9\-_./:\u2010]+")
 _INVISIBLE = re.compile(INVISIBLE_CLASS)
 _BEARER = re.compile(rf"(?i:\b(?:bearer|basic)\s+)[A-Za-z0-9._~+/=-]{{{_KEY_RUN},}}")
@@ -115,7 +123,8 @@ _JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}
 
 def _fold_code(value: str) -> str:
     value = _WIDE_SEPS.sub("\u2010", value)
-    return _INVISIBLE.sub("", unicodedata.normalize("NFKC", value))
+    value = _INVISIBLE.sub("", unicodedata.normalize("NFKC", value))
+    return _WIDE_SEPS.sub("\u2010", value)      # U+FF65 -> U+30FB after NFKC
 
 
 def _key_start(run: str) -> int | None:
@@ -135,10 +144,25 @@ def _key_start(run: str) -> int | None:
         prefix = next((p for p in _KEY_PREFIXES if joined.startswith(p, k)), None)
         if prefix is None or n - k - len(prefix) < _KEY_RUN:
             continue
+        if not _word_start(run, where, k, len(prefix)):
+            continue
         if n - k < _SHORT_TOTAL and _short_pieces(run[where[k]:].replace(":", "-")):
             continue
         return where[k]
     return None
+
+
+def _word_start(run: str, where: list, k: int, size: int) -> bool:
+    """W132: whether the prefix at ``joined[k]`` starts a word (see the rules above)."""
+    i = where[k]
+    if k == 0 or where[k - 1] != i - 1:
+        return True                                  # run start, or a separator before it
+    prev, cur = run[i - 1], run[i]
+    if (prev.isdigit() and cur.isalpha()) or (prev.isupper() and cur.islower()) or (
+            prev.islower() and cur.isupper()):
+        return True
+    end = where[k + size - 1]
+    return end + 1 < len(run) and (run[end + 1] == ":" or bool(_SEPARATORS.match(run[end + 1])))
 
 
 def _key_run(run: str) -> bool:
@@ -147,7 +171,10 @@ def _key_run(run: str) -> bool:
 
 def _cut_key(run: str) -> str:
     start = _key_start(run)
-    return run if start is None else run[:start] + "[redacted-key]"
+    if start is None:
+        return run
+    tail = len(run) - len(run.rstrip("-_./:\u2010"))
+    return run[:start] + "[redacted-key]" + (run[len(run) - tail:] if tail else "")
 
 
 def _short_pieces(token: str) -> bool:
@@ -159,7 +186,8 @@ def _short_pieces(token: str) -> bool:
 def _scan_one(value: str) -> str:
     folded = _fold_code(value)
     tokens = _RUN.findall(folded)
-    if not (_JWT.search(folded) or _BEARER.search(folded) or any(_key_run(t) for t in tokens)):
+    if not (_JWT.search(folded) or _BEARER.search(folded) or _CLOUD.search(folded)
+            or _GLUED_TAIL.search(folded) or any(_key_run(t) for t in tokens)):
         return value
     text = _BEARER.sub("[redacted-key]", _JWT.sub("[redacted-key]", folded))
     return scan_value(_RUN.sub(lambda m: _cut_key(m.group()), text))

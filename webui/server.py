@@ -474,7 +474,9 @@ INTERNAL_ERROR = "服务器内部错误，没有完成这次操作。详情已�
 # secret, refresh_token, ...; the name also when URL-encoded, %6B=) never reach the
 # request log.
 _LOG_PARAM = re.compile(r"([?&;])([^=&;#\s]*)=([^&;#\s]*)")
-_LOG_SHORT_NAMES = frozenset({"k", "key"})
+# B1: auth / sig / signature and the AWS / Google signed-URL parameters too.
+_LOG_SHORT_NAMES = frozenset({"k", "key", "auth", "sig", "signature", "x-amz-signature", "x-amz-credential",
+                              "x-amz-security-token", "x-goog-signature", "x-goog-credential"})
 
 
 def _log_secret_name(name: str) -> bool:
@@ -491,7 +493,14 @@ def _log_secret_name(name: str) -> bool:
 def _log_path(path: str) -> str:
     def one(match: re.Match) -> str:
         sep, name, _value = match.groups()
-        return f"{sep}{name}=[redacted]" if _log_secret_name(name) else match.group(0)
+        if _log_secret_name(name):
+            return f"{sep}{name}=[redacted]"
+        from urllib.parse import unquote_plus
+
+        from webui.redaction import scan_value
+
+        plain = unquote_plus(_value)                # B1: a key under any name (AIza..., sk-...)
+        return f"{sep}{name}=[redacted]" if scan_value(plain) != plain else match.group(0)
 
     return _LOG_PARAM.sub(one, str(path))
 

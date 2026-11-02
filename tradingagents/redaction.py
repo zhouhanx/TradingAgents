@@ -16,6 +16,17 @@ _COOKIE_NAMES = (
     r"[\w.-]*xsrf[\w-]*|[\w.-]*auth[\w-]*|jwt|remember[_-]?(?:me|token)|cf_clearance|__cf\w*"
 )
 
+# B1 (W129 informed): provider keys with no sk-/ghp_ prefix: Google (AIza + 35),
+# AWS access key ids (AKIA/ASIA + 16), and bare 32+ hex runs (digits and letters
+# both present: a 40-hex token, a 64-hex secret). Used for notes, code fields and
+# error text alike.
+_CLOUD = re.compile(r"(?<![A-Za-z0-9])(?:AIza[0-9A-Za-z_-]{30,}|(?:AKIA|ASIA)[0-9A-Z]{16}"
+                    r"|(?=[0-9a-fA-F]*[0-9])(?=[0-9a-fA-F]*[a-fA-F])[0-9a-fA-F]{32,})(?![A-Za-z0-9])")
+# W123: a key-length tail glued after a redaction marker (sk-[redacted-key]Ab3d...)
+# is dropped too.
+_GLUED_TAIL = re.compile(r"(\[redacted(?:-key|-token)?\])[A-Za-z0-9_-]{12,}")
+_CLOUD_PATTERNS = ((_CLOUD, "[redacted-key]"), (_GLUED_TAIL, r"\1"))
+
 _SECRET_PATTERNS = (
     # Whole Cookie / Set-Cookie header values, to the end of the line.
     (re.compile(r"(?im)\b(set-cookie|cookie)(\"?\s*[:=：＝]\s*)[^\r\n]+"), r"\1\2[redacted-cookie]"),
@@ -37,6 +48,7 @@ _SECRET_PATTERNS = (
     # long run without an @ is scanned once: linear time, not quadratic (W28).
     (re.compile(r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]++@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "[redacted-email]"),
     (re.compile(r"\b[A-Za-z0-9_+/=-]{32,}"), "[redacted]"),
+    *_CLOUD_PATTERNS,
 )
 
 # W60: the rules for a credential inside an ordinary value (a holdings note):
@@ -44,10 +56,45 @@ _SECRET_PATTERNS = (
 # W118/W113: in a value only key-length credentials count (12+ characters after
 # Bearer / the prefix), so "sk-learn", "SK-Hynix stake", "Bearer market",
 # XAI-USD and rt-/pk-/ghp_ tickers stay as typed.
+_VALUE_PREFIXED = re.compile(r"(?<![A-Za-z0-9])(?i:sk|xai|sess|rt|pk|ghp|gho|ya29)[-_][A-Za-z0-9_-]{12,}")
+_VALUE_BEARER = re.compile(r"(?i)\b(bearer|basic)\s+(?=[A-Za-z0-9._~+/=-]{16,})[A-Za-z0-9._~+/=-]+")
+_WORD_PIECE = re.compile(r"[a-z]+|[A-Z]+|[A-Z][a-z]+|[0-9]+")
+
+
+def _wordlike(match_text: str) -> bool:
+    """W119: a note's hyphenated words or a real code, not a key.
+
+    Kept: rule 1 of the code fields (every piece 1-4 characters, under 19 without
+    separators: XAI-USD-PERP-2026), or every piece after the prefix a plain word
+    (lower, UPPER or Capitalized letters) or digits, no piece 12+ long, and at least
+    one word of 5+ letters (RT-PCR-confirmed-cases-2026, sk-hynix-longer-symbol).
+    Mixed letter/digit or mixed-case pieces (real keys) are never kept."""
+    pieces = [p for p in re.split(r"[-_]", match_text) if p]
+    if len(pieces) > 1 and all(len(p) <= 4 for p in pieces) and len("".join(pieces)) < 19:
+        return True
+    body = pieces[1:]
+    return (len(body) > 1 and all(_WORD_PIECE.fullmatch(p) and len(p) < 12 for p in body)
+            and any(p.isalpha() and len(p) >= 5 for p in body))
+
+
+def _prefixed_value(match: re.Match) -> str:
+    return match.group(0) if _wordlike(match.group(0)) else "[redacted-key]"
+
+
+def _bearer_value(match: re.Match) -> str:
+    """W119: "Bearer marketmakerbehaviour1" is prose: all lower-case letters (and at
+    most two trailing digits) under 24 characters. Anything else is a token."""
+    token = match.group(0).split()[-1]
+    if len(token) < 24 and re.fullmatch(r"[a-z]+[0-9]{0,2}", token):
+        return match.group(0)
+    return f"{match.group(1)} [redacted]"
+
+
 _VALUE_PATTERNS = (
-    (re.compile(r"(?i)\b(bearer|basic)\s+(?=[A-Za-z0-9._~+/=-]{16,})[A-Za-z0-9._~+/=-]+"), r"\1 [redacted]"),
+    (_VALUE_BEARER, _bearer_value),
     _SECRET_PATTERNS[2],
-    (re.compile(r"(?<![A-Za-z0-9])(?i:sk|xai|sess|rt|pk|ghp|gho|ya29)[-_][A-Za-z0-9_-]{12,}"), "[redacted-key]"),
+    (_VALUE_PREFIXED, _prefixed_value),
+    *_CLOUD_PATTERNS,
 )
 # W29/W85: zero-width / invisible characters a key or key name can be split with.
 # One set for error text, values and key-name folding (webui.redaction uses it too):
@@ -58,10 +105,16 @@ INVISIBLE_CLASS = ("[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f"
                    "\U000e0000-\U000e007f\U0001d173-\U0001d17a\U000e0100-\U000e01ef]")
 _INVISIBLE = re.compile(INVISIBLE_CLASS)
 # The case-insensitive, key-length prefixed rule (W86/W113), found by its replacement.
-_PREFIXED = next(pattern for pattern, replacement in _VALUE_PATTERNS if replacement == "[redacted-key]")
+_PREFIXED = _VALUE_PREFIXED
+# W121: the error-text prefixed rule (any length 3+), for the full-width shadow too.
+_ERROR_PREFIXED = _SECRET_PATTERNS[3][0]
+_PREFIXED_ANY = _VALUE_PREFIXED
 # Full-width ASCII U+FF01-FF5E -> U+0021-007E, one character to one.
 _FULLWIDTH = {code: code - 0xFEE0 for code in range(0xFF01, 0xFF5F)}
-_HAS_FULLWIDTH = re.compile("[\uff01-\uff5e]")
+# W129: dash-like and dot-like characters a key can be split with count as "-".
+DASH_CHARS = "\u2012\u2013\u2014\u2015\u2212\u2010\u2011\ufe58\ufe63\u00b7\u30fb\uff65+~"
+_FULLWIDTH.update({ord(ch): ord("-") for ch in DASH_CHARS})
+_HAS_FULLWIDTH = re.compile("[\uff01-\uff5e" + re.escape(DASH_CHARS) + "]")
 
 
 def _shadow(value: str) -> str:
@@ -70,11 +123,16 @@ def _shadow(value: str) -> str:
     return value.translate(_FULLWIDTH)
 
 
-def _fullwidth_keys(value: str) -> tuple[str, int]:
-    """Prefixed keys written partly or wholly in full-width letters."""
+def _fullwidth_keys(value: str, pattern=None) -> tuple[str, int]:
+    """Prefixed keys written partly or wholly in full-width letters, or split with
+    dash-like characters (W129: U+2013, U+2212, "+", "~", U+00B7, U+30FB ...)."""
     if not _HAS_FULLWIDTH.search(value):
         return value, 0
-    spans = [m.span() for m in _PREFIXED.finditer(_shadow(value))]
+    shadow = _shadow(value)
+    if pattern is None:
+        spans = [m.span() for m in _PREFIXED.finditer(shadow) if not _wordlike(m.group(0))]
+    else:
+        spans = [m.span() for m in pattern.finditer(shadow)]
     for start, end in reversed(spans):
         value = value[:start] + "[redacted-key]" + value[end:]
     return value, len(spans)
@@ -83,13 +141,11 @@ def _fullwidth_keys(value: str) -> tuple[str, int]:
 def redact_secrets(text) -> str:
     """Only the credential rules, for values that are not error text (W60)."""
     original = "" if text is None else str(text)
-    value = _INVISIBLE.sub("", original)
-    value, count = _fullwidth_keys(value)
-    found = count > 0
+    start = _INVISIBLE.sub("", original)
+    value, _ = _fullwidth_keys(start)
     for pattern, replacement in _VALUE_PATTERNS:
-        value, count = pattern.subn(replacement, value)
-        found = found or count > 0
-    return value if found else original
+        value = pattern.sub(replacement, value)
+    return original if value == start else value
 
 
 _SEGMENT = r"[^\s/\"'<>()\[\],;]+"
@@ -221,7 +277,8 @@ def redact_text(text, limit: int | None = None, *, tail: bool = False) -> str:
     if home and home not in ("/", "~"):
         value = value.replace(home, "~")
     value = _INVISIBLE.sub("", value)                       # W29: split keys / key names
-    value, _ = _fullwidth_keys(value)                      # W86
+    value, _ = _fullwidth_keys(value, _ERROR_PREFIXED)     # W121 / W129: short lower-case keys too
+    value, _ = _fullwidth_keys(value, _PREFIXED_ANY)       # W86: SK-/XAI- key-length bodies
     value = _decode_layers(value)                          # W87: %252F, /home%2Fbob
     value = _ENCODED_PATH.sub(_encoded_path, value)
     value = _LOOSE_SEP.sub(lambda m: "/" if m.group(0)[-1] in "fF" else "\\", value)

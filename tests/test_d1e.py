@@ -164,3 +164,74 @@ def test_w128_colon_scan_scales_linearly():
     cost(100)
     small, big = cost(2000), cost(20000)
     assert big < 1.0 and big < max(small, 1e-3) * 40
+
+
+# ------------------------------------------------------------------ B1: W129 + provider keys
+DASHES = ["\u2012", "\u2013", "\u2014", "\u2015", "\u2212", "+", "~", "\u00b7", "\u30fb", "\uff65"]
+AIZA = "AIza" + "SyA1b2C3d4E5f6G7h8J9k0L1m2N3o4P5q6x"
+AKIA = "AKIA" + "Q2W3E4R5T6Y7U8I9"
+HEX40 = "0123456789abcdef" * 2 + "01234567"
+HEX64 = "0123456789ABCDEF" * 4
+
+
+@pytest.mark.parametrize("dash", DASHES)
+@pytest.mark.parametrize("name", ["ticker", "notes"])
+def test_b1_dash_like_separators_redact(home, dash, name):
+    for value in ("sk" + dash + "proj" + dash + BODY, "ghp" + dash + BODY, "NVDA/sk" + dash + BODY):
+        saved = json.dumps(service.save_config({"portfolio": {name: value}, name: value}), ensure_ascii=False)
+        assert not _leaks(saved) and "[redacted-key]" in saved, value
+
+
+@pytest.mark.parametrize("dash", DASHES)
+def test_b1_dash_like_separators_keep_short_codes(home, dash):
+    for code in ("XAI" + dash + "USD", "SK" + dash + "HYNIX", "sk" + dash + "abcd" + dash + "efgh" + dash + "ijkl" + dash + "mnop"):
+        assert service.save_config({"ticker": code})["ticker"] == code
+
+
+@pytest.mark.parametrize("secret", [AIZA, AKIA, HEX40, HEX64, "ASIA" + "Q2W3E4R5T6Y7U8I9"])
+def test_b1_provider_keys_redact_everywhere(home, secret):
+    from tradingagents.redaction import redact_secrets, redact_text
+    service.save_config({"ticker": secret, "portfolio": {"note": "key " + secret}})
+    disk = (service.webui_home() / "config.json").read_text(encoding="utf-8")
+    for text in (disk, redact_secrets("n " + secret), redact_text("e " + secret),
+                 json.dumps(redact({"runs": [{"selections": {"symbol": secret, "note": secret}}]}))):
+        assert secret not in text
+
+
+@pytest.mark.parametrize("plain", ["AIzawesome-plan", "AKIA-ish", "deadbeef", "2026-10-30", "abcdef" * 6, "1234567890" * 4])
+def test_b1_short_or_single_kind_hex_like_words_stay(plain):
+    from tradingagents.redaction import redact_secrets
+    assert redact_secrets("note " + plain) == "note " + plain
+
+
+# ------------------------------------------------------------------ B2: W132
+@pytest.mark.parametrize("code", ["ARTEMIS-GLOBAL-FUND-2026", "PARTNERRE-PREFERRED-2026", "ASKARI-BANK-LIMITED-PK",
+                                  "SPORTSMAN-HOLDINGS-INC", "MARKETAXESS-HOLDINGS", "DESKTOP-METAL-CLASS-A",
+                                  "UPSTART-HOLDINGS-INC", "SMARTSHEET-INC-CLASS-A", "SESSIONM-HOLDINGS-INC",
+                                  "BOOKINGHOLDINGS2026Q4", "NVDA/BRK.B", "(ARTEMIS-GLOBAL-FUND-2026),"])
+@pytest.mark.parametrize("name", ["ticker", "symbols"])
+def test_b2_words_containing_a_prefix_stay(home, name, code):
+    assert service.save_config({name: code})[name] == code
+    assert redact({"runs": [{"selections": {name: code}}]})["runs"][0]["selections"][name] == code
+
+
+@pytest.mark.parametrize("value", ["NVDASK-PROJ-" + BODY, "NVDAsk-proj-" + BODY, "NVDAghp_" + BODY, "2026sk-proj-" + BODY])
+def test_b2_glued_keys_still_redact(value):
+    out = _scan_code(value)
+    assert out.endswith("[redacted-key]") and not _leaks(out)
+
+
+# ------------------------------------------------------------------ B3: W131 / W123
+@pytest.mark.parametrize(("value", "expected"), [("NVDA/sk-proj-" + BODY + ".", "NVDA/[redacted-key]."),
+                                                  ("sk-proj-" + BODY + "..", "[redacted-key].."),
+                                                  ("sk-proj-" + BODY + ":", "[redacted-key]:")])
+def test_b3_w131_trailing_separator_stays(value, expected):
+    assert _scan_code(value) == expected
+
+
+@pytest.mark.parametrize("value", ["sk-[redacted-key]Ab3dEf9hIjKlMnOp", "[redacted]Ab3dEf9hIjKlMnOp",
+                                   "x [redacted-token]Ab3dEf9hIjKlMnOp"])
+def test_b3_w123_tail_after_a_marker_is_dropped(home, value):
+    from tradingagents.redaction import redact_secrets, redact_text
+    for out in (_scan_code(value), redact_secrets(value), redact_text(value), service.save_config({"note": value})["note"]):
+        assert "Ab3dEf9hIjKlMnOp" not in out

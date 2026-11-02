@@ -212,3 +212,18 @@ def test_short_piece_codes_stay(home, value):
 def test_known_prefix_short_pieces_and_long_pieces_redact(home, value):
     saved = service.save_config({"ticker": value, "codes": [value]})
     assert saved["ticker"] == "[redacted-key]" and saved["codes"] == ["[redacted-key]"]
+
+
+# ------------------------------------------------------------------ B (V2-BACKLOG-3): D1d-r7 rules unchanged
+@pytest.mark.parametrize("code", ["ABCDE", "SK-HYNIX", "BRK.B", "600519.SS", "XAI-USD-PERP-2026", "(SK-HYNIX)",
+                                  "ABCDE-FGHIJ-KLMNO-PQRST", "ARTEMIS-GLOBAL-FUND-2026", "XAI\u2013USD\u2013PERP\u20132026"])
+def test_b_keep_list_holds(home, code):
+    assert service.save_config({"ticker": code, "codes": [code]}) == {"ticker": code, "codes": [code]}
+
+
+@pytest.mark.parametrize("value", ["sk-proj-" + "A1b2C3d4E5f6G7h8J9k0", "NVDA/sk-proj-" + "A1b2C3d4E5f6G7h8J9k0",
+                                   "NVDAsk-proj-" + "A1b2C3d4E5f6G7h8J9k0", "ghp_" + "A1b2C3d4E5f6G7h8J9",
+                                   "sk-" + "a" * 16, "sk\u2212proj\u2212" + "A1b2C3d4E5f6G7h8J9k0"])
+def test_b_redact_list_holds(home, value):
+    saved = service.save_config({"ticker": value})["ticker"]
+    assert "[redacted-key]" in saved and "A1b2C3d4" not in saved and "a" * 16 not in saved

@@ -168,3 +168,43 @@ def test_a_key_under_a_code_field_is_redacted(home, name, secret):
 def test_codes_stay_under_every_code_field_name(home, code):
     saved = service.save_config(dict.fromkeys(CODE_NAMES, code))
     assert all(saved[name] == code for name in CODE_NAMES)
+
+
+# ------------------------------------------------------------------ B1: request log auth / sig
+@pytest.mark.parametrize("name", ["auth", "sig", "signature", "X-Amz-Signature", "x-amz-credential", "X-Goog-Signature"])
+def test_b1_request_log_hides_auth_and_sig(name):
+    logged = server._log_path(f"/x?id=1&{name}=TOPSECRET9&raw=1")
+    assert "TOPSECRET9" not in logged and "id=1" in logged and "raw=1" in logged
+
+
+def test_b1_request_log_hides_a_key_under_any_name():
+    key = "sk-proj-" + "A1b2C3d4E5f6G7h8J9k0"
+    logged = server._log_path(f"/x?q={key}&ticker=XAI-USD")
+    assert key not in logged and logged.endswith("&ticker=XAI-USD")
+
+
+# ------------------------------------------------------------------ B3: W119 / W121 / W122
+@pytest.mark.parametrize("note", ["RT-PCR-confirmed-cases-2026", "SK-Innovation-shares-held", "sess-onboarding-notes-x",
+                                  "hold XAI-USD-PERP-2026", "hold sk-hynix-longer-symbol", "Bearer marketmakerbehaviour1"])
+def test_b3_w119_notes_keep_long_words(note):
+    assert redact_secrets(note) == note
+    assert scrub_config({"portfolio": {"note": note}}) == {"portfolio": {"note": note}}
+
+
+@pytest.mark.parametrize("note", ["sk-proj-" + "A1b2C3d4E5" + "_" + "F6g7H8j9K0", "sk-abcdefghijklmn",
+                                  "sk-proj-AbCdEfGhIj-KlMnOpQrSt", "sk-proj-abcd-efgh-ijkl-mnop-AbCd1234",
+                                  "Bearer " + "abcdefgh" * 4, "Bearer " + "A1b2C3d4E5f6G7h8J9k0"])
+def test_b3_w119_keys_in_notes_still_redact(note):
+    out = redact_secrets("n " + note)
+    assert note.split()[-1] not in out and "[redacted" in out
+
+
+@pytest.mark.parametrize("key", ["sk-abc", "ｓｋ-abc", "ｓｋ－abc", "sk－abc", "ｒｔ-xyz", "sk\u2013abc"])
+def test_b3_w121_error_text_treats_full_width_like_ascii(key):
+    assert redact_text(f"bad {key} here") == "bad [redacted-key] here"
+
+
+def test_b3_w122_page_drops_tag_and_musical_format_characters():
+    from pathlib import Path
+    script = Path("webui/static/app.js").read_text(encoding="utf-8")
+    assert r"\u{e0000}-\u{e007f}\u{1d173}-\u{1d17a}" in script and "/gu," in script
