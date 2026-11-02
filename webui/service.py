@@ -1059,6 +1059,8 @@ def _validate_analysis(payload: dict) -> dict:
         "save_path": resolve_save_path(payload.get("save_path"), ticker, resolve_results_dir(str(payload["results_dir"])) if payload.get("results_dir") else None),
         "memory_log_path": resolve_memory_path(str(payload["memory_log_path"])) if payload.get("memory_log_path") else None,
         "data_cache_dir": resolve_cache_dir(str(payload["data_cache_dir"])) if payload.get("data_cache_dir") else None,
+        # V2-INFO-CRAWL (PM): items join the analysis only when 「带入分析」 is ticked.
+        "info_crawl": _info_crawl_pick(payload),
     }
     apply_env_skips(selections)
     provider = selections["llm_provider"]
@@ -1735,11 +1737,35 @@ def build_run_config(selections: dict) -> dict:
             config[key] = int(selections[key])
     if selections.get("global_news_queries"):
         config["global_news_queries"] = list(selections["global_news_queries"])
+    pick = selections.get("info_crawl")
+    if isinstance(pick, dict) and pick.get("job") and pick.get("items"):
+        config["info_crawl_job"] = pick["job"]
+        config["info_crawl_items"] = list(pick["items"])
     if selections.get("timeout") not in (None, ""):
         config["timeout"] = float(selections["timeout"])
     if selections.get("llm_call_budget") not in (None, ""):
         config["llm_call_budget"] = float(selections["llm_call_budget"])
     return config
+
+
+def _info_crawl_pick(payload) -> dict | None:
+    """The 信息抓取 rows to bring into the run: ``{"job", "items"}``, or ``None``.
+
+    ``info_inject`` is the list of item ids the user ticked row by row (default
+    none, PM). An empty or missing list brings nothing in.
+    """
+    if not isinstance(payload, dict):
+        return None
+    raw = payload.get("info_inject")
+    if raw in (None, [], False):
+        return None
+    from tradingagents.dataflows.info_crawl.store import valid_item_id, valid_job_id
+    if not isinstance(raw, list) or not all(valid_item_id(item) for item in raw) or len(raw) > 100:
+        raise ConsoleError("带入分析的条目编号不合法")
+    job = payload.get("info_crawl_job")
+    if not valid_job_id(job):
+        raise ConsoleError("带入分析的信息抓取任务编号不合法")
+    return {"job": job, "items": list(dict.fromkeys(raw))}
 
 
 RUNS_DIRNAME = "runs"

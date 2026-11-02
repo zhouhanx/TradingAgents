@@ -959,3 +959,28 @@ body.layer-open { overflow: hidden; }
 @media (max-width: 700px) { .kline-chart { height: 320px; } }
 .kline-live { color: #26a69a; }
 .kline-live--paused { color: var(--muted); }
+
+/* V2-INFO-CRAWL */
+.ic-sources { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.ic-src { display: flex; gap: 8px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--line, #e3e3e3); border-radius: 10px; cursor: pointer; }
+.ic-src--off { opacity: .55; cursor: not-allowed; }
+.ic-src-body { display: grid; gap: 2px; min-width: 0; }
+.ic-src-name { font-weight: 600; }
+.ic-src small { color: var(--muted, #666); }
+.ic-tag { margin-left: 6px; font-size: 11px; padding: 0 6px; border-radius: 6px; background: var(--chip, #eef); font-weight: 500; }
+.ic-terms summary { font-size: 12px; color: var(--muted, #666); cursor: pointer; }
+.ic-terms a { font-size: 12px; word-break: break-all; }
+.ic-status { list-style: none; padding: 0; margin: 16px 0 0; display: grid; gap: 4px; font-size: 13px; }
+.ic-bad { color: var(--danger, #b42318); font-weight: 600; }
+.ic-inject { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 16px 0 8px; }
+.ic-item p { margin: 4px 0 0; color: var(--muted, #666); font-size: 13px; }
+.ic-meta { display: flex; gap: 12px; font-size: 12px; color: var(--muted, #666); margin-bottom: 2px; }
+.ic-existing { margin-top: 8px; font-size: 13px; color: var(--muted, #666); }
+.ic-grp { font-size: 12px; font-weight: 600; color: var(--muted, #666); margin: 8px 0 6px; }
+.ic-tag--pu { background: #fff4e5; color: #8a4b00; }
+table.ic-items { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+table.ic-items th, table.ic-items td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line, #e3e3e3); vertical-align: top; }
+table.ic-items th { font-size: 12px; color: var(--muted, #666); font-weight: 500; }
+.ic-time { white-space: nowrap; color: var(--muted, #666); }
+.ic-kind { display: block; color: var(--muted, #666); }
+@media (max-width: 640px) { table.ic-items th:nth-child(3), table.ic-items td:nth-child(3) { display: none; } }

@@ -6,6 +6,7 @@ from tradingagents.dataflows.errors import (
     VendorNotConfiguredError,
     VendorUnavailableError,
 )
+from tradingagents.dataflows.info_crawl.jobs import get_info_items as get_info_crawl_items
 from tradingagents.dataflows.vendors.alpha_vantage import (
     get_balance_sheet as get_alpha_vantage_balance_sheet,
     get_cashflow as get_alpha_vantage_cashflow,
@@ -83,6 +84,12 @@ TOOLS_CATEGORIES = {
         "tools": [
             "get_prediction_markets",
         ]
+    },
+    "info_items": {
+        "description": "User-selected items from 信息抓取 (official APIs and press RSS)",
+        "tools": [
+            "get_info_items",
+        ]
     }
 }
 
@@ -91,7 +98,7 @@ TOOLS_CATEGORIES = {
 # sentinel instead of aborting the run (a bad LLM-supplied indicator, a missing
 # key, or a network blip should not crash an analysis over flavour data). Core
 # categories (prices, fundamentals, news) still raise so a broken primary is loud.
-OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets"}
+OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "info_items"}
 
 # Mapping of methods to their vendor-specific implementations
 VENDOR_METHODS = {
@@ -145,6 +152,10 @@ VENDOR_METHODS = {
     # prediction_markets
     "get_prediction_markets": {
         "polymarket": get_polymarket_prediction_markets,
+    },
+    # info_items (V2-INFO-CRAWL): only what the user ticked 「带入分析」 for
+    "get_info_items": {
+        "info_crawl": get_info_crawl_items,
     },
 }
 

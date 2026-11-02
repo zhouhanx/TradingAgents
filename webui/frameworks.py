@@ -35,6 +35,28 @@ FRAMEWORKS: tuple[Framework, ...] = (
 
 _BY_ID = {item.id: item for item in FRAMEWORKS}
 
+# V2-INFO-CRAWL: cards on 启动分析 that open a tool page (#start/<id>) rather than
+# a run wizard. They are not frameworks: nothing launches through /api/runs.
+TOOLS: tuple[Framework, ...] = (
+    Framework(
+        id="info-crawl",
+        name="信息抓取",
+        description="从官方公开来源（SEC 公告、交易所公告、央行与财政部新闻稿、GDELT 新闻索引）汇总资讯，可勾选「带入分析」。",
+        icon="/icons/logo.svg",
+        tags=("公告", "新闻", "默认不带入分析"),
+        runner="",
+    ),
+)
+
+
+def public_tools() -> list[dict]:
+    rows = []
+    for item in TOOLS:
+        row = {**asdict(item), "tags": list(item.tags), "tool": True}
+        row.pop("runner", None)
+        rows.append(row)
+    return rows
+
 
 class UnknownFramework(ValueError):
     """A launch named a framework that is not registered."""

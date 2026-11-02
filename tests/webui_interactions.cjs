@@ -2475,3 +2475,63 @@ test('K 线行情 crypto polls about every 5 s and stops when leaving the page (
     assert.equal(ui.timers.size, 0);
   } finally { ui.dom.window.close(); }
 });
+
+test('信息抓取: card on 启动分析, gray unavailable source, 不可用 status, 带入分析 default off (V2-INFO-CRAWL)', async () => {
+  const sources = {inject_default: false, existing: [{id: 'yahoo', name: 'Yahoo', note: '条款灰区'}], sources: [
+    {id: 'sec_edgar', name: 'SEC EDGAR 公告', kind: 'filing', assets: ['stock'], terms_url: 'https://www.sec.gov/os/accessing-edgar-data', description: '官方披露', optional: false, available: true, reason: ''},
+    {id: 'gdelt', name: 'GDELT 全球新闻索引', kind: 'news', assets: ['stock'], terms_url: 'https://www.gdeltproject.org/about.html', description: '新闻', optional: false, available: true, reason: ''},
+    {id: 'keyed', name: '需密钥来源', kind: 'news', assets: ['stock'], terms_url: '', description: '', optional: false, available: false, reason: '未配置 DEMO_KEY，该来源暂不可用'},
+    {id: 'prnewswire', name: 'PR Newswire', kind: 'press', assets: ['stock'], terms_url: '', description: '个人使用', optional: true, personal_use: true, available: true, reason: ''},
+  ]};
+  const job = {id: 'ic-20261103-abcdef12', keyword: 'NVDA', asset_type: 'stock', hours: 72, status: 'partial',
+    sources: {sec_edgar: {status: 'ok', count: 1, reason: ''}, gdelt: {status: 'unavailable', count: 0, reason: '请求过于频繁，已被来源限流（HTTP 429）'}}};
+  let posted = null;
+  let runBody = null;
+  const ui = await setup({
+    '/api/frameworks': {...FRAMEWORKS, tools: [{id: 'info-crawl', name: '信息抓取', description: '官方来源', icon: '/icons/logo.svg', tags: ['公告'], tool: true}]},
+    '/api/info-crawl/sources': sources,
+    '/api/info-crawl/jobs': (options) => { if (options.method === 'POST') { posted = JSON.parse(options.body); return {job: {...job, status: 'running'}}; } return {job}; },
+    '/api/info-crawl/items': {job, items: [{id: 'aaaaaaaaaaaaaaaa', source: 'sec_edgar', source_name: 'SEC EDGAR 公告', kind: 'filing', title: 'NVIDIA 10-Q', url: 'https://www.sec.gov/x', published_at: '2026-11-01T20:05:00Z', summary: ''}, {id: 'bbbbbbbbbbbbbbbb', source: 'sec_edgar', source_name: 'SEC EDGAR 公告', kind: 'filing', title: 'NVIDIA 8-K', url: 'https://www.sec.gov/y', published_at: '2026-10-31T23:30:00Z', summary: ''}]},
+    '/api/runs': (options) => { if (options.method) { runBody = JSON.parse(options.body); return {id: 'r1'}; } return {run: null, progress: {}}; },
+  }, {url: 'http://localhost/#start'});
+  try {
+    const {doc, click, fill} = ui;
+    assert.ok(doc.querySelector('.fw[data-framework="info-crawl"]'), 'second card');
+    await click('.fw[data-framework="info-crawl"]');
+    for (let i = 0; i < 6; i++) await settle();
+    assert.match(ui.window.location.hash, /#start\/info-crawl/);
+    const keyed = doc.querySelector('[data-source="keyed"] input');
+    assert.equal(keyed.disabled, true);
+    assert.match(doc.querySelector('[data-source="keyed"]').textContent, /未配置 DEMO_KEY/);
+    assert.equal(doc.querySelector('[data-source="prnewswire"] input').checked, false, 'optional off by default');
+    ui.ui.state.infoPollMs = 0;
+    fill('#ic-keyword', 'NVDA');
+    doc.querySelector('#ic-form').dispatchEvent(new ui.window.Event('submit', {cancelable: true}));
+    for (let i = 0; i < 3; i++) { await new Promise((r) => setTimeout(r, 15)); await settleMany(); }
+    assert.deepEqual(posted, {keyword: 'NVDA', asset_type: 'stock', hours: 72, sources: ['sec_edgar', 'gdelt']});
+    assert.match(doc.querySelector('[data-source-status="gdelt"]').textContent, /不可用/);
+    assert.doesNotMatch(doc.querySelector('#ic-status').textContent, /无数据/);
+    assert.equal(doc.querySelectorAll('.ic-item').length, 2);
+    assert.match(doc.querySelector('#ic-grp-opt').nextElementSibling.textContent, /仅限个人使用/);
+    assert.match(doc.querySelector('.ic-item .ic-time').textContent, /^2026-11-01 20:05 UTC$/);
+    assert.match(doc.querySelector('.ic-kind').textContent, /监管披露/);
+    assert.match(ui.visibleText(), /保留 30 天/);
+    assert.equal(doc.querySelector('#ic-inject'), null, 'no batch checkbox');
+    const picks = [...doc.querySelectorAll('.ic-pick')];
+    assert.deepEqual(picks.map((box) => box.checked), [false, false], '带入分析 default off per row');
+    const go = doc.querySelector('#ic-to-analysis');
+    assert.equal(go.disabled, true);
+    picks[1].checked = true;
+    picks[1].dispatchEvent(new ui.window.Event('change'));
+    assert.equal(go.disabled, false);
+    assert.match(go.textContent, /1 条/);
+    await click('#ic-to-analysis');
+    assert.ok(doc.querySelector('#info-attach'));
+    assert.match(doc.querySelector('#info-attach').textContent, /1 条/);
+    assert.equal(doc.querySelector('#ticker').value, 'NVDA');
+    assert.deepEqual(JSON.parse(JSON.stringify(ui.window.withInfoAttach({ticker: 'NVDA'}))), {ticker: 'NVDA', info_crawl_job: job.id, info_inject: ['bbbbbbbbbbbbbbbb']});
+    await click('#info-attach-clear');
+    assert.deepEqual(JSON.parse(JSON.stringify(ui.window.withInfoAttach({ticker: 'NVDA'}))), {ticker: 'NVDA'});
+    assert.equal(runBody, null);
+  } finally { ui.window.close(); }
+});

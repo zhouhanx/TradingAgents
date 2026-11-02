@@ -454,7 +454,7 @@ function hubHtml() {
     return `${head}<div class="error-banner" id="frameworks-error" role="alert">${escapeHtml(state.frameworksError)} <button class="button button--secondary button--small" type="button" id="frameworks-retry">重试</button></div>`;
   }
   if (!state.frameworks) return `${head}<p class="notice" id="frameworks-loading" role="status">正在读取分析工具…</p>`;
-  return `${head}<div class="fw-grid" id="fw-grid">${state.frameworks.map(frameworkCard).join("")}</div>`;
+  return `${head}<div class="fw-grid" id="fw-grid">${[...state.frameworks, ...(state.tools || [])].map(frameworkCard).join("")}</div>`;
 }
 
 let frameworksLoad = null;
@@ -462,6 +462,7 @@ function loadFrameworks() {
   if (frameworksLoad) return frameworksLoad;
   frameworksLoad = api("/api/frameworks").then((data) => {
     state.frameworks = Array.isArray(data.frameworks) ? data.frameworks : [];
+    state.tools = Array.isArray(data.tools) ? data.tools : [];
     state.frameworksError = "";
   }).catch((error) => {
     state.frameworksError = `没能读取分析工具列表：${error.message}`;
@@ -470,6 +471,12 @@ function loadFrameworks() {
 }
 
 function openFramework(id) {
+  if (id === INFO_CRAWL_ID) {
+    state.analyzeFramework = id;
+    setStartRoute(id, {push: true});
+    renderAnalyze();
+    return;
+  }
   if (!registeredFramework(id)) return;
   state.analyzeFramework = id;
   setStartRoute(id, {push: true});
@@ -510,6 +517,7 @@ function wizardHeading(framework) {
       <button type="button" class="crumb" id="back-to-frameworks">‹ 全部分析工具</button>
       <h1>${escapeHtml(framework.name)}</h1>
       <p class="page-description">四步设置好就能启动，结果只用于研究参考。</p>
+      ${infoAttachHtml()}
     </div>
     <div class="page-actions page-actions-group"></div>
   </header>`;
@@ -525,6 +533,7 @@ function backToFrameworks() {
 }
 
 function renderAnalyze() {
+  if (state.analyzeFramework === INFO_CRAWL_ID) { renderInfoCrawl(); return; }
   const framework = state.analyzeFramework ? registeredFramework(state.analyzeFramework) : null;
   if (!framework) {
     // No framework, or one the backend does not list (an old link): the cards.
@@ -573,6 +582,7 @@ function renderAnalyze() {
     </section>
     </div>`;
   document.querySelector("#back-to-frameworks")?.addEventListener("click", backToFrameworks);
+  document.querySelector("#info-attach-clear")?.addEventListener("click", () => { state.infoAttach = null; document.querySelector("#info-attach")?.remove(); });
   paintLanguage();
   bindLanguages();
   paintHolding();
@@ -1907,7 +1917,7 @@ async function submitAnalysis() {
   try {
     payload = readForm();
     state.form = payload;
-    record = await api("/api/runs", { method: "POST", body: JSON.stringify(payload) });
+    record = await api("/api/runs", { method: "POST", body: JSON.stringify(withInfoAttach(payload)) });
   } catch (error) {
     state.submittingAnalysis = false;
     if (button?.isConnected) { button.disabled = false; button.textContent = "启动分析"; }
@@ -4853,3 +4863,214 @@ document.addEventListener("visibilitychange", () => {
   if (state.page !== "kline") { stopKlineRt(); return; }
   startKlineRt();
 });
+
+// ---- V2-INFO-CRAWL: 信息抓取 (#start/info-crawl). Official public sources only;
+// items join an analysis only when the user ticks 「带入分析」 (default off, PM).
+const INFO_CRAWL_ID = "info-crawl";
+const INFO_HOURS = [[24, "24 小时"], [72, "3 天"], [168, "7 天"]];
+// Precious metals have no official wave-1 feed of their own: 「宏观」 (central banks,
+// Treasury, GDELT) is the metals/rates alternative, said so on the chip.
+const INFO_ASSET_LABELS = {stock: "股票", crypto: "加密货币", macro: "宏观（含贵金属/利率）"};
+const INFO_KIND_LABELS = {announcement: "交易所公告", news: "新闻", filing: "监管披露", press: "官方新闻稿"};
+
+function infoState() {
+  if (!state.info) state.info = {keyword: "", asset: "stock", hours: 72, sources: null, selected: null, job: null, items: [], error: "", picked: [], catalog: null};
+  return state.info;
+}
+
+function withInfoAttach(payload) {
+  const attach = state.infoAttach;
+  if (!attach || !attach.job || !(attach.items || []).length) return payload;
+  return {...payload, info_crawl_job: attach.job, info_inject: [...attach.items]};
+}
+
+function infoAttachHtml() {
+  const attach = state.infoAttach;
+  if (!attach || !attach.job || !(attach.items || []).length) return "";
+  return `<p class="notice" id="info-attach">已带入信息抓取「${escapeHtml(attach.keyword)}」中勾选的 ${attach.items.length} 条资讯，报告会附来源引用。 <button type="button" class="button button--secondary button--small" id="info-attach-clear">不带入</button></p>`;
+}
+
+function infoTime(stamp) {
+  // InfoItem times are stored in UTC; they are shown in UTC and labelled (PM/Proto).
+  const date = new Date(String(stamp || ""));
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())} UTC`;
+}
+
+function safeHttpUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    return url.protocol === "https:" || url.protocol === "http:" ? url.href : "";
+  } catch { return ""; }
+}
+
+function infoSourceRow(source, info) {
+  const checked = source.available && (info.selected ? info.selected.includes(source.id) : !source.optional);
+  const terms = safeHttpUrl(source.terms_url);
+  return `<label class="ic-src${source.available ? "" : " ic-src--off"}" data-source="${escapeHtml(source.id)}">
+    <input type="checkbox" value="${escapeHtml(source.id)}" ${checked ? "checked" : ""} ${source.available ? "" : "disabled"}>
+    <span class="ic-src-body"><span class="ic-src-name">${escapeHtml(source.name)}${source.optional ? '<span class="ic-tag">可选</span>' : '<span class="ic-tag">首批必选</span>'}${source.personal_use ? '<span class="ic-tag ic-tag--pu">仅限个人使用</span>' : ""}</span>
+    <small>${escapeHtml(source.available ? source.description : source.reason)}</small>
+    <details class="ic-terms"><summary>使用条款</summary>${terms ? `<a href="${escapeHtml(terms)}" target="_blank" rel="noopener noreferrer">${escapeHtml(terms)}</a>` : "未提供"}</details></span>
+  </label>`;
+}
+
+function infoSourceGroups(info) {
+  const group = (title, id, list) => list.length ? `<div class="ic-grp" id="${id}">${title}</div><div class="ic-sources">${list.map((source) => infoSourceRow(source, info)).join("")}</div>` : "";
+  return `<div id="ic-sources">${group("首批必选", "ic-grp-req", info.sources.filter((s) => !s.optional))}${group("可选来源", "ic-grp-opt", info.sources.filter((s) => s.optional))}</div>`;
+}
+
+function infoStatusHtml(job) {
+  if (!job) return "";
+  const rows = Object.entries(job.sources || {}).map(([id, row]) => {
+    const name = (infoState().sources || []).find((item) => item.id === id)?.name || id;
+    let text;
+    if (row.status === "unavailable") text = `<span class="ic-bad">不可用</span>：${escapeHtml(row.reason || "来源暂不可用")}`;
+    else if (row.status === "ok") text = row.count ? `${row.count} 条` : "该时段没有条目";
+    else text = "抓取中…";
+    return `<li data-source-status="${escapeHtml(id)}"><b>${escapeHtml(name)}</b> ${text}</li>`;
+  });
+  return `<ul class="ic-status" id="ic-status">${rows.join("")}</ul>`;
+}
+
+function infoItemsHtml(info) {
+  if (!info.job || info.job.status === "running") return "";
+  if (!info.items.length) return '<p class="notice" id="ic-empty">没有抓到条目。不可用的来源见上方原因。</p>';
+  const picked = new Set(info.picked || []);
+  const rows = info.items.map((item) => {
+    const url = safeHttpUrl(item.url);
+    const kind = INFO_KIND_LABELS[item.kind] || item.kind || "";
+    return `<tr class="ic-item" data-item="${escapeHtml(item.id)}">
+      <td><input type="checkbox" class="ic-pick" value="${escapeHtml(item.id)}" aria-label="带入分析：${escapeHtml(item.title)}" ${picked.has(item.id) ? "checked" : ""}></td>
+      <td class="ic-time">${escapeHtml(infoTime(item.published_at))}</td>
+      <td>${escapeHtml(item.source_name || item.source)}${kind ? `<small class="ic-kind">${escapeHtml(kind)}</small>` : ""}</td>
+      <td>${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title)}</a>` : escapeHtml(item.title)}${item.summary ? `<p>${escapeHtml(item.summary)}</p>` : ""}</td></tr>`;
+  }).join("");
+  const count = picked.size;
+  return `<p class="form-hint" id="ic-utc-note">共 ${info.items.length} 条 · 时间均为 UTC</p>
+    <table class="ic-items" id="ic-items"><thead><tr><th>带入分析</th><th>时间（UTC）</th><th>来源 · 类型</th><th>标题与摘要</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="ic-inject"><button type="button" class="button button--primary button--small" id="ic-to-analysis" ${count ? "" : "disabled"}>带入下一次分析（${count} 条）</button>
+    <span class="form-hint">默认不带入；只有勾选的条目会作为上下文加入分析，会增加模型用量。</span></div>`;
+}
+
+function infoExistingHtml(info) {
+  const rows = (info.catalog?.existing || []).map((row) => `<li><b>${escapeHtml(row.name)}</b>：${escapeHtml(row.note)}</li>`).join("");
+  return rows ? `<details class="ic-existing"><summary>分析内置的其它来源（条款灰区）</summary><ul>${rows}</ul></details>` : "";
+}
+
+function renderInfoCrawl() {
+  const info = infoState();
+  setStartRoute(INFO_CRAWL_ID);
+  const running = info.job && info.job.status === "running";
+  pageEl.innerHTML = `<header class="page-heading"><div>
+      <button type="button" class="crumb" id="back-to-frameworks">‹ 全部分析工具</button>
+      <h1>信息抓取</h1>
+      <p class="page-description">只读官方公开接口和新闻稿 RSS，不登录、不抓社交网站。结果仅供个人研究参考，抓取条目保留 30 天后自动清理。</p>
+    </div><div class="page-actions page-actions-group"></div></header>
+    <section class="wizard-panel ic-panel">
+      <form id="ic-form" class="wiz-fields" novalidate>
+        <div class="row2">
+          <div class="field"><label for="ic-keyword">标的代码或关键词</label><input id="ic-keyword" value="${escapeHtml(info.keyword)}" placeholder="例如 NVDA、BTC 或 interest rate" autocomplete="off" maxlength="80"></div>
+          <div class="field"><span class="field-label" id="ic-asset-label">资产类型</span><div class="seg" id="ic-asset" role="group" aria-labelledby="ic-asset-label">${Object.entries(INFO_ASSET_LABELS).map(([id, label]) => `<button type="button" class="seg-item${info.asset === id ? " on" : ""}" data-asset="${id}">${label}</button>`).join("")}</div></div>
+        </div>
+        <div class="field"><span class="field-label" id="ic-hours-label">时间范围</span><div class="seg" id="ic-hours" role="group" aria-labelledby="ic-hours-label">${INFO_HOURS.map(([value, label]) => `<button type="button" class="seg-item${info.hours === value ? " on" : ""}" data-hours="${value}">${label}</button>`).join("")}</div></div>
+        <div class="field"><span class="field-label">来源</span>${info.sources ? infoSourceGroups(info) : '<div class="ic-sources" id="ic-sources"><p class="notice">正在读取来源…</p></div>'}${infoExistingHtml(info)}</div>
+        ${info.error ? `<p class="error-banner" role="alert" id="ic-error">${escapeHtml(info.error)}</p>` : ""}
+        <div class="wiz-actions"><button type="submit" class="button button--primary" id="ic-start" ${running ? "disabled" : ""}>${running ? "正在抓取…" : "开始抓取"}</button></div>
+      </form>
+      ${infoStatusHtml(info.job)}
+      ${infoItemsHtml(info)}
+    </section>`;
+  bindInfoCrawl();
+  if (!info.sources) loadInfoSources();
+}
+
+function loadInfoSources() {
+  const info = infoState();
+  const asset = info.asset;
+  return api(`/api/info-crawl/sources?asset=${encodeURIComponent(asset)}`).then((data) => {
+    if (info.asset !== asset) return;
+    info.catalog = data;
+    info.sources = Array.isArray(data.sources) ? data.sources : [];
+    info.error = "";
+  }).catch((error) => {
+    info.sources = [];
+    info.error = `没能读取来源列表：${error.message}`;
+  }).finally(() => { if (state.analyzeFramework === INFO_CRAWL_ID) renderInfoCrawl(); });
+}
+
+function readInfoForm() {
+  const info = infoState();
+  info.keyword = String(document.querySelector("#ic-keyword")?.value || "").trim();
+  info.selected = [...document.querySelectorAll("#ic-sources input[type=checkbox]")].filter((box) => box.checked).map((box) => box.value);
+}
+
+function bindInfoCrawl() {
+  const info = infoState();
+  document.querySelector("#back-to-frameworks")?.addEventListener("click", backToFrameworks);
+  document.querySelectorAll("#ic-asset [data-asset]").forEach((button) => button.addEventListener("click", () => {
+    readInfoForm();
+    if (info.asset === button.dataset.asset) return;
+    info.asset = button.dataset.asset;
+    info.sources = null;
+    info.selected = null;
+    renderInfoCrawl();
+  }));
+  document.querySelectorAll("#ic-hours [data-hours]").forEach((button) => button.addEventListener("click", () => {
+    readInfoForm();
+    info.hours = Number(button.dataset.hours);
+    renderInfoCrawl();
+  }));
+  document.querySelector("#ic-form")?.addEventListener("submit", (event) => { event.preventDefault(); startInfoJob(); });
+  document.querySelectorAll("#ic-items .ic-pick").forEach((box) => box.addEventListener("change", () => {
+    const picked = new Set(info.picked || []);
+    if (box.checked) picked.add(box.value); else picked.delete(box.value);
+    info.picked = info.items.map((item) => item.id).filter((id) => picked.has(id));
+    const go = document.querySelector("#ic-to-analysis");
+    if (go) { go.disabled = !info.picked.length; go.textContent = `带入下一次分析（${info.picked.length} 条）`; }
+  }));
+  document.querySelector("#ic-to-analysis")?.addEventListener("click", () => {
+    if (!(info.picked || []).length || !info.job) return;
+    state.infoAttach = {job: info.job.id, keyword: info.job.keyword, items: [...info.picked]};
+    if (info.job.asset_type !== "macro") state.form.ticker = info.job.asset_type === "crypto" && !/-/.test(info.job.keyword) ? `${info.job.keyword.toUpperCase()}-USD` : info.job.keyword.toUpperCase();
+    openFramework("tradingagents");
+  });
+}
+
+async function startInfoJob() {
+  const info = infoState();
+  readInfoForm();
+  info.error = "";
+  if (!info.keyword) { info.error = "请填写标的代码或关键词。"; renderInfoCrawl(); return; }
+  if (!info.selected.length) { info.error = "请至少选择一个来源。"; renderInfoCrawl(); return; }
+  info.items = [];
+  info.picked = [];
+  state.infoAttach = null;
+  try {
+    const data = await api("/api/info-crawl/jobs", {method: "POST", body: JSON.stringify({keyword: info.keyword, asset_type: info.asset, hours: info.hours, sources: info.selected})});
+    info.job = data.job;
+  } catch (error) {
+    info.error = error.message;
+    info.job = null;
+  }
+  renderInfoCrawl();
+  if (info.job) pollInfoJob(info.job.id);
+}
+
+function pollInfoJob(id, delay = state.infoPollMs ?? 1500) {
+  const info = infoState();
+  setTimeout(async () => {
+    if (!info.job || info.job.id !== id) return;
+    try {
+      const data = await api(`/api/info-crawl/jobs?id=${encodeURIComponent(id)}`);
+      info.job = data.job;
+      if (info.job.status === "running") { if (state.analyzeFramework === INFO_CRAWL_ID) renderInfoCrawl(); pollInfoJob(id); return; }
+      const items = await api(`/api/info-crawl/items?job=${encodeURIComponent(id)}`);
+      info.items = Array.isArray(items.items) ? items.items : [];
+    } catch (error) {
+      info.error = error.message;
+    }
+    if (state.analyzeFramework === INFO_CRAWL_ID) renderInfoCrawl();
+  }, delay);
+}

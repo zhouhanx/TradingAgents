@@ -21,9 +21,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, urlsplit
 
-from webui import service
+from webui import info_crawl, service
 from webui.catalog import PROVIDER_ICONS, provider_rows, public_catalog
-from webui.frameworks import DEFAULT_FRAMEWORK, public_frameworks
+from webui.frameworks import DEFAULT_FRAMEWORK, public_frameworks, public_tools
 
 STATIC = Path(__file__).resolve().parent / "static"
 
@@ -189,7 +189,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/frameworks":
             # WEBUI-008: the 启动分析 cards. Read-only; same session-token rule as every API read.
-            self._json({"frameworks": public_frameworks(service.JOBS.list_runs()), "default": DEFAULT_FRAMEWORK})
+            self._json({"frameworks": public_frameworks(service.JOBS.list_runs()), "default": DEFAULT_FRAMEWORK,
+                        "tools": public_tools()})
             return
         if parsed.path == "/api/session":
             # W6: the page probes this to learn early that its session token went stale.
@@ -213,6 +214,21 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/asset":
             query = parse_qs(parsed.query)
             self._call(lambda: service.asset_options((query.get("ticker") or [""])[0]))
+            return
+        if parsed.path.startswith("/api/info-crawl/"):
+            # V2-INFO-CRAWL: read-only, same session-token rule as every API read.
+            query = parse_qs(parsed.query)
+            first = lambda key: (query.get(key) or [None])[0]  # noqa: E731
+            readers = {
+                "/api/info-crawl/sources": lambda: info_crawl.list_sources(first("asset")),
+                "/api/info-crawl/jobs": lambda: info_crawl.get_job(first("id")),
+                "/api/info-crawl/items": lambda: info_crawl.get_items(first("job"), first("source")),
+            }
+            reader = readers.get(parsed.path)
+            if reader is None:
+                self._json({"error": "没有这个页面。"}, 404)
+            else:
+                self._info_call(reader)
             return
         if parsed.path == "/api/kline/latest":
             # V2-KLINE-RT: the newest bar for the page's visible-only polling; same token rule.
@@ -334,6 +350,9 @@ class Handler(BaseHTTPRequestHandler):
             "/api/checkpoints/clear": lambda: service.clear_checkpoints(),
             "/api/updates/refresh": lambda: service.refresh_updates(),
         }
+        if parsed.path == "/api/info-crawl/jobs":
+            self._info_call(lambda: info_crawl.start_job(body))
+            return
         handler = routes.get(parsed.path)
         if handler is None:
             self._json({"error": "没有这个操作。"}, 404)
@@ -361,6 +380,15 @@ class Handler(BaseHTTPRequestHandler):
                                              framework=checked.get("framework", framework))
         record["ignored"] = checked["ignored"]
         return record
+
+    def _info_call(self, func) -> None:
+        try:
+            self._json(func())
+        except info_crawl.InfoCrawlError as exc:
+            self._json({"error": str(exc)}, exc.status)
+        except Exception as exc:  # noqa: BLE001 - see _call
+            _log_internal_error(self.command, urlparse(self.path).path, exc)
+            self._json({"error": INTERNAL_ERROR}, 500)
 
     def _call(self, func) -> None:
         try:
