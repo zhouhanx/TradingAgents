@@ -4612,6 +4612,15 @@ const KLINE_PROVIDER = { okx: "OKX", coinbase: "Coinbase", yahoo: "Yahoo Finance
 const KLINE_DEFAULT = { stock: "NVDA", crypto: "BTC-USDT", commodity: "XAUUSD" };
 let klineLibPromise = null;
 let klineChart = null;
+let klineVolChart = null;
+
+function removeKlineCharts() {
+  for (const c of [klineChart, klineVolChart]) { if (c) { try { c.remove(); } catch (_) { /* detached */ } } }
+  klineChart = null;
+  klineVolChart = null;
+  const vol = document.querySelector("#kline-vol");
+  if (vol) vol.innerHTML = "";
+}
 
 function loadKlineLib() {
   if (window.LightweightCharts) return Promise.resolve(window.LightweightCharts);
@@ -4643,22 +4652,39 @@ function renderKline() {
   pageEl.innerHTML = `
     ${heading("", "K 线行情", "近 1 年行情走势。股票与贵金属/商品期货沿用分析所用的数据源；加密货币优先 OKX，其次 Coinbase。")}
     <section class="panel kline-bar">
-      <form id="kline-form" class="kline-controls">
-        <input id="kline-symbol" value="${escapeHtml(ks.symbol)}" aria-label="标的代码" placeholder="例如 NVDA、XAUUSD、BTC-USDT">
+      <form id="kline-form" class="kline-controls" autocomplete="off">
+        <span class="kline-search"><input id="kline-symbol" value="${escapeHtml(ks.symbol)}" aria-label="标的代码或名称" placeholder="代码或名称，如 600519、贵州茅台、AAPL" role="combobox" aria-autocomplete="list" aria-controls="kline-suggest" aria-expanded="false"><ul class="kline-suggest" id="kline-suggest" role="listbox" hidden></ul></span>
+        <button type="submit" class="button button--primary kline-go" id="kline-go">查询</button>
         ${seg("kline-asset", KLINE_ASSETS, ks.asset, "asset")}
         ${seg("kline-tf", KLINE_TFS, ks.tf, "tf")}
         <span class="kline-tag" id="kline-source">数据源：—</span>
       </form>
     </section>
-    <section class="panel kline-card">
+    <section class="panel kline-card" id="kline-card">
       <div class="kline-head"><b id="kline-name">${escapeHtml(ks.symbol)}</b><span class="kline-tag kline-tag--future" id="kline-future" hidden></span><span class="kline-price" id="kline-price">—</span><span class="kline-change" id="kline-change"></span></div>
       <div class="kline-ohlc" id="kline-ohlc"></div>
-      <div class="kline-chart" id="kline-chart"><p class="kline-status" id="kline-status" role="status">正在加载…</p></div>
-      <div class="kline-foot"><span id="kline-note">展示近 1 年日线。</span><span class="kline-live" id="kline-live" hidden></span><span>图表：Lightweight Charts（开源组件，<a href="/vendor/lightweight-charts.LICENSE.txt" target="_blank" rel="noopener">Apache-2.0 许可证</a>）</span></div>
+      <div class="kline-chart-wrap"><div class="kline-chart" id="kline-chart"></div><div class="kline-vol" id="kline-vol"></div><p class="kline-status" id="kline-status" role="status">正在加载…</p><div class="kline-stale" id="kline-stale" role="status" hidden></div></div>
+      <div class="kline-foot"><span id="kline-note">展示近 1 年日线。</span><span class="kline-adjnote" id="kline-adjnote" hidden></span><span class="kline-live" id="kline-live" hidden></span><span>图表：Lightweight Charts（开源组件，<a href="/vendor/lightweight-charts.LICENSE.txt" target="_blank" rel="noopener">Apache-2.0 许可证</a>）</span></div>
     </section>`;
   const form = document.querySelector("#kline-form");
-  form.addEventListener("submit", (event) => { event.preventDefault(); ks.symbol = document.querySelector("#kline-symbol").value.trim() || ks.symbol; loadKline(); });
-  document.querySelector("#kline-symbol").addEventListener("change", () => form.requestSubmit());
+  const input = document.querySelector("#kline-symbol");
+  // V2-UI-FIX-1: only 「查询」 / Enter / picking a suggestion loads; typing marks the chart 未更新.
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    hideKlineSuggest();
+    const value = input.value.trim();
+    if (!value) { markKlineStale(); return; }
+    ks.symbol = value;
+    loadKline();
+  });
+  input.addEventListener("input", () => { markKlineStale(); queueKlineSuggest(input.value); });
+  input.addEventListener("keydown", (event) => { if (event.key === "Escape") hideKlineSuggest(); });
+  document.querySelector("#kline-suggest").addEventListener("click", (event) => {
+    const item = event.target.closest("[data-symbol]");
+    if (!item) return;
+    input.value = item.dataset.symbol;
+    form.requestSubmit();
+  });
   document.querySelector("#kline-asset").addEventListener("click", (event) => {
     const button = event.target.closest("[data-asset]");
     if (!button || button.dataset.asset === ks.asset) return;
@@ -4683,9 +4709,11 @@ async function loadKline() {
   klineRt.candles = null;
   const token = (ks.token || 0) + 1;
   ks.token = token;
+  ks.loading = ks.symbol;
+  markKlineStale();
   document.querySelectorAll("#kline-tf [data-tf]").forEach((b) => b.classList.toggle("on", b.dataset.tf === ks.tf));
   const status = document.querySelector("#kline-status");
-  if (status) { status.hidden = false; status.textContent = "正在加载…"; status.classList.remove("error-banner"); }
+  if (status) { status.hidden = Boolean(ks.loaded); status.textContent = "正在加载…"; status.classList.remove("error-banner"); }
   let data;
   let lib;
   try {
@@ -4695,13 +4723,106 @@ async function loadKline() {
     ]);
   } catch (error) {
     if (state.page !== "kline" || ks.token !== token) return;
+    ks.loading = null;
+    clearKlineChart(ks.symbol);
     const box = document.querySelector("#kline-status");
-    if (box) { box.hidden = false; box.textContent = error.message; box.classList.add("error-banner"); }
+    if (box) { box.hidden = false; box.textContent = klineErrorText(error.message); box.classList.add("error-banner"); }
     return;
   }
   if (state.page !== "kline" || ks.token !== token) return;
+  ks.loading = null;
   drawKline(lib, data);
+  ks.loaded = ks.symbol;
+  const done = document.querySelector("#kline-status");
+  if (done) done.hidden = true;
+  markKlineStale();
 }
+
+// Never show raw vendor exception class names (e.g. VendorUnavailableError).
+function klineErrorText(message) {
+  const text = String(message || "");
+  if (/[A-Z][a-z]+(Error|Exception)\b/.test(text)) return "行情源暂时连不上，请稍后再试。";
+  return text || "没有拿到行情数据。";
+}
+
+// V2-UI-FIX-1: when the input no longer matches the chart that is drawn, keep
+// the old chart but label it 「未更新」 so title/source never pretend to be new.
+// A failed query must not leave the old chart, title or source looking current.
+function clearKlineChart(symbol) {
+  const ks = klineState();
+  stopKlineRt();
+  klineRt.candles = null;
+  removeKlineCharts();
+  const host = document.querySelector("#kline-chart");
+  if (host) host.innerHTML = "";
+  const adj = document.querySelector("#kline-adjnote");
+  if (adj) adj.hidden = true;
+  ks.loaded = null;
+  const set = (sel, text) => { const el = document.querySelector(sel); if (el) el.textContent = text; };
+  set("#kline-name", symbol || "—");
+  set("#kline-source", "数据源：—");
+  set("#kline-price", "—");
+  set("#kline-change", "");
+  set("#kline-ohlc", "");
+  const future = document.querySelector("#kline-future");
+  if (future) future.hidden = true;
+  const live = document.querySelector("#kline-live");
+  if (live) live.hidden = true;
+  markKlineStale();
+}
+
+function markKlineStale() {
+  const ks = klineState();
+  const input = document.querySelector("#kline-symbol");
+  const badge = document.querySelector("#kline-stale");
+  const card = document.querySelector("#kline-card");
+  if (!input || !badge || !card) return;
+  const typed = input.value.trim();
+  const loading = Boolean(ks.loading) && Boolean(ks.loaded);
+  const stale = loading || (Boolean(ks.loaded) && typed.toUpperCase() !== String(ks.loaded).toUpperCase());
+  card.classList.toggle("kline-card--stale", stale);
+  badge.hidden = !stale;
+  badge.textContent = loading ? `加载中：${ks.loading}…（下图仍是 ${ks.loaded}，未更新）`
+    : stale ? `未更新：当前仍是 ${ks.loaded}，点「查询」或按回车查看 ${typed || "新代码"}` : "";
+  if (stale) stopKlineRt(); else if (ks.loaded && klineRt.candles && !klineRt.timer) startKlineRt();
+}
+
+let klineSuggestTimer = null;
+let klineSuggestSeq = 0;
+
+function hideKlineSuggest() {
+  klineSuggestSeq += 1;
+  if (klineSuggestTimer) clearTimeout(klineSuggestTimer);
+  klineSuggestTimer = null;
+  const list = document.querySelector("#kline-suggest");
+  if (list) { list.hidden = true; list.innerHTML = ""; }
+  const input = document.querySelector("#kline-symbol");
+  if (input) input.setAttribute("aria-expanded", "false");
+}
+
+function queueKlineSuggest(value) {
+  if (klineSuggestTimer) clearTimeout(klineSuggestTimer);
+  const q = String(value || "").trim();
+  if (!q) { hideKlineSuggest(); return; }
+  const seq = ++klineSuggestSeq;
+  klineSuggestTimer = setTimeout(async () => {
+    let data;
+    try { data = await api(`/api/kline/search?q=${encodeURIComponent(q)}`); } catch (_) { return; }
+    if (seq !== klineSuggestSeq || state.page !== "kline") return;
+    const list = document.querySelector("#kline-suggest");
+    const results = (data && data.results) || [];
+    if (!list) return;
+    const hint = !results.length && data && data.hint ? data.hint : "";
+    list.innerHTML = results.map((r) => `<li role="option"><button type="button" data-symbol="${escapeHtml(r.symbol)}"><b>${escapeHtml(r.symbol)}</b><span>${escapeHtml(r.name || "")}</span><small>${escapeHtml(r.exchange || "")}</small></button></li>`).join("")
+      + (hint ? `<li class="kline-suggest-hint" id="kline-suggest-hint" role="status">${escapeHtml(hint)}</li>` : "");
+    const open = Boolean(results.length || hint);
+    list.hidden = !open;
+    document.querySelector("#kline-symbol").setAttribute("aria-expanded", String(Boolean(results.length)));
+  }, 250);
+}
+
+// Same right-scale width on price and volume panes so crosshair verticals line up.
+const KLINE_SCALE_W = 72;
 
 function drawKline(lib, data) {
   const ks = klineState();
@@ -4710,9 +4831,13 @@ function drawKline(lib, data) {
   const provider = KLINE_PROVIDER[data.provider] || data.provider;
   const source = data.asset_type === "crypto"
     ? `数据源：${provider}${data.provider === "okx" ? "（主） · Coinbase（备用）" : "（备用）"}`
-    : data.asset_type === "commodity" ? `数据源：期货行情 ${data.provider_symbol}` : `数据源：股票日线 ${data.provider_symbol}`;
+    : data.asset_type === "commodity" ? `数据源：期货行情 ${data.provider_symbol}`
+    : data.provider === "sina" ? `数据源：${data.source_label || "新浪（非官方，不复权）"}` : `数据源：股票日线 ${data.provider_symbol}`;
+  const adjNote = document.querySelector("#kline-adjnote");
+  adjNote.hidden = !data.fallback;
+  adjNote.textContent = data.fallback ? "价格未复权，可能与复权价不一致" : "";
   document.querySelector("#kline-source").textContent = source;
-  document.querySelector("#kline-name").textContent = data.symbol;
+  document.querySelector("#kline-name").textContent = data.canonical && data.canonical !== data.symbol ? `${data.symbol} · ${data.canonical}` : data.symbol;
   const future = document.querySelector("#kline-future");
   future.hidden = !data.is_future;
   future.textContent = data.is_future ? `期货标注 ${data.canonical} · 近月合约，换月可能跳空` : "";
@@ -4720,7 +4845,7 @@ function drawKline(lib, data) {
   document.querySelector("#kline-note").textContent = `${tfLabel}，展示近 1 年；${data.asset_type === "crypto" ? "最后一根约每 5 秒刷新。" : "知情：最新价约每 60 秒刷新一次，为延时行情，不是逐笔实时。"}`;
   const bars = data.bars || [];
   const host = document.querySelector("#kline-chart");
-  if (klineChart) { try { klineChart.remove(); } catch (_) { /* detached */ } klineChart = null; }
+  removeKlineCharts();
   host.innerHTML = "";
   if (!bars.length) {
     host.innerHTML = `<p class="kline-status">没有数据。</p>`;
@@ -4730,16 +4855,51 @@ function drawKline(lib, data) {
     autoSize: true,
     layout: { background: { color: "#ffffff" }, textColor: "#5f6368", attributionLogo: false },
     grid: { vertLines: { color: "#f0f3fa" }, horzLines: { color: "#f0f3fa" } },
-    rightPriceScale: { borderColor: "#e0e0e0" },
-    timeScale: { borderColor: "#e0e0e0" },
+    rightPriceScale: { borderColor: "#e0e0e0", minimumWidth: KLINE_SCALE_W },
+    timeScale: { borderColor: "#e0e0e0", visible: false },
     localization: { locale: "zh-CN" },
   });
   klineChart = chart;
+  // W163: volume is its own chart below a real 1px separator, so price grid
+  // lines and ticks never reach into it; the two time scales stay in sync.
+  const volHost = document.querySelector("#kline-vol");
+  const volChart = lib.createChart(volHost, {
+    autoSize: true,
+    layout: { background: { color: "#ffffff" }, textColor: "#5f6368", attributionLogo: false },
+    grid: { vertLines: { color: "#f0f3fa" }, horzLines: { visible: false } },
+    rightPriceScale: { borderColor: "#e0e0e0", minimumWidth: KLINE_SCALE_W, scaleMargins: { top: 0.1, bottom: 0 } },
+    timeScale: { borderColor: "#e0e0e0" },
+    localization: { locale: "zh-CN" },
+  });
+  klineVolChart = volChart;
   const candles = chart.addCandlestickSeries({ upColor: "#26a69a", downColor: "#ef5350", borderVisible: false, wickUpColor: "#26a69a", wickDownColor: "#ef5350" });
   candles.setData(bars.map((b) => ({ time: b.time, open: b.open, high: b.high, low: b.low, close: b.close })));
-  const volume = chart.addHistogramSeries({ priceFormat: { type: "volume" }, priceScaleId: "", color: "rgba(38,166,154,.35)" });
-  volume.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+  const volume = volChart.addHistogramSeries({ priceFormat: { type: "volume" }, color: "rgba(38,166,154,.35)" });
   volume.setData(bars.map((b) => ({ time: b.time, value: b.volume, color: b.close >= b.open ? "rgba(38,166,154,.35)" : "rgba(239,83,80,.35)" })));
+  let syncing = false;
+  const sync = (from, to) => from.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+    if (syncing || !range) return;
+    syncing = true;
+    try { to.timeScale().setVisibleLogicalRange(range); } finally { syncing = false; }
+  });
+  sync(chart, volChart);
+  sync(volChart, chart);
+  // Crosshair follows across both panes when the chart lib supports it.
+  if (typeof chart.setCrosshairPosition === "function" && typeof volChart.setCrosshairPosition === "function") {
+    let mirroring = false; // programmatic moves can echo back; never loop
+    const follow = (from, to, series) => from.subscribeCrosshairMove((param) => {
+      if (mirroring) return;
+      mirroring = true;
+      try {
+        if (!param || param.time === undefined) { if (to.clearCrosshairPosition) to.clearCrosshairPosition(); return; }
+        const bar = bars.find((b) => b.time === param.time);
+        if (bar) to.setCrosshairPosition(series === "vol" ? bar.volume : bar.close, param.time, series === "vol" ? volume : candles);
+      } finally { mirroring = false; }
+    });
+    follow(chart, volChart, "vol");
+    follow(volChart, chart, "price");
+  }
+  volChart.timeScale().fitContent();
   chart.timeScale().fitContent();
   const last = bars[bars.length - 1];
   const change = (last.close / bars[0].open - 1) * 100;
@@ -4908,7 +5068,7 @@ function safeHttpUrl(value) {
 function infoSourceRow(source, info) {
   const checked = source.available && (info.selected ? info.selected.includes(source.id) : !source.optional);
   const terms = safeHttpUrl(source.terms_url);
-  return `<label class="ic-src${source.available ? "" : " ic-src--off"}" data-source="${escapeHtml(source.id)}">
+  return `<label class="ic-src${source.available ? "" : " ic-src--off"}${checked ? " ic-src--on" : ""}" data-source="${escapeHtml(source.id)}">
     <input type="checkbox" value="${escapeHtml(source.id)}" ${checked ? "checked" : ""} ${source.available ? "" : "disabled"}>
     <span class="ic-src-body"><span class="ic-src-name">${escapeHtml(source.name)}${source.optional ? '<span class="ic-tag">可选</span>' : '<span class="ic-tag">首批必选</span>'}${source.personal_use ? '<span class="ic-tag ic-tag--pu">仅限个人使用</span>' : ""}</span>
     <small>${escapeHtml(source.available ? source.description : source.reason)}</small>
@@ -5074,3 +5234,9 @@ function pollInfoJob(id, delay = state.infoPollMs ?? 1500) {
     if (state.analyzeFramework === INFO_CRAWL_ID) renderInfoCrawl();
   }, delay);
 }
+
+// V2-UI-FIX-1: keep the selected-card outline in sync (CSS :has covers modern browsers too).
+document.addEventListener("change", (event) => {
+  const card = event.target && event.target.closest && event.target.closest(".ic-src");
+  if (card && event.target.type === "checkbox") card.classList.toggle("ic-src--on", event.target.checked);
+});

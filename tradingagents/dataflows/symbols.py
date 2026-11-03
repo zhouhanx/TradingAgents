@@ -72,6 +72,30 @@ _ALIASES = {
 # HKEX codes as Yahoo spells them: the number zero-padded to 4 digits (#957).
 _HK_CODE = re.compile(r"^(\d{1,5})\.HK$")
 _SHANGHAI_SH = re.compile(r"^(\d{6})\.SH$")
+# V2-UI-FIX-1: bare exchange codes. A 6-digit A-share code takes Yahoo's
+# exchange suffix by its first digit (6 -> Shanghai ``.SS``; 0/3 -> Shenzhen
+# ``.SZ``); a bare 4-5 digit code is an HKEX code (``700``/``00700`` -> ``0700.HK``).
+_BARE_A_SHARE = re.compile(r"^\d{6}$")
+_BARE_HK = re.compile(r"^\d{4,5}$")
+_A_SHARE_SUFFIX = {"6": ".SS", "0": ".SZ", "3": ".SZ", "2": ".SZ", "4": ".BJ", "8": ".BJ"}
+
+
+def market_code(raw: str) -> str | None:
+    """Yahoo symbol for a bare A-share (6 digits) or HK (4-5 digits) code, else None.
+
+    Shared by the analysis pipeline (via ``normalize_symbol``) and the K 线 page.
+    Beijing 4xx/8xx/92x -> ``.BJ`` (Yahoo has no BJ bars; the K 线 page reads Sina).
+    """
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip().upper()
+    if _BARE_A_SHARE.match(s):
+        # 92xxxx is Beijing (BSE); 90xxxx is a Shanghai B share; 20xxxx a Shenzhen B share.
+        suffix = ".BJ" if s.startswith("92") else ".SS" if s.startswith("90") else _A_SHARE_SUFFIX.get(s[0])
+        return f"{s}{suffix}" if suffix else None
+    if _BARE_HK.match(s):
+        return f"{int(s):04d}.HK"
+    return None
 
 
 # Crypto quote currencies that all map to Yahoo's USD pair. Yahoo lists only
@@ -113,6 +137,8 @@ def normalize_symbol(raw: str) -> str:
       4. HK rule: a numeric ``.HK`` code -> Yahoo's 4-digit padding
          (``09992.HK`` -> ``9992.HK``, ``700.HK`` -> ``0700.HK``).
       5. Shanghai rule: ``600519.SH`` -> ``600519.SS``.
+      5b. Bare codes (``market_code``): ``600519`` -> ``600519.SS``,
+         ``002323`` -> ``002323.SZ``, ``700`` -> not matched, ``00700`` -> ``0700.HK``.
       6. Otherwise the upper-cased symbol is returned unchanged (plain
          equities, ETFs, Yahoo-native symbols like ``GC=F`` or ``^GSPC``).
 
@@ -138,6 +164,8 @@ def normalize_symbol(raw: str) -> str:
         canonical = f"{int(hk.group(1)):04d}.HK"
     elif sh := _SHANGHAI_SH.match(s):
         canonical = f"{sh.group(1)}.SS"
+    elif bare := market_code(s):
+        canonical = bare
     else:
         canonical = s
 

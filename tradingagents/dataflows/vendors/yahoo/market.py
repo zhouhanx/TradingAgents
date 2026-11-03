@@ -9,10 +9,15 @@ from stockstats import wrap
 
 from tradingagents.dataflows.errors import NoMarketDataError, VendorError
 from tradingagents.dataflows.symbols import normalize_symbol
+from tradingagents.dataflows.vendors import sina
 from tradingagents.dataflows.vendors.yahoo.common import price_text, raise_for_empty, yf_retry
 from tradingagents.dataflows.vendors.yahoo.ohlcv import _assert_ohlcv_not_stale, load_ohlcv
 
 logger = logging.getLogger(__name__)
+
+
+def method_name() -> str:
+    return "get_stock_data"
 
 
 def get_YFin_data_online(
@@ -31,7 +36,22 @@ def get_YFin_data_online(
     # end_date row (and the current day when end_date is today). Request one day
     # past end_date so the requested range is actually inclusive (#986/#987).
     end_inclusive = (end_dt + relativedelta(days=1)).strftime("%Y-%m-%d")
-    data = yf_retry(lambda: yf.Ticker(canonical).history(start=start_date, end=end_inclusive))
+    # A shares: BJ reads Sina only; SH/SZ read Yahoo, then Sina if Yahoo has nothing.
+    data, source = None, "yahoo"
+    for source in sina.chain(canonical):
+        try:
+            if source == "sina":
+                data = sina.history_frame(canonical, start_date, end_inclusive)
+            else:
+                data = yf_retry(lambda: yf.Ticker(canonical).history(start=start_date, end=end_inclusive))
+        except Exception:
+            if source == sina.chain(canonical)[-1]:
+                raise
+            logger.warning("%s: %s failed for %s; trying the next source.", method_name(), source, canonical)
+            data = None
+            continue
+        if data is not None and not data.empty:
+            break
 
     # Empty result means the symbol is unknown/delisted. Raise a typed error
     # instead of returning prose: the routing layer turns it into a single
@@ -58,7 +78,9 @@ def get_YFin_data_online(
     # instrument was priced.
     label = canonical if canonical == symbol.upper() else f"{canonical} (from {symbol})"
     header = f"# Stock data for {label} from {start_date} to {end_date}\n"
+    header += f"# Data source: {sina.SOURCE_LABEL[source]}\n"
     header += f"# Total records: {len(data)}\n\n"
+    sina.last_source[canonical] = source
 
     return header + csv_string
 
@@ -198,6 +220,9 @@ def get_stock_stats_indicators_window(
         + "\n\n"
         + best_ind_params.get(indicator, "No description available.")
     )
+    used = sina.last_source.get(normalize_symbol(symbol))
+    if used:
+        result_str += f"\n\nData source: {sina.SOURCE_LABEL[used]}"
 
     return result_str
 
@@ -266,7 +291,17 @@ def get_stockstats_indicator(
 def get_closes(symbol: str, start_date: str, end_date: str) -> pd.Series:
     """Daily closes from ``start_date`` up to, not including, ``end_date``."""
     canonical = normalize_symbol(symbol)
-    history = yf_retry(lambda: yf.Ticker(canonical).history(start=start_date, end=end_date))
+    history = None
+    for source in sina.chain(canonical):
+        try:
+            history = (sina.history_frame(canonical, start_date, end_date) if source == "sina"
+                       else yf_retry(lambda: yf.Ticker(canonical).history(start=start_date, end=end_date)))
+        except Exception:
+            if source == sina.chain(canonical)[-1]:
+                raise
+            history = None
+        if history is not None and not history.empty:
+            break
     return history["Close"] if history is not None and "Close" in history else pd.Series(dtype=float)
 
 

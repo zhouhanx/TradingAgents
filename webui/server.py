@@ -230,6 +230,11 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._info_call(reader)
             return
+        if parsed.path == "/api/kline/search":
+            # V2-UI-FIX-1: symbol suggestions (local CN names + Yahoo search); same token rule.
+            query = parse_qs(parsed.query)
+            self._kline_search((query.get("q") or [""])[0])
+            return
         if parsed.path == "/api/kline/latest":
             # V2-KLINE-RT: the newest bar for the page's visible-only polling; same token rule.
             query = parse_qs(parsed.query)
@@ -446,6 +451,14 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             self._json(kline_data.kline(symbol, tf or None))
+        except kline_data.KlineError as exc:
+            self._json({"error": str(exc)}, 400)
+
+    def _kline_search(self, q: str) -> None:
+        from webui import kline as kline_data
+
+        try:
+            self._json(kline_data.search(q))
         except kline_data.KlineError as exc:
             self._json({"error": str(exc)}, 400)
 

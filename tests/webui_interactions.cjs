@@ -2415,17 +2415,18 @@ test('W83: a ticker made only of zero-width characters is empty in the wizard', 
 });
 
 // V2-KLINE-RT: the K 线行情 page polls the newest bar only while visible.
-async function klineSetup(asset, pollSeconds) {
+async function klineSetup(asset, pollSeconds, klineRoute, extraRoutes = {}) {
   const bars = [{time: 1761955200, open: 10, high: 11, low: 9, close: 10.5, volume: 5}, {time: 1762041600, open: 10.5, high: 12, low: 10, close: 11, volume: 6}];
   const latest = {asset_type: asset, poll_seconds: pollSeconds, delayed: asset !== 'crypto', bar: {time: 1762041600, open: 10.5, high: 13, low: 10, close: 12.5, volume: 9}};
   const ui = await setup({
-    '/api/kline': {symbol: 'X', canonical: 'X', asset_type: asset, tf: '1D', provider: asset === 'crypto' ? 'okx' : 'yahoo', provider_symbol: 'X', is_future: asset === 'commodity', bars},
+    '/api/kline': klineRoute || {symbol: 'X', canonical: 'X', asset_type: asset, tf: '1D', provider: asset === 'crypto' ? 'okx' : 'yahoo', provider_symbol: 'X', is_future: asset === 'commodity', bars},
     '/api/kline/latest': latest,
+    ...extraRoutes,
   });
   const updates = [];
   const series = {setData() {}, update: (p) => updates.push(p), priceScale: () => ({applyOptions() {}})};
   ui.window.LightweightCharts = {createChart: () => ({addCandlestickSeries: () => series, addHistogramSeries: () => series,
-    timeScale: () => ({fitContent() {}}), subscribeCrosshairMove() {}, remove() {}})};
+    timeScale: () => ({fitContent() {}, subscribeVisibleLogicalRangeChange() {}, setVisibleLogicalRange() {}}), subscribeCrosshairMove() {}, remove() {}})};
   let visibility = 'visible';
   Object.defineProperty(ui.doc, 'visibilityState', {configurable: true, get: () => visibility});
   const timers = new Map(); let next = 1;
@@ -2534,4 +2535,102 @@ test('信息抓取: card on 启动分析, gray unavailable source, 不可用 sta
     assert.deepEqual(JSON.parse(JSON.stringify(ui.window.withInfoAttach({ticker: 'NVDA'}))), {ticker: 'NVDA'});
     assert.equal(runBody, null);
   } finally { ui.window.close(); }
+});
+
+test('K 线行情: 查询 button + Enter, typing marks old chart 未更新, suggestions pick then fetch (V2-UI-FIX-1)', async () => {
+  const ui = await klineSetup('stock', 60);
+  try {
+    const doc = ui.doc;
+    const flush = async () => { for (let i = 0; i < 8; i++) await settle(); };
+    const klineCalls = () => ui.calls.filter((c) => c.path.startsWith('/api/kline?')).map((c) => c.path);
+    assert.equal(doc.querySelector('#kline-go').textContent, '查询');
+    assert.equal(doc.querySelector('#kline-go').type, 'submit');
+    const before = klineCalls().length;
+    const input = doc.querySelector('#kline-symbol');
+    input.value = '002323';
+    input.dispatchEvent(new ui.window.Event('input'));
+    input.dispatchEvent(new ui.window.Event('change'));
+    await flush();
+    assert.equal(klineCalls().length, before, 'typing / change alone does not fetch');
+    assert.equal(doc.querySelector('#kline-stale').hidden, false);
+    assert.match(doc.querySelector('#kline-stale').textContent, /未更新/);
+    assert.ok(doc.querySelector('#kline-card').classList.contains('kline-card--stale'));
+    assert.equal(ui.timers.size >= 1, true);
+    await ui.runTimers();
+    assert.ok(ui.calls.some((c) => c.path.startsWith('/api/kline/search?q=002323')));
+    doc.querySelector('#kline-form').dispatchEvent(new ui.window.Event('submit', {cancelable: true}));
+    await flush();
+    assert.match(klineCalls().at(-1), /symbol=002323&/);
+    assert.equal(doc.querySelector('#kline-stale').hidden, true, 'after 查询 the label clears');
+  } finally { ui.dom.window.close(); }
+});
+
+test('K 线行情: draw → loading keeps 未更新 dim, draw → fail clears old chart/title/source and shows Chinese error (V2-UI-FIX-1 F1)', async () => {
+  const bars = [{time: 1761955200, open: 10, high: 11, low: 9, close: 10.5, volume: 5}];
+  let mode = 'ok'; let release;
+  const route = async (_o, path) => {
+    if (mode === 'ok') return {symbol: 'NVDA', canonical: 'NVDA', asset_type: 'stock', tf: '1D', provider: 'yahoo', provider_symbol: 'NVDA', bars};
+    if (mode === 'hang') { await new Promise((r) => { release = r; }); return {__status: 400, body: {error: '行情源暂时没有这只股票的数据（代码格式正确：830799.BJ），请稍后再试。'}}; }
+    return {__status: 400, body: {error: '行情源暂时没有这只股票的数据（代码格式正确：002323.SZ），请稍后再试。'}};
+  };
+  const ui = await klineSetup('stock', 60, route);
+  try {
+    const doc = ui.doc;
+    const flush = async () => { for (let i = 0; i < 8; i++) await settle(); };
+    assert.match(doc.querySelector('#kline-source').textContent, /NVDA/);
+    const input = doc.querySelector('#kline-symbol');
+    const submit = async () => { doc.querySelector('#kline-form').dispatchEvent(new ui.window.Event('submit', {cancelable: true})); await flush(); };
+    // loading
+    mode = 'hang'; input.value = '830799'; input.dispatchEvent(new ui.window.Event('input')); await submit();
+    assert.equal(doc.querySelector('#kline-stale').hidden, false);
+    assert.match(doc.querySelector('#kline-stale').textContent, /加载中：830799.*未更新/);
+    assert.ok(doc.querySelector('#kline-card').classList.contains('kline-card--stale'));
+    // fail after loading
+    release(); await flush();
+    const status = doc.querySelector('#kline-status');
+    assert.equal(status.hidden, false);
+    assert.match(status.textContent, /行情源暂时没有这只股票的数据（代码格式正确/);
+    assert.doesNotMatch(status.textContent, /Error/);
+    assert.equal(doc.querySelector('#kline-name').textContent, '830799');
+    assert.equal(doc.querySelector('#kline-source').textContent, '数据源：—');
+    assert.equal(doc.querySelector('#kline-price').textContent, '—');
+    assert.equal(doc.querySelector('#kline-stale').hidden, true);
+    // draw again, then a direct failure
+    mode = 'ok'; input.value = 'NVDA'; await submit();
+    assert.equal(doc.querySelector('#kline-status').hidden, true);
+    assert.match(doc.querySelector('#kline-source').textContent, /NVDA/);
+    mode = 'fail'; input.value = '002323'; await submit();
+    assert.match(doc.querySelector('#kline-status').textContent, /代码格式正确：002323\.SZ/);
+    assert.doesNotMatch(doc.querySelector('#kline-source').textContent, /NVDA/);
+    assert.equal(doc.querySelector('#kline-name').textContent, '002323');
+  } finally { ui.dom.window.close(); }
+});
+
+test('K 线行情: Sina source pill + 未复权 note on fallback; unknown Chinese name shows server hint in the dropdown (W174/W168/W176)', async () => {
+  const bars = [{time: 1761955200, open: 10, high: 11, low: 9, close: 10.5, volume: 5}];
+  let resp = {symbol: '002323', canonical: '002323.SZ', asset_type: 'stock', tf: '1D', provider: 'sina', provider_symbol: 'sz002323', source_label: '新浪（非官方，不复权）', fallback: true, adjusted: false, bars};
+  const ui = await klineSetup('stock', 60, async () => resp, {
+    '/api/kline/search': {query: '不存在', results: [], hint: '没有找到这个名称，请用 6 位代码查询。'},
+  });
+  try {
+    const doc = ui.doc;
+    const flush = async () => { for (let i = 0; i < 8; i++) await settle(); };
+    assert.equal(doc.querySelector('#kline-source').textContent, '数据源：新浪（非官方，不复权）');
+    assert.doesNotMatch(doc.querySelector('#kline-source').textContent, /sz002323/);
+    assert.equal(doc.querySelector('#kline-adjnote').hidden, false);
+    assert.equal(doc.querySelector('#kline-adjnote').textContent, '价格未复权，可能与复权价不一致');
+    assert.ok(doc.querySelector('#kline-vol'), 'separate volume pane');
+    resp = {...resp, symbol: '920002', canonical: '920002.BJ', provider_symbol: 'bj920002', fallback: false};
+    const input = doc.querySelector('#kline-symbol');
+    input.value = '920002';
+    doc.querySelector('#kline-form').dispatchEvent(new ui.window.Event('submit', {cancelable: true})); await flush();
+    assert.equal(doc.querySelector('#kline-source').textContent, '数据源：新浪（非官方，不复权）');
+    assert.equal(doc.querySelector('#kline-adjnote').hidden, true, 'BJ is Sina-only, not a fallback');
+    input.value = '不存在';
+    input.dispatchEvent(new ui.window.Event('input'));
+    await ui.runTimers();
+    const list = doc.querySelector('#kline-suggest');
+    assert.equal(list.hidden, false, 'dropdown stays open with the hint');
+    assert.equal(doc.querySelector('#kline-suggest-hint').textContent, '没有找到这个名称，请用 6 位代码查询。');
+  } finally { ui.dom.window.close(); }
 });

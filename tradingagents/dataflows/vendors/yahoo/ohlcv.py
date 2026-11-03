@@ -8,6 +8,7 @@ from tradingagents.dataflows.config import get_config
 from tradingagents.dataflows.errors import NoMarketDataError
 from tradingagents.dataflows.files import replace_file
 from tradingagents.dataflows.symbols import normalize_symbol, safe_ticker_component
+from tradingagents.dataflows.vendors import sina
 from tradingagents.dataflows.vendors.yahoo.common import raise_for_empty, yf_retry
 
 logger = logging.getLogger(__name__)
@@ -188,41 +189,61 @@ def load_ohlcv(symbol: str, as_of_date: str, fill_gaps: bool = True) -> pd.DataF
     end_str = (now + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
 
     os.makedirs(config["data_cache_dir"], exist_ok=True)
-    data_file = os.path.join(
-        config["data_cache_dir"],
-        f"{safe_symbol}-YFin-data.csv",
-    )
-
-    # A cached file may be empty if a prior fetch failed (unknown symbol,
-    # transient rate limit). Treat an empty/columnless cache as a miss and
-    # re-fetch rather than serving the poisoned file forever.
+    # A shares: BJ reads Sina only; SH/SZ read Yahoo first, then Sina. Each
+    # source keeps its own cache file so an unadjusted Sina frame is never
+    # mistaken for Yahoo's adjusted one.
     data = None
-    if os.path.exists(data_file):
-        cached = pd.read_csv(data_file, on_bad_lines="skip", encoding="utf-8")
-        if (
-            not cached.empty
-            and "Close" in cached.columns
-            and _cache_is_fresh(data_file, as_of_dt, now)
-        ):
-            data = cached
-
-    if data is None:
-        # yf.download catches every error, a rate limit included, and returns
-        # an empty frame. Ticker.history raises the rate limit, so it is retried.
-        downloaded = yf_retry(lambda: yf.Ticker(canonical).history(
-            start=start_str,
-            end=end_str,
-            auto_adjust=True,
-            actions=False,
-        ))
+    sources = sina.chain(canonical)
+    last_error: Exception | None = None
+    for source in sources:
+        data_file = os.path.join(
+            config["data_cache_dir"],
+            f"{safe_symbol}-YFin-data.csv" if source == "yahoo" else f"{safe_symbol}-Sina-data.csv",
+        )
+        # A cached file may be empty if a prior fetch failed (unknown symbol,
+        # transient rate limit). Treat an empty/columnless cache as a miss and
+        # re-fetch rather than serving the poisoned file forever.
+        if os.path.exists(data_file):
+            cached = pd.read_csv(data_file, on_bad_lines="skip", encoding="utf-8")
+            if (
+                not cached.empty
+                and "Close" in cached.columns
+                and _cache_is_fresh(data_file, as_of_dt, now)
+            ):
+                data = cached
+                break
+        try:
+            if source == "sina":
+                downloaded = sina.history_frame(canonical)
+            else:
+                # yf.download catches every error, a rate limit included, and returns
+                # an empty frame. Ticker.history raises the rate limit, so it is retried.
+                downloaded = yf_retry(lambda: yf.Ticker(canonical).history(
+                    start=start_str,
+                    end=end_str,
+                    auto_adjust=True,
+                    actions=False,
+                ))
+        except Exception as exc:  # noqa: BLE001 - the next A-share source is the fallback
+            if source == sources[-1]:
+                raise
+            last_error = exc
+            logger.warning("%s: %s failed (%s); trying the next source.", canonical, source, type(exc).__name__)
+            continue
         if downloaded is None:
-            raise_for_empty(symbol, canonical, "price rows")
+            continue
         downloaded = _ensure_date_column(downloaded.reset_index())
         # Only cache real data — never persist an empty frame.
         if downloaded.empty or "Close" not in downloaded.columns:
-            raise_for_empty(symbol, canonical, "price rows")
-        replace_file(data_file, lambda temp: downloaded.to_csv(temp, index=False, encoding="utf-8"))
+            continue
+        replace_file(data_file, lambda temp, frame=downloaded: frame.to_csv(temp, index=False, encoding="utf-8"))
         data = downloaded
+        break
+    if data is None:
+        if last_error is not None and len(sources) == 1:
+            raise last_error
+        raise_for_empty(symbol, canonical, "price rows")
+    sina.last_source[canonical] = source
 
     data = _clean_dataframe(data)
 

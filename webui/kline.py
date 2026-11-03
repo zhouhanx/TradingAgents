@@ -20,7 +20,8 @@ from datetime import UTC, datetime, timedelta
 
 import requests
 
-from tradingagents.dataflows.symbols import crypto_base, normalize_symbol
+from tradingagents.dataflows.symbols import crypto_base, market_code, normalize_symbol
+from tradingagents.dataflows.vendors import sina
 
 TIMEFRAMES = ("1D", "1W", "1M")
 DEFAULT_TIMEFRAME = "1D"
@@ -120,6 +121,17 @@ def fetch_yahoo(canonical: str) -> list[dict]:
     return out
 
 
+def sina_symbol(canonical: str) -> str | None:
+    return sina.sina_symbol(canonical)
+
+
+def fetch_sina(ident: str) -> list[dict]:
+    """About one year of unadjusted daily bars from Sina (shared vendor module)."""
+    prefix, code = ident[:2], ident[2:]
+    suffix = {"sh": ".SS", "sz": ".SZ", "bj": ".BJ"}[prefix]
+    return sina.bars_epoch(code + suffix, _since())
+
+
 def route(symbol: str) -> dict:
     """Which asset type and provider chain a symbol reads from."""
     raw = (symbol or "").strip()
@@ -127,17 +139,33 @@ def route(symbol: str) -> dict:
         raise KlineError("请输入标的代码。")
     if len(raw) > 32 or any(ch.isspace() for ch in raw):
         raise KlineError("标的代码格式不对。")
+    if not raw.isascii():
+        hit = CN_NAMES.get(raw)
+        if not hit:
+            raise KlineError("没有找到这个名称，请用 6 位代码查询（港股 4-5 位，美股英文代码）。")
+        raw = hit[0]
+    if raw.isdigit() and len(raw) <= 3:
+        raise KlineError("港股请用 4-5 位代码，例如 0700 或 00700；A 股请用 6 位代码。")
+    if raw.isdigit() and len(raw) == 6 and not market_code(raw):
+        raise KlineError("暂不支持这个 6 位代码（支持沪市 6/90、深市 0/2/3、北交所 4/8/92 开头）。")
     canonical = normalize_symbol(raw)
     base = crypto_base(raw) or crypto_base(canonical)
     if base:
         return {"asset_type": "crypto", "canonical": f"{base}-USD", "base": base,
                 "providers": [("okx", f"{base}-USDT"), ("coinbase", f"{base}-USD"), ("yahoo", f"{base}-USD")]}
     asset = "commodity" if canonical.endswith("=F") else "stock"
-    return {"asset_type": asset, "canonical": canonical, "base": None, "providers": [("yahoo", canonical)]}
+    sina = sina_symbol(canonical)
+    if canonical.endswith(".BJ"):
+        providers = [("sina", sina)]
+    elif sina:
+        providers = [("yahoo", canonical), ("sina", sina)]
+    else:
+        providers = [("yahoo", canonical)]
+    return {"asset_type": asset, "canonical": canonical, "base": None, "providers": providers}
 
 
 def _fetcher(name: str) -> Callable[[str], list[dict]]:
-    return {"okx": fetch_okx, "coinbase": fetch_coinbase, "yahoo": fetch_yahoo}[name]
+    return {"okx": fetch_okx, "coinbase": fetch_coinbase, "yahoo": fetch_yahoo, "sina": fetch_sina}[name]
 
 
 def resample(bars: list[dict], tf: str) -> list[dict]:
@@ -171,7 +199,22 @@ def _daily(info: dict) -> tuple[str, str, list[dict], list[str]]:
         if bars:
             return name, ident, bars, errors
         errors.append(f"{name}: 无数据")
-    raise KlineError("没有拿到这个标的的 K 线数据（" + "；".join(errors) + "）。")
+    raise KlineError(_friendly(info, errors))
+
+
+def _friendly(info: dict, errors: list[str]) -> str:
+    """Plain Chinese for a failed fetch; never raw vendor exception names."""
+    code = info["canonical"]
+    if code.endswith(".BJ") and code[0] in "48" and all(e.endswith("无数据") for e in errors):
+        return f"行情源近一年没有 {code} 的数据：北交所 4/8 开头的老代码已切换为 920 开头的新代码，请用新代码查询。"
+    empty = all(e.endswith("无数据") for e in errors)
+    if sina_symbol(info["canonical"]) and empty:
+        return f"行情源暂时没有这只股票的数据（代码格式正确：{info['canonical']}）。"
+    if empty:
+        if info["asset_type"] == "stock":
+            return f"没有找到这个代码（{info['canonical']}），A 股请用 6 位代码，港股用 4-5 位代码，美股用英文代码。"
+        return f"没有拿到 {info['canonical']} 的行情数据。"
+    return f"行情源暂时连不上（{info['canonical']}），请稍后再试。"
 
 
 def kline(symbol: str, tf: str | None = None) -> dict:
@@ -200,6 +243,9 @@ def kline(symbol: str, tf: str | None = None) -> dict:
         "provider_symbol": daily["provider_symbol"],
         "fallback_errors": daily["fallback_errors"],
         "is_future": info["asset_type"] == "commodity",
+        "adjusted": daily["provider"] != "sina",
+        "source_label": "新浪（非官方，不复权）" if daily["provider"] == "sina" else None,
+        "fallback": daily["provider"] == "sina" and not info["canonical"].endswith(".BJ"),
         "cached": cached,
         "fetched_at": daily["fetched_at"],
         "bars": resample(daily["bars"], tf),
@@ -261,7 +307,16 @@ def live_yahoo(canonical: str) -> dict | None:
 
 
 def _live_fetcher(name: str) -> Callable[[str], dict | None]:
-    return {"okx": live_okx, "coinbase": live_coinbase, "yahoo": live_yahoo}[name]
+    return {"okx": live_okx, "coinbase": live_coinbase, "yahoo": live_yahoo, "sina": live_sina}[name]
+
+
+def live_sina(ident: str) -> dict | None:
+    rows = sina.daily_rows(ident, 1)
+    if not rows:
+        return None
+    r = rows[-1]
+    ts = int(datetime.strptime(r["day"], "%Y-%m-%d").replace(tzinfo=UTC).timestamp())
+    return _bar(ts, r["open"], r["high"], r["low"], r["close"], r["volume"])
 
 
 def latest(symbol: str) -> dict:
@@ -288,7 +343,7 @@ def latest(symbol: str) -> dict:
                 break
             errors.append(f"{name}: 无数据")
         if answer is None:
-            raise KlineError("暂时拿不到最新行情（" + "；".join(errors) + "），稍后会自动重试。")
+            raise KlineError("暂时拿不到最新行情，稍后会自动重试。")
         with _lock:
             _live_cache[key] = (now, answer)
     return {
@@ -301,3 +356,96 @@ def latest(symbol: str) -> dict:
         "cached": cached,
         **answer,
     }
+
+
+# ------------------------------------------------------------------ V2-UI-FIX-1 search
+
+SEARCH_CACHE_SECONDS = 600
+SEARCH_MAX = 8
+_search_cache: dict[str, tuple[float, dict]] = {}
+# Yahoo's search does not match Chinese names, so a short local table covers
+# common A-share / HK names; anything else goes to Yahoo search (no key).
+CN_NAMES = {
+    "贵州茅台": ("600519.SS", "上交所"), "茅台": ("600519.SS", "上交所"), "五粮液": ("000858.SZ", "深交所"),
+    "宁德时代": ("300750.SZ", "深交所"), "比亚迪": ("002594.SZ", "深交所"), "中国平安": ("601318.SS", "上交所"),
+    "招商银行": ("600036.SS", "上交所"), "工商银行": ("601398.SS", "上交所"), "中国石油": ("601857.SS", "上交所"),
+    "隆基绿能": ("601012.SS", "上交所"), "东方财富": ("300059.SZ", "深交所"), "中信证券": ("600030.SS", "上交所"),
+    "美的集团": ("000333.SZ", "深交所"), "格力电器": ("000651.SZ", "深交所"), "海康威视": ("002415.SZ", "深交所"),
+    "腾讯": ("0700.HK", "港交所"), "腾讯控股": ("0700.HK", "港交所"), "阿里巴巴": ("9988.HK", "港交所"),
+    "美团": ("3690.HK", "港交所"), "小米": ("1810.HK", "港交所"), "小米集团": ("1810.HK", "港交所"),
+    "京东": ("9618.HK", "港交所"), "苹果": ("AAPL", "纳斯达克"), "英伟达": ("NVDA", "纳斯达克"),
+    "特斯拉": ("TSLA", "纳斯达克"), "微软": ("MSFT", "纳斯达克"), "黄金": ("XAUUSD", "COMEX"),
+}
+EXCHANGES = {"SHH": "上交所", "SHZ": "深交所", "HKG": "港交所", "NMS": "纳斯达克", "NGM": "纳斯达克",
+             "NCM": "纳斯达克", "NYQ": "纽交所", "ASE": "美交所", "PCX": "NYSE Arca", "BTS": "Cboe"}
+_ALLOWED_TYPES = {"EQUITY", "ETF", "INDEX", "FUTURE", "CRYPTOCURRENCY", "MUTUALFUND"}
+
+
+def clear_search_cache() -> None:
+    with _lock:
+        _search_cache.clear()
+
+
+def yahoo_search(query: str) -> list[dict]:
+    """Yahoo symbol search through the project's yfinance dependency (public, no key)."""
+    import yfinance as yf
+
+    from tradingagents.dataflows.vendors.yahoo.common import yf_retry
+
+    quotes = yf_retry(lambda: yf.Search(query, max_results=SEARCH_MAX, news_count=0).quotes) or []
+    out = []
+    for q in quotes:
+        sym = str(q.get("symbol") or "")
+        if not sym or (q.get("quoteType") and q.get("quoteType") not in _ALLOWED_TYPES):
+            continue
+        exch = str(q.get("exchange") or "")
+        out.append({"symbol": sym, "name": q.get("shortname") or q.get("longname") or sym,
+                    "exchange": EXCHANGES.get(exch, q.get("exchDisp") or exch)})
+    return out
+
+
+def search(query: str) -> dict:
+    q = (query or "").strip()
+    if not q:
+        return {"query": "", "results": [], "cached": False}
+    if len(q) > 40:
+        raise KlineError("搜索词太长了。")
+    key = q.upper()
+    now = time.time()
+    with _lock:
+        hit = _search_cache.get(key)
+    if hit and now - hit[0] < SEARCH_CACHE_SECONDS:
+        return {**hit[1], "query": q, "results": list(hit[1]["results"]), "cached": True}
+    results: list[dict] = []
+    for name, (sym, exch) in CN_NAMES.items():
+        if q in name and all(r["symbol"] != sym for r in results):
+            results.append({"symbol": sym, "name": name, "exchange": exch})
+    bare = market_code(q)
+    if bare:
+        exch = {".SS": "上交所", ".SZ": "深交所", ".BJ": "北交所"}.get(bare[-3:], "港交所")
+        local = next((n for n, (sym, _) in CN_NAMES.items() if sym == bare), None)
+        name = local or (sina.suggest_name(q) if sina_symbol(bare) else None) or q
+        results.append({"symbol": bare, "name": name, "exchange": exch})
+    try:
+        # Pure digits: only the mapped A-share/HK candidate, never Yahoo results.
+        remote = yahoo_search(q) if q.isascii() and not q.isdigit() else []
+    except Exception:  # noqa: BLE001 - suggestions are best-effort
+        remote = []
+        if not results:
+            raise KlineError("搜索暂时不可用，可以直接输入代码后点「查询」。") from None
+    for r in remote:
+        found = next((x for x in results if x["symbol"] == r["symbol"]), None)
+        if found:
+            if found["name"] == q:
+                found["name"] = r["name"]
+        else:
+            results.append(r)
+    results = results[:SEARCH_MAX]
+    out = {"query": q, "results": results, "cached": False}
+    if not results and not q.isascii():
+        out["hint"] = "没有找到这个名称，请用 6 位代码查询。"
+    elif not results and q.isdigit() and len(q) <= 3:
+        out["hint"] = "港股请用 4-5 位代码，例如 0700 或 00700；A 股请用 6 位代码。"
+    with _lock:
+        _search_cache[key] = (now, dict(out))  # full payload, hint included (W176)
+    return out

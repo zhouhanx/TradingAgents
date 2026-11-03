@@ -64,6 +64,12 @@ def _fmt(value) -> str:
     return str(value)
 
 
+def _source_label(symbol: str) -> str:
+    from tradingagents.dataflows.vendors import sina
+
+    return sina.SOURCE_LABEL.get(sina.last_source.get(normalize_symbol(symbol), "yahoo"), sina.SOURCE_YAHOO)
+
+
 def build_verified_market_snapshot(
     symbol: str,
     as_of_date: str,
@@ -95,6 +101,7 @@ def build_verified_market_snapshot(
         f"## Verified market data snapshot for {symbol.upper()}",
         "",
         f"- Requested analysis date: {as_of_date}",
+        f"- Data source: {_source_label(symbol)}",
         f"- Latest trading row used: {latest_date}",
         "- Rows after the requested analysis date are excluded before verification.",
         "",
