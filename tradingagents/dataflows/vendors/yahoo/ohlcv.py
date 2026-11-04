@@ -4,6 +4,7 @@ import os
 import pandas as pd
 import yfinance as yf
 
+from tradingagents.dataflows import ohlc_check
 from tradingagents.dataflows.config import get_config
 from tradingagents.dataflows.errors import NoMarketDataError
 from tradingagents.dataflows.files import replace_file
@@ -246,6 +247,7 @@ def load_ohlcv(symbol: str, as_of_date: str, fill_gaps: bool = True) -> pd.DataF
     sina.last_source[canonical] = source
 
     data = _clean_dataframe(data)
+    data, _ = ohlc_check.fix_frame(data, canonical)
 
     # Filter to as_of_date to prevent look-ahead bias in backtesting.
     data = data[data["Date"] <= as_of_dt]

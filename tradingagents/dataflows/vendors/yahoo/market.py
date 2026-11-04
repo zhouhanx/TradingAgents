@@ -7,6 +7,7 @@ import yfinance as yf
 from dateutil.relativedelta import relativedelta
 from stockstats import wrap
 
+from tradingagents.dataflows import ohlc_check
 from tradingagents.dataflows.errors import NoMarketDataError, VendorError
 from tradingagents.dataflows.symbols import normalize_symbol
 from tradingagents.dataflows.vendors import sina
@@ -68,6 +69,8 @@ def get_YFin_data_online(
     # turns into one clear unavailable signal (#1021).
     _assert_ohlcv_not_stale(data, end_date, symbol, canonical)
 
+    data, fixed = ohlc_check.fix_frame(data, canonical, date_col=None)
+
     for col in ("Open", "High", "Low", "Close", "Adj Close"):
         if col in data.columns:
             data[col] = data[col].map(price_text, na_action="ignore")
@@ -79,7 +82,10 @@ def get_YFin_data_online(
     label = canonical if canonical == symbol.upper() else f"{canonical} (from {symbol})"
     header = f"# Stock data for {label} from {start_date} to {end_date}\n"
     header += f"# Data source: {sina.SOURCE_LABEL[source]}\n"
-    header += f"# Total records: {len(data)}\n\n"
+    header += f"# Total records: {len(data)}\n"
+    if fixed:
+        header += f"# Note: {fixed} bar(s): {ohlc_check.NOTE_EN} / {ohlc_check.NOTE_ZH}\n"
+    header += "\n"
     sina.last_source[canonical] = source
 
     return header + csv_string
@@ -223,6 +229,9 @@ def get_stock_stats_indicators_window(
     used = sina.last_source.get(normalize_symbol(symbol))
     if used:
         result_str += f"\n\nData source: {sina.SOURCE_LABEL[used]}"
+    note = ohlc_check.note_for(normalize_symbol(symbol))
+    if note:
+        result_str += f"\nData check: {note}"
 
     return result_str
 

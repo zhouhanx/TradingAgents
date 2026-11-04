@@ -13,6 +13,7 @@ stocks and metals/futures every 60 s from Yahoo (a delayed quote, not ticks).
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -20,6 +21,7 @@ from datetime import UTC, datetime, timedelta
 
 import requests
 
+from tradingagents.dataflows import ohlc_check
 from tradingagents.dataflows.symbols import crypto_base, market_code, normalize_symbol
 from tradingagents.dataflows.vendors import sina
 
@@ -40,6 +42,12 @@ COINBASE_URL = "https://api.exchange.coinbase.com/products/{product}/candles"
 
 _cache: dict[tuple[str, str], tuple[float, dict]] = {}
 _lock = threading.Lock()
+
+
+# W188: what a ticker may contain before any source is asked. Letters stay
+# valid (ABC may be a real US ticker); the source decides whether it exists.
+CODE_RE = re.compile(r"[A-Za-z0-9^][A-Za-z0-9.\-=^+]{0,31}")
+FORMAT_INVALID = "代码格式无效：A 股用 6 位数字，港股 4-5 位数字，美股用英文代码（可含 . - = ^）。"
 
 
 class KlineError(ValueError):
@@ -138,12 +146,14 @@ def route(symbol: str) -> dict:
     if not raw:
         raise KlineError("请输入标的代码。")
     if len(raw) > 32 or any(ch.isspace() for ch in raw):
-        raise KlineError("标的代码格式不对。")
+        raise KlineError(FORMAT_INVALID)
     if not raw.isascii():
         hit = CN_NAMES.get(raw)
         if not hit:
             raise KlineError("没有找到这个名称，请用 6 位代码查询（港股 4-5 位，美股英文代码）。")
         raw = hit[0]
+    if not CODE_RE.fullmatch(raw):
+        raise KlineError(FORMAT_INVALID)
     if raw.isdigit() and len(raw) <= 3:
         raise KlineError("港股请用 4-5 位代码，例如 0700 或 00700；A 股请用 6 位代码。")
     if raw.isdigit() and len(raw) == 6 and not market_code(raw):
@@ -185,6 +195,8 @@ def resample(bars: list[dict], tf: str) -> list[dict]:
             agg["low"] = min(agg["low"], bar["low"])
             agg["close"] = bar["close"]
             agg["volume"] += bar["volume"]
+            if bar.get("ohlc_fixed"):
+                agg["ohlc_fixed"] = True
     return out
 
 
@@ -194,12 +206,33 @@ def _daily(info: dict) -> tuple[str, str, list[dict], list[str]]:
         try:
             bars = _fetcher(name)(info["base"] if name in ("okx", "coinbase") else ident)
         except Exception as exc:  # noqa: BLE001 - the next provider is the fallback
-            errors.append(f"{name}: {type(exc).__name__}")
+            errors.append(f"{name}: {type(exc).__name__}" + ("" if _is_network(exc) else " 无此代码"))
             continue
         if bars:
+            ohlc_check.fix_bars(bars, info["canonical"])
             return name, ident, bars, errors
         errors.append(f"{name}: 无数据")
     raise KlineError(_friendly(info, errors))
+
+
+# Exceptions meaning the source answered "no such symbol" (yfinance's missing
+# prices / time zone / ticker answers, or HTTP 404). Anything else, a bare
+# VendorUnavailableError included, is treated as the source being unreachable.
+_NOT_FOUND_MARKERS = ("Missing", "Delisted", "NotFound", "NoMarketData")
+
+
+def _is_network(exc: BaseException | None) -> bool:
+    """Whether a fetch failed in transit rather than the source answering that it
+    has no such symbol (W188)."""
+    seen = 0
+    while exc is not None and seen < 8:
+        name = type(exc).__name__
+        if any(m in name for m in _NOT_FOUND_MARKERS):
+            return False
+        if getattr(getattr(exc, "response", None), "status_code", None) == 404:
+            return False
+        exc, seen = exc.__cause__ or exc.__context__, seen + 1
+    return True
 
 
 def _friendly(info: dict, errors: list[str]) -> str:
@@ -207,14 +240,14 @@ def _friendly(info: dict, errors: list[str]) -> str:
     code = info["canonical"]
     if code.endswith(".BJ") and code[0] in "48" and all(e.endswith("无数据") for e in errors):
         return f"行情源近一年没有 {code} 的数据：北交所 4/8 开头的老代码已切换为 920 开头的新代码，请用新代码查询。"
+    if not errors or any(not (e.endswith("无数据") or e.endswith("无此代码")) for e in errors):
+        return f"行情源暂时连不上（{info['canonical']}），请稍后再试。"
     empty = all(e.endswith("无数据") for e in errors)
     if sina_symbol(info["canonical"]) and empty:
         return f"行情源暂时没有这只股票的数据（代码格式正确：{info['canonical']}）。"
-    if empty:
-        if info["asset_type"] == "stock":
-            return f"没有找到这个代码（{info['canonical']}），A 股请用 6 位代码，港股用 4-5 位代码，美股用英文代码。"
-        return f"没有拿到 {info['canonical']} 的行情数据。"
-    return f"行情源暂时连不上（{info['canonical']}），请稍后再试。"
+    if info["asset_type"] == "stock":
+        return f"没有找到这个代码（{info['canonical']}），A 股请用 6 位代码，港股用 4-5 位代码，美股用英文代码。"
+    return f"没有拿到 {info['canonical']} 的行情数据。"
 
 
 def kline(symbol: str, tf: str | None = None) -> dict:
@@ -247,6 +280,8 @@ def kline(symbol: str, tf: str | None = None) -> dict:
         "source_label": "新浪（非官方，不复权）" if daily["provider"] == "sina" else None,
         "fallback": daily["provider"] == "sina" and not info["canonical"].endswith(".BJ"),
         "cached": cached,
+        "ohlc_fixed": sum(1 for b in daily["bars"] if b.get("ohlc_fixed")),
+        "ohlc_note": ohlc_check.NOTE_ZH,
         "fetched_at": daily["fetched_at"],
         "bars": resample(daily["bars"], tf),
     }
@@ -339,6 +374,7 @@ def latest(symbol: str) -> dict:
                 errors.append(f"{name}: {type(exc).__name__}")
                 continue
             if bar:
+                ohlc_check.fix_bars([bar], info["canonical"])
                 answer = {"provider": name, "provider_symbol": ident, "bar": bar, "fallback_errors": errors, "fetched_at": int(now)}
                 break
             errors.append(f"{name}: 无数据")

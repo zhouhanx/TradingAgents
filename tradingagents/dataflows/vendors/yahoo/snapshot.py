@@ -70,6 +70,12 @@ def _source_label(symbol: str) -> str:
     return sina.SOURCE_LABEL.get(sina.last_source.get(normalize_symbol(symbol), "yahoo"), sina.SOURCE_YAHOO)
 
 
+def _ohlc_note(symbol: str) -> str | None:
+    from tradingagents.dataflows import ohlc_check
+
+    return ohlc_check.note_for(normalize_symbol(symbol))
+
+
 def build_verified_market_snapshot(
     symbol: str,
     as_of_date: str,
@@ -104,6 +110,7 @@ def build_verified_market_snapshot(
         f"- Data source: {_source_label(symbol)}",
         f"- Latest trading row used: {latest_date}",
         "- Rows after the requested analysis date are excluded before verification.",
+        *([f"- Data check: {n}"] if (n := _ohlc_note(symbol)) else []),
         "",
         "### Latest verified OHLCV row",
         "",

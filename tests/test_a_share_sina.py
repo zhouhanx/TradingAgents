@@ -83,3 +83,36 @@ def test_us_unchanged(monkeypatch):
     with pytest.raises(VendorError):
         market.get_YFin_data_online("AAPL", "2026-09-01", "2026-10-12")
     assert seen == []
+
+
+def _bad_rows():
+    rows = _rows()
+    rows[-1].update(open=3.16, high=3.01, low=2.98, close=3.00)  # W187: open above high
+    return rows
+
+
+def test_analysis_report_notes_ohlc_fix(monkeypatch):
+    from tradingagents.dataflows import ohlc_check
+
+    ohlc_check.last_fixed.clear()
+    monkeypatch.setattr(sina, "daily_rows", lambda ident, count=0: _bad_rows())
+    monkeypatch.setattr(market.yf, "Ticker", _EmptyTicker)
+    out = market.get_YFin_data_online("920002", "2026-09-01", "2026-10-12")
+    assert "# Note: 1 bar(s):" in out and "已修正高低价" in out
+    last = out.strip().splitlines()[-1].split(",")
+    assert last[1:5] == ["3.16", "3.16", "2.98", "3.00"]
+
+
+def test_load_ohlcv_fixes_and_indicator_notes(monkeypatch):
+    from tradingagents.dataflows import ohlc_check
+
+    ohlc_check.last_fixed.clear()
+    rows = _rows(80, "2026-06-01")
+    rows[-1].update(open=3.16, high=3.01, low=2.98, close=3.00)
+    monkeypatch.setattr(sina, "daily_rows", lambda ident, count=0: rows)
+    monkeypatch.setattr(ohlcv.yf, "Ticker", _EmptyTicker)
+    frame = ohlcv.load_ohlcv("920002", "2026-09-18")
+    assert (frame["High"] >= frame[["Open", "Close"]].max(axis=1)).all()
+    assert (frame["Low"] <= frame[["Open", "Close"]].min(axis=1)).all()
+    text = market.get_stock_stats_indicators_window("920002", "close_10_ema", "2026-09-18", 3)
+    assert "Data check: 1 bar(s)" in text

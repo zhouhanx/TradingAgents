@@ -968,6 +968,7 @@ body.layer-open { overflow: hidden; }
 .kline-change { font-weight: 600; color: #26a69a; }
 .kline-change--down { color: #ef5350; }
 .kline-ohlc { padding: 6px 14px 0; font-size: 12px; color: var(--muted); white-space: pre; min-height: 18px; }
+.kline-ohlc--fixed { color: var(--warn, #b26a00); }
 /* V2-UI-FIX-1 (mock v2): price pane 520px + separate volume pane 96px; <=700px 340 + 64. */
 .kline-chart { position: relative; height: 520px; }
 .kline-vol { height: 96px; border-top: 1px solid var(--border, #e0e0e0); }

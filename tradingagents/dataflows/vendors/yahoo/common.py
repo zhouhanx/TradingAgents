@@ -4,6 +4,7 @@ reported, and how a price is written out."""
 import logging
 import math
 import time
+import warnings
 
 import yfinance as yf
 from yfinance.exceptions import YFPricesMissingError, YFRateLimitError
@@ -43,6 +44,23 @@ def raise_for_empty(symbol: str, canonical: str, what: str) -> None:
 # yfinance answers some failed requests with an empty result, which would read as
 # "no data" for a symbol nobody checked; raised, the failure is reported as one.
 yf.config.debug.hide_exceptions = False
+
+# W189: yfinance on pandas 3 emits Pandas4Warning (a deprecation inside
+# yfinance itself) on every history call and floods the WebUI log. Only that
+# category, and only when raised from yfinance, is silenced; every other warning
+# still shows.
+try:
+    from pandas.errors import Pandas4Warning
+except ImportError:  # pandas < 3 has no such category
+    Pandas4Warning = None
+
+
+def silence_yfinance_pandas4() -> None:
+    if Pandas4Warning is not None:
+        warnings.filterwarnings("ignore", category=Pandas4Warning, module=r"yfinance(\.|$)")
+
+
+silence_yfinance_pandas4()
 
 
 def _answered_empty(exc: Exception) -> bool:

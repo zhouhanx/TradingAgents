@@ -4907,13 +4907,25 @@ function drawKline(lib, data) {
   const changeEl = document.querySelector("#kline-change");
   changeEl.textContent = `${change >= 0 ? "+" : ""}${change.toFixed(2)}%（1Y）`;
   changeEl.classList.toggle("kline-change--down", change < 0);
-  const ohlc = (b) => `开 ${klinePrice(b.open)}  高 ${klinePrice(b.high)}  低 ${klinePrice(b.low)}  收 ${klinePrice(b.close)}`;
   const ohlcEl = document.querySelector("#kline-ohlc");
+  // W187: a bar whose source open/close fell outside its high/low was corrected
+  // on the server; say so on that bar instead of showing it silently.
+  const fixedNote = data.ohlc_note || "源数据不一致，已修正高低价";
+  const isFixed = (time) => {
+    const hit = klineRt.bars.find((b) => b.time === time) || bars.find((b) => b.time === time);
+    return Boolean(hit && hit.ohlc_fixed);
+  };
+  const ohlc = (b) => {
+    const text = `开 ${klinePrice(b.open)}  高 ${klinePrice(b.high)}  低 ${klinePrice(b.low)}  收 ${klinePrice(b.close)}`;
+    const fixed = b.ohlc_fixed || isFixed(b.time);
+    ohlcEl.classList.toggle("kline-ohlc--fixed", fixed);
+    return fixed ? `${text}  ·  ${fixedNote}` : text;
+  };
   ohlcEl.textContent = ohlc(last);
   chart.subscribeCrosshairMove((param) => {
     const point = param && param.seriesData && param.seriesData.get(candles);
     const newest = klineRt.bars[klineRt.bars.length - 1] || last;
-    ohlcEl.textContent = point ? ohlc(point) : ohlc(newest);
+    ohlcEl.textContent = point ? ohlc({ ...point, time: param.time }) : ohlc(newest);
   });
   klineRt.candles = candles;
   klineRt.volume = volume;
@@ -4998,7 +5010,7 @@ function applyKlineBar(bar) {
     if (klineRt.tf === "1D") {
       next = { ...bar };
     } else {
-      next = { ...last, high: Math.max(last.high, bar.high), low: Math.min(last.low, bar.low), close: bar.close };
+      next = { ...last, high: Math.max(last.high, bar.high), low: Math.min(last.low, bar.low), close: bar.close, ohlc_fixed: Boolean(last.ohlc_fixed || bar.ohlc_fixed) };
     }
     bars[bars.length - 1] = next;
   } else if (!last || bar.time > last.time) {
