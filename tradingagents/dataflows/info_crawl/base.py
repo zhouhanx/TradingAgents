@@ -60,7 +60,9 @@ class InfoItem:
         self.title = clean_text(self.title, TITLE_LIMIT)
         self.summary = clean_text(self.summary, SUMMARY_LIMIT)
         self.url = redact_secrets(str(self.url or "").strip())
-        self.published_at = iso_utc(self.published_at)
+        # AUDIT-FIX-03: an unknown publish time stays unknown (""), never "now":
+        # such an item is listed but never injected into an analysis.
+        self.published_at = iso_utc_or_empty(self.published_at)
         if not self.id:
             self.id = fingerprint(self.url, self.title)
 
@@ -81,6 +83,22 @@ def iso_utc(value) -> str:
     """Any supported time (datetime, RFC 822, ISO, epoch seconds/ms, GDELT stamp) as UTC ISO."""
     dt = parse_time(value)
     return (dt or utc_now()).astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+NO_TIME_NOTE = "无发布时间，未注入"
+FUTURE_SKEW_SECONDS = 300  # source clocks may run a little ahead; more than this is a future item
+
+
+def iso_utc_or_empty(value) -> str:
+    """Like :func:`iso_utc`, but "" when the time is missing or unreadable."""
+    dt = parse_time(value)
+    return "" if dt is None else dt.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def published_by(item: InfoItem, as_of: datetime) -> bool:
+    """Known to be published at or before ``as_of`` (an analysis time point). Undated is False."""
+    when = parse_time(item.published_at)
+    return when is not None and when <= as_of
 
 
 def parse_time(value) -> datetime | None:
@@ -279,8 +297,15 @@ class SourceAdapter:
 
 
 def within(item: InfoItem, hours: int, now: datetime | None = None) -> bool:
+    """In the crawl window: not older than ``hours`` and not in the future (AUDIT-FIX-03).
+
+    An undated item stays listed (labelled 无发布时间，未注入); injection drops it.
+    """
     when = parse_time(item.published_at)
-    return when is None or ((now or utc_now()) - when).total_seconds() <= hours * 3600
+    if when is None:
+        return True
+    age = ((now or utc_now()) - when).total_seconds()
+    return -FUTURE_SKEW_SECONDS <= age <= hours * 3600
 
 
 def matches(text: str, keyword: str) -> bool:

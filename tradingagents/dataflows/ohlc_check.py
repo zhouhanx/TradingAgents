@@ -15,8 +15,6 @@ logger = logging.getLogger(__name__)
 NOTE_ZH = "源数据不一致，已修正高低价"
 NOTE_EN = "source data inconsistent: high/low corrected to cover open/close"
 
-# canonical -> number of corrected bars in the frame most recently loaded for it.
-last_fixed: dict[str, int] = {}
 
 
 def _bad(o, h, l, c) -> bool:  # noqa: E741
@@ -42,7 +40,6 @@ def fix_frame(frame, symbol: str, date_col: str | None = "Date"):
     """Correct a pandas frame with Open/High/Low/Close columns; returns (frame, count)."""
     cols = ("Open", "High", "Low", "Close")
     if frame is None or frame.empty or not all(k in frame.columns for k in cols):
-        last_fixed[symbol] = 0
         return frame, 0
     o, h, l, c = (frame[k] for k in cols)  # noqa: E741
     mask = ((h < o.combine(c, max)) | (l > o.combine(c, min)) | (h < l)).fillna(False)
@@ -56,10 +53,14 @@ def fix_frame(frame, symbol: str, date_col: str | None = "Date"):
                            symbol, when, row["Open"], row["High"], row["Low"], row["Close"])
         frame.loc[mask, "High"] = sub.max(axis=1)
         frame.loc[mask, "Low"] = sub.min(axis=1)
-    last_fixed[symbol] = count
     return frame, count
 
 
-def note_for(symbol: str) -> str | None:
-    n = last_fixed.get(symbol, 0)
-    return f"{n} bar(s): {NOTE_EN} / {NOTE_ZH}" if n else None
+def note_text(count: int) -> str | None:
+    """The report note for ``count`` corrected bars, or None when none were.
+
+    The count is the one returned by the call that loaded the data actually
+    used (AUDIT-CHECK-04 / W193): no per-symbol global, so two concurrent runs
+    of the same symbol with different dates cannot read each other's count.
+    """
+    return f"{count} bar(s): {NOTE_EN} / {NOTE_ZH}" if count else None

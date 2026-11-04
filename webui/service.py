@@ -2111,7 +2111,16 @@ def _worker_state(record: dict) -> str:
         current = _process_start(pid)
         if current is None:
             return "unknown"
-        return "ours" if current == recorded else "foreign"
+        if current != recorded:
+            return "foreign"
+        if current.startswith("ps:"):
+            # AUDIT-FIX-01: ps gives the start time to the second only, so another
+            # program started in the same second has the same stamp. Its command
+            # line must match too; unreadable means unproven, never signalled.
+            if _process_argv(pid) is None and not _process_cmdline(pid).strip():
+                return "unknown"
+            return "ours" if _argv_matches(record, pid) else "foreign"
+        return "ours"
     return "ours" if _argv_matches(record, pid) else "foreign"
 
 

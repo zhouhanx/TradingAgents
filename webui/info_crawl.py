@@ -6,9 +6,16 @@ import contextlib
 import threading
 
 from tradingagents.dataflows.info_crawl import EXISTING_SOURCE_NOTES, SOURCES, run_job, sources_for
+from tradingagents.dataflows.info_crawl.base import NO_TIME_NOTE, iso_utc, utc_now
 from tradingagents.dataflows.info_crawl.jobs import JobRequestError, new_job
 from tradingagents.dataflows.info_crawl.registry import ASSET_TYPES
-from tradingagents.dataflows.info_crawl.store import default_store, valid_job_id
+from tradingagents.dataflows.info_crawl.store import (
+    default_store,
+    mark_active,
+    mark_finished,
+    valid_job_id,
+)
+from tradingagents.redaction import redact_secrets
 
 ASSET_LABELS = {"stock": "股票", "crypto": "加密货币", "macro": "宏观"}
 
@@ -58,7 +65,17 @@ def start_job(payload, *, background: bool = True) -> dict:
     except JobRequestError as exc:
         raise InfoCrawlError(str(exc)) from exc
     target = store()
-    target.save_job(job)
+    mark_active(job["id"])  # before the first save, so a poll never sees it interrupted
+    try:
+        target.save_job(job)
+    except Exception as exc:  # noqa: BLE001 - never leave a job id marked active
+        mark_finished(job["id"])
+        job["status"] = "failed"
+        job["reason"] = redact_secrets(f"抓取任务没有保存成功（{type(exc).__name__}），请重新抓取。")
+        job["finished_at"] = iso_utc(utc_now())
+        with contextlib.suppress(Exception):
+            target.save_job(job)
+        return {"job": job}
     if background:
         threading.Thread(target=run_job, args=(job, target), daemon=True, name=f"info-crawl-{job['id']}").start()
         return {"job": job}
@@ -85,5 +102,6 @@ def get_items(job_id: str | None, source: str | None = None) -> dict:
     if job is None:
         raise InfoCrawlError("没有这个抓取任务，可能已超过 30 天被清理。", 404)
     items = [item.to_dict() | {"source_name": SOURCES[item.source].name_zh if item.source in SOURCES else item.source}
+             | ({"inject_note": NO_TIME_NOTE} if not item.published_at else {})
              for item in store().load_items(job_id, source)]
     return {"job": job, "items": items}

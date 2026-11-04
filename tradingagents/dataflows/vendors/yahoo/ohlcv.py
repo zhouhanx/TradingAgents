@@ -193,64 +193,29 @@ def load_ohlcv(symbol: str, as_of_date: str, fill_gaps: bool = True) -> pd.DataF
     # A shares: BJ reads Sina only; SH/SZ read Yahoo first, then Sina. Each
     # source keeps its own cache file so an unadjusted Sina frame is never
     # mistaken for Yahoo's adjusted one.
-    data = None
     sources = sina.chain(canonical)
-    last_error: Exception | None = None
-    for source in sources:
-        data_file = os.path.join(
-            config["data_cache_dir"],
-            f"{safe_symbol}-YFin-data.csv" if source == "yahoo" else f"{safe_symbol}-Sina-data.csv",
-        )
-        # A cached file may be empty if a prior fetch failed (unknown symbol,
-        # transient rate limit). Treat an empty/columnless cache as a miss and
-        # re-fetch rather than serving the poisoned file forever.
-        if os.path.exists(data_file):
-            cached = pd.read_csv(data_file, on_bad_lines="skip", encoding="utf-8")
-            if (
-                not cached.empty
-                and "Close" in cached.columns
-                and _cache_is_fresh(data_file, as_of_dt, now)
-            ):
-                data = cached
-                break
-        try:
-            if source == "sina":
-                downloaded = sina.history_frame(canonical)
-            else:
-                # yf.download catches every error, a rate limit included, and returns
-                # an empty frame. Ticker.history raises the rate limit, so it is retried.
-                downloaded = yf_retry(lambda: yf.Ticker(canonical).history(
-                    start=start_str,
-                    end=end_str,
-                    auto_adjust=True,
-                    actions=False,
-                ))
-        except Exception as exc:  # noqa: BLE001 - the next A-share source is the fallback
-            if source == sources[-1]:
-                raise
-            last_error = exc
-            logger.warning("%s: %s failed (%s); trying the next source.", canonical, source, type(exc).__name__)
-            continue
-        if downloaded is None:
-            continue
-        downloaded = _ensure_date_column(downloaded.reset_index())
-        # Only cache real data — never persist an empty frame.
-        if downloaded.empty or "Close" not in downloaded.columns:
-            continue
-        replace_file(data_file, lambda temp, frame=downloaded: frame.to_csv(temp, index=False, encoding="utf-8"))
-        data = downloaded
-        break
+
+    def fetch(source):
+        return _load_source(source, canonical, safe_symbol, config["data_cache_dir"],
+                            as_of_dt, now, start_str, end_str)
+
+    data, source, freshness_note = None, sources[0], None
+    if sources == ["yahoo", "sina"]:
+        data, source, freshness_note = _pick_fresh_a_share(fetch, canonical, as_of_dt)
+    else:
+        source = sources[0]
+        data = fetch(source)
     if data is None:
-        if last_error is not None and len(sources) == 1:
-            raise last_error
         raise_for_empty(symbol, canonical, "price rows")
     sina.last_source[canonical] = source
 
     data = _clean_dataframe(data)
-    data, _ = ohlc_check.fix_frame(data, canonical)
 
-    # Filter to as_of_date to prevent look-ahead bias in backtesting.
+    # Filter to as_of_date to prevent look-ahead bias in backtesting, BEFORE the
+    # OHLC check: a bad bar after the analysis date must not count in its note
+    # (AUDIT-CHECK-04).
     data = data[data["Date"] <= as_of_dt]
+    data, fixed = ohlc_check.fix_frame(data, canonical)
 
     # A closeless newest bar is an unsettled session, not a symbol without data.
     # _fill_price_gaps below drops it, here and mid-series alike, so the frame
@@ -274,9 +239,107 @@ def load_ohlcv(symbol: str, as_of_date: str, fill_gaps: bool = True) -> pd.DataF
     data = _fill_price_gaps(data) if fill_gaps else data.dropna(subset=["Close"]).copy()
 
     # Reject a stale frame (latest row far older than as_of_date) rather than
-    # feeding year-old prices into indicators (#1021).
-    _assert_ohlcv_not_stale(data, as_of_date, symbol, canonical)
+    # feeding year-old prices into indicators (#1021). SH/SZ shares are judged
+    # against Sina instead of a fixed day count (AUDIT-FIX-06, PM rule).
+    if sources != ["yahoo", "sina"]:
+        _assert_ohlcv_not_stale(data, as_of_date, symbol, canonical)
 
+    data.attrs["ohlc_fixed"] = fixed
+    data.attrs["source"] = source
+    data.attrs["freshness_note"] = freshness_note
     return data
+
+
+MAYBE_NOT_UPDATED_ZH = "可能未更新"
+MAYBE_NOT_UPDATED_EN = "Yahoo data could not be checked against Sina and may not be up to date"
+
+
+def last_bar_date(frame: pd.DataFrame | None, as_of_dt=None):
+    """The newest bar date (naive midnight) on or before ``as_of_dt``, or None."""
+    if frame is None or frame.empty:
+        return None
+    dates = _normalize_dates(_coerce_ohlcv_dates(frame).reset_index(drop=True)).dropna()
+    if as_of_dt is not None:
+        dates = dates[dates <= pd.Timestamp(as_of_dt).normalize()]
+    return None if dates.empty else dates.max()
+
+
+def _pick_fresh_a_share(fetch, canonical: str, as_of_dt):
+    """Yahoo vs Sina for an SH/SZ share (AUDIT-FIX-06, PM rule).
+
+    Yahoo is stale when its last bar is earlier than Sina's: Sina is used. When
+    Sina has nothing to compare with, Yahoo is used and marked 可能未更新. No
+    fixed day threshold, so a long market holiday never rejects either source.
+    Returns (frame, source, freshness_note).
+    """
+    yahoo_error = None
+    try:
+        yahoo = fetch("yahoo")
+    except Exception as exc:  # noqa: BLE001 - Sina is the fallback
+        yahoo, yahoo_error = None, exc
+        logger.warning("%s: yahoo failed (%s); trying sina.", canonical, type(exc).__name__)
+    try:
+        other = fetch("sina")
+    except Exception as exc:  # noqa: BLE001
+        if yahoo is None:
+            raise
+        logger.warning("%s: sina failed (%s); yahoo used unchecked.", canonical, type(exc).__name__)
+        other = None
+    if yahoo is None:
+        if other is None and yahoo_error is not None:
+            raise yahoo_error
+        return other, "sina", None
+    y_last, s_last = last_bar_date(yahoo, as_of_dt), last_bar_date(other, as_of_dt)
+    if s_last is None:
+        return yahoo, "yahoo", MAYBE_NOT_UPDATED_ZH
+    if y_last is None or y_last < s_last:
+        logger.warning("%s: yahoo last bar %s is older than sina's %s; using sina.",
+                       canonical, y_last and y_last.date(), s_last.date())
+        return other, "sina", None
+    return yahoo, "yahoo", None
+
+
+def _load_source(source, canonical, safe_symbol, cache_dir, as_of_dt, now, start_str, end_str):
+    """One source's 5-year frame from its same-day cache or a download; None when empty."""
+    data_file = os.path.join(
+        cache_dir,
+        f"{safe_symbol}-YFin-data.csv" if source == "yahoo" else f"{safe_symbol}-Sina-data.csv",
+    )
+    # A cached file may be empty if a prior fetch failed (unknown symbol,
+    # transient rate limit). Treat an empty/columnless cache as a miss and
+    # re-fetch rather than serving the poisoned file forever.
+    if os.path.exists(data_file):
+        cached = pd.read_csv(data_file, on_bad_lines="skip", encoding="utf-8")
+        if not cached.empty and "Close" in cached.columns and _cache_is_fresh(data_file, as_of_dt, now):
+            return cached
+    if source == "sina":
+        downloaded = sina.history_frame(canonical)
+    else:
+        # yf.download catches every error, a rate limit included, and returns
+        # an empty frame. Ticker.history raises the rate limit, so it is retried.
+        downloaded = yf_retry(lambda: yf.Ticker(canonical).history(
+            start=start_str,
+            end=end_str,
+            auto_adjust=True,
+            actions=False,
+        ))
+    if downloaded is None:
+        return None
+    downloaded = _ensure_date_column(downloaded.reset_index())
+    # Only cache real data — never persist an empty frame.
+    if downloaded.empty or "Close" not in downloaded.columns:
+        return None
+    replace_file(data_file, lambda temp, frame=downloaded: frame.to_csv(temp, index=False, encoding="utf-8"))
+    return downloaded
+
+
+def load_notes(symbol: str, as_of_date: str) -> dict:
+    """The per-call notes of the frame load_ohlcv serves for this symbol and date."""
+    frame = load_ohlcv(symbol, as_of_date)
+    return {
+        "ohlc_fixed": int(frame.attrs.get("ohlc_fixed", 0)),
+        "source": frame.attrs.get("source"),
+        "freshness_note": frame.attrs.get("freshness_note"),
+    }
 
 

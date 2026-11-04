@@ -20,7 +20,6 @@ DAY = 86400
 @pytest.fixture(autouse=True)
 def _fresh():
     kline.clear_cache()
-    ohlc_check.last_fixed.clear()
     yield
     kline.clear_cache()
 
@@ -47,9 +46,9 @@ def test_fix_frame_and_note():
     out, n = ohlc_check.fix_frame(frame, "200625.SZ")
     assert n == 1 and out["High"].tolist() == [3.05, 3.16] and out["Low"].tolist() == [2.95, 2.90]
     assert frame["High"].tolist() == [3.05, 3.01]  # input frame untouched
-    assert "已修正高低价" in ohlc_check.note_for("200625.SZ")
+    assert "已修正高低价" in ohlc_check.note_text(n)
     clean, n = ohlc_check.fix_frame(out, "200625.SZ")
-    assert n == 0 and ohlc_check.note_for("200625.SZ") is None
+    assert n == 0 and ohlc_check.note_text(n) is None
 
 
 def test_kline_marks_fixed_bars(monkeypatch):

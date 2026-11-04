@@ -42,6 +42,7 @@ def _verified_rows(symbol: str, as_of_date: str) -> pd.DataFrame:
         raise NoMarketDataError(symbol, normalize_symbol(symbol), "no price rows")
 
     df = data.copy()
+    df.attrs = dict(data.attrs)
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df = df.dropna(subset=["Date"])
     df = df[df["Date"] <= pd.to_datetime(as_of_date)].sort_values("Date")
@@ -64,16 +65,19 @@ def _fmt(value) -> str:
     return str(value)
 
 
-def _source_label(symbol: str) -> str:
+def _source_label(symbol: str, frame: pd.DataFrame | None = None) -> str:
     from tradingagents.dataflows.vendors import sina
 
-    return sina.SOURCE_LABEL.get(sina.last_source.get(normalize_symbol(symbol), "yahoo"), sina.SOURCE_YAHOO)
+    used = (frame.attrs.get("source") if frame is not None else None) or sina.last_source.get(
+        normalize_symbol(symbol), "yahoo")
+    return sina.SOURCE_LABEL.get(used, sina.SOURCE_YAHOO)
 
 
-def _ohlc_note(symbol: str) -> str | None:
+def _ohlc_note(frame: pd.DataFrame) -> str | None:
+    """The OHLC note of the rows this snapshot used (AUDIT-CHECK-04): per call, not global."""
     from tradingagents.dataflows import ohlc_check
 
-    return ohlc_check.note_for(normalize_symbol(symbol))
+    return ohlc_check.note_text(int(frame.attrs.get("ohlc_fixed", 0)))
 
 
 def build_verified_market_snapshot(
@@ -107,10 +111,11 @@ def build_verified_market_snapshot(
         f"## Verified market data snapshot for {symbol.upper()}",
         "",
         f"- Requested analysis date: {as_of_date}",
-        f"- Data source: {_source_label(symbol)}",
+        f"- Data source: {_source_label(symbol, df)}",
         f"- Latest trading row used: {latest_date}",
         "- Rows after the requested analysis date are excluded before verification.",
-        *([f"- Data check: {n}"] if (n := _ohlc_note(symbol)) else []),
+        *([f"- Data check: {n}"] if (n := _ohlc_note(df)) else []),
+        *([f"- Freshness: {df.attrs['freshness_note']}"] if df.attrs.get("freshness_note") else []),
         "",
         "### Latest verified OHLCV row",
         "",

@@ -65,3 +65,21 @@ jobs:
         # The repo is fully clean under the strict select, so we lint everything
         # (generated results/ is excluded via pyproject extend-exclude).
         run: ruff check .
+
+  webui-dom:
+    # AUDIT-FIX-08: the WebUI DOM interaction suite (tests/webui_interactions.cjs,
+    # jsdom) runs on every push/PR; a failing case fails the job. It checks DOM
+    # behaviour only, not real-browser visuals.
+    name: webui DOM tests (node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - name: Install (npm ci, locked)
+        run: npm ci --prefix webui
+      - name: Run DOM suite
+        run: npm --prefix webui test

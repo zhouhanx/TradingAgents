@@ -424,8 +424,12 @@ def test_a_holding_may_give_only_its_cost():
 # ------------------------------------------------------------------ QA r1: W36-W39, W41
 
 def _unrelated_sleeper():
-    """A live process that is not a worker, leading its own group (so a stray killpg would reach it)."""
-    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    """A live process that is not a worker, leading its own group (so a stray killpg would reach it).
+
+    Its command line differs from the sleeper workers': on macOS ``ps`` stamps the
+    start time to the second, so the command line is what tells them apart (AUDIT-FIX-01).
+    """
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(61)"], start_new_session=True)
 
 
 def test_a_reused_pid_after_restart_fails_the_run_frees_the_slot_and_is_never_signalled(sleepers):
@@ -636,3 +640,58 @@ def test_an_unreadable_start_time_keeps_the_run_and_its_slot_and_never_signals(s
     assert [r["id"] for r in held] == [a["id"]]
     monkeypatch.setattr(service, "_process_start", readable)
     assert service._worker_state(service.JOBS.read_run(a["id"])) == "ours"   # readable again: W39 as before
+
+
+# ------------------------------------------------------------------ AUDIT-FIX-01: macOS second-precision stamps
+
+_PS_STAMP = "ps:Wed Nov  4 17:18:49 2026"
+_WORKER_ARGV = ["/usr/bin/python3", "-m", "webui.worker", "/tmp/runs/20261104_171849_647190c4.job.json"]
+
+
+def _mac_process(monkeypatch, cmdline):
+    """Simulate macOS: no /proc, ps gives a second-precision start and the args line."""
+    monkeypatch.setattr(service, "_alive", lambda pid: True)
+    monkeypatch.setattr(service, "_process_start", lambda pid: _PS_STAMP)
+    monkeypatch.setattr(service, "_process_argv", lambda pid: None)
+    monkeypatch.setattr(service, "_process_cmdline", lambda pid: cmdline)
+
+
+def _mac_record(**extra):
+    return {"id": "20261104_171849_647190c4", "pid": 4242, "proc_start": _PS_STAMP, "argv": _WORKER_ARGV, **extra}
+
+
+def test_mac_same_second_different_command_line_is_foreign(monkeypatch):
+    _mac_process(monkeypatch, "/usr/bin/python3 -c import time; time.sleep(60)\n")
+    assert service._worker_state(_mac_record()) == "foreign"
+
+
+def test_mac_same_second_same_command_line_is_ours(monkeypatch):
+    _mac_process(monkeypatch, " ".join(_WORKER_ARGV) + "\n")
+    assert service._worker_state(_mac_record()) == "ours"
+
+
+def test_mac_same_second_unreadable_command_line_is_unknown(monkeypatch):
+    _mac_process(monkeypatch, "")
+    assert service._worker_state(_mac_record()) == "unknown"
+
+
+def test_mac_different_second_is_foreign_whatever_the_command_line(monkeypatch):
+    _mac_process(monkeypatch, " ".join(_WORKER_ARGV))
+    assert service._worker_state(_mac_record(proc_start="ps:Wed Nov  4 17:18:48 2026")) == "foreign"
+
+
+def test_mac_same_second_foreign_process_is_never_signalled(monkeypatch):
+    _mac_process(monkeypatch, "/bin/sleep 600")
+    sent = []
+    monkeypatch.setattr(service.os, "kill", lambda *a: sent.append(("kill", a)))
+    monkeypatch.setattr(service.os, "killpg", lambda *a: sent.append(("killpg", a)))
+    assert service._worker_state(_mac_record()) == "foreign"
+    assert service._is_our_worker(_mac_record()) is False
+    assert sent == []
+
+
+def test_linux_tick_stamp_still_needs_no_command_line(monkeypatch):
+    monkeypatch.setattr(service, "_alive", lambda pid: True)
+    monkeypatch.setattr(service, "_process_start", lambda pid: "proc:123456")
+    monkeypatch.setattr(service, "_process_cmdline", lambda pid: (_ for _ in ()).throw(AssertionError("not read")))
+    assert service._worker_state(_mac_record(proc_start="proc:123456")) == "ours"

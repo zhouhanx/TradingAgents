@@ -343,7 +343,7 @@ def test_inject_default_off_per_row_and_router_citation(monkeypatch, tmp_path):
     from tradingagents.dataflows import config as dconfig
     seen = []
     monkeypatch.setattr(dconfig, "get_config", lambda: {"info_crawl_job": "ic-a-000001", "info_crawl_items": [keep.id]})
-    monkeypatch.setattr(router, "route_to_vendor", lambda method, job, ids: seen.append(ids) or text)
+    monkeypatch.setattr(router, "route_to_vendor", lambda method, job, ids, **kw: seen.append(ids) or text)
     block = news_analyst._info_crawl_block()
     assert "FOMC statement" in block and "[source·date·link]" in block and seen == [[keep.id]]
     monkeypatch.setattr(dconfig, "get_config", lambda: {"info_crawl_job": "ic-a-000001"})

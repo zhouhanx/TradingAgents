@@ -200,7 +200,15 @@ def resample(bars: list[dict], tf: str) -> list[dict]:
     return out
 
 
+MAYBE_NOT_UPDATED = "可能未更新"
+
+
+def _is_yahoo_sina(info: dict) -> bool:
+    return [name for name, _ in info["providers"]] == ["yahoo", "sina"]
+
+
 def _daily(info: dict) -> tuple[str, str, list[dict], list[str]]:
+    """The first provider's daily bars; SH/SZ also check Yahoo against Sina (AUDIT-FIX-06)."""
     errors = []
     for name, ident in info["providers"]:
         try:
@@ -209,10 +217,34 @@ def _daily(info: dict) -> tuple[str, str, list[dict], list[str]]:
             errors.append(f"{name}: {type(exc).__name__}" + ("" if _is_network(exc) else " 无此代码"))
             continue
         if bars:
+            if name == "yahoo" and _is_yahoo_sina(info):
+                name, ident, bars = _fresher_of_yahoo_and_sina(info, ident, bars, errors)
             ohlc_check.fix_bars(bars, info["canonical"])
             return name, ident, bars, errors
         errors.append(f"{name}: 无数据")
     raise KlineError(_friendly(info, errors))
+
+
+def _fresher_of_yahoo_and_sina(info: dict, yahoo_ident: str, yahoo_bars: list[dict], errors: list[str]):
+    """PM rule: Yahoo is stale when its last bar is earlier than Sina's; then Sina is
+    used. When Sina has nothing, Yahoo is used and noted 可能未更新. No day threshold."""
+    sina_ident = dict(info["providers"])["sina"]
+    try:
+        sina_bars = fetch_sina(sina_ident)
+    except Exception as exc:  # noqa: BLE001 - Yahoo stays, unverified
+        sina_bars = []
+        errors.append(f"sina: {type(exc).__name__}")
+    if not sina_bars:
+        errors.append(MAYBE_NOT_UPDATED)
+        return "yahoo", yahoo_ident, yahoo_bars
+    if _bar_day(yahoo_bars[-1]) < _bar_day(sina_bars[-1]):
+        errors.append("yahoo: 数据过期")
+        return "sina", sina_ident, sina_bars
+    return "yahoo", yahoo_ident, yahoo_bars
+
+
+def _bar_day(bar: dict):
+    return datetime.fromtimestamp(bar["time"], UTC).date()
 
 
 # Exceptions meaning the source answered "no such symbol" (yfinance's missing
@@ -227,12 +259,24 @@ def _is_network(exc: BaseException | None) -> bool:
     seen = 0
     while exc is not None and seen < 8:
         name = type(exc).__name__
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if isinstance(status, int) and (status >= 500 or status == 429):
+            return True
         if any(m in name for m in _NOT_FOUND_MARKERS):
-            return False
-        if getattr(getattr(exc, "response", None), "status_code", None) == 404:
+            # AUDIT-FIX-07: yfinance also raises YFPricesMissingError for an error
+            # answer (e.g. HTTP 503); its debug_info then carries the status code.
+            return _carries_error_status(exc)
+        if status == 404:
             return False
         exc, seen = exc.__cause__ or exc.__context__, seen + 1
     return True
+
+
+def _carries_error_status(exc: BaseException) -> bool:
+    """A "missing" exception that is really a failed answer: a non-404 status in its text."""
+    text = " ".join(str(part) for part in (getattr(exc, "debug_info", None), exc) if part)
+    codes = [int(c) for c in re.findall(r"status_code\D{0,3}(\d{3})", text)]
+    return any(c != 404 for c in codes) or ("status_code" in text and not codes)
 
 
 def _friendly(info: dict, errors: list[str]) -> str:
@@ -282,6 +326,7 @@ def kline(symbol: str, tf: str | None = None) -> dict:
         "cached": cached,
         "ohlc_fixed": sum(1 for b in daily["bars"] if b.get("ohlc_fixed")),
         "ohlc_note": ohlc_check.NOTE_ZH,
+        "freshness_note": MAYBE_NOT_UPDATED if MAYBE_NOT_UPDATED in daily["fallback_errors"] else None,
         "fetched_at": daily["fetched_at"],
         "bars": resample(daily["bars"], tf),
     }
@@ -354,6 +399,22 @@ def live_sina(ident: str) -> dict | None:
     return _bar(ts, r["open"], r["high"], r["low"], r["close"], r["volume"])
 
 
+def _fresher_live(info: dict, yahoo_ident: str, yahoo_bar: dict, errors: list[str]):
+    """The latest-bar form of the Yahoo-vs-Sina rule (AUDIT-FIX-06)."""
+    sina_ident = dict(info["providers"])["sina"]
+    try:
+        sina_bar = live_sina(sina_ident)
+    except Exception as exc:  # noqa: BLE001 - Yahoo stays, unverified
+        sina_bar = None
+        errors.append(f"sina: {type(exc).__name__}")
+    if not sina_bar:
+        return "yahoo", yahoo_ident, yahoo_bar, MAYBE_NOT_UPDATED
+    if _bar_day(yahoo_bar) < _bar_day(sina_bar):
+        errors.append("yahoo: 数据过期")
+        return "sina", sina_ident, sina_bar, None
+    return "yahoo", yahoo_ident, yahoo_bar, None
+
+
 def latest(symbol: str) -> dict:
     """The newest daily bar and how often the page should ask again."""
     info = route(symbol)
@@ -374,8 +435,12 @@ def latest(symbol: str) -> dict:
                 errors.append(f"{name}: {type(exc).__name__}")
                 continue
             if bar:
+                note = None
+                if name == "yahoo" and _is_yahoo_sina(info):
+                    name, ident, bar, note = _fresher_live(info, ident, bar, errors)
                 ohlc_check.fix_bars([bar], info["canonical"])
-                answer = {"provider": name, "provider_symbol": ident, "bar": bar, "fallback_errors": errors, "fetched_at": int(now)}
+                answer = {"provider": name, "provider_symbol": ident, "bar": bar, "fallback_errors": errors,
+                          "freshness_note": note, "fetched_at": int(now)}
                 break
             errors.append(f"{name}: 无数据")
         if answer is None:

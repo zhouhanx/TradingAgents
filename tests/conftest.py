@@ -164,3 +164,78 @@ def _isolate_config():
     config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
     yield
     config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+
+
+# ---- Real dotenv protection (AUDIT-FIX-02) -------------------------------
+#
+# ``find_dotenv(usecwd=True)`` walks up from the cwd. When pytest's tmp_path sits
+# inside the project (e.g. TMPDIR under .awr/), a test that chdir'd into tmp_path
+# found and rewrote the real project .env. Every config-writing module now looks
+# only in the cwd, and set_key refuses the real files outright.
+
+_PROJECT_ROOT = __import__("pathlib").Path(__file__).resolve().parent.parent
+_REAL_DOTENV_NAMES = (".env", ".env.enterprise")
+
+
+def _real_dotenv_paths():
+    from pathlib import Path
+
+    roots = {_PROJECT_ROOT, Path(os.path.expanduser("~")).resolve()}
+    return {(root / name).resolve() for root in roots for name in _REAL_DOTENV_NAMES}
+
+
+def _cwd_only_find_dotenv(filename=".env", raise_error_if_not_found=False, usecwd=False):
+    from pathlib import Path
+
+    candidate = Path.cwd() / filename
+    if candidate.is_file():
+        return str(candidate)
+    if raise_error_if_not_found:
+        raise OSError("File not found")
+    return ""
+
+
+def _guarded_set_key(original):
+    def set_key(dotenv_path, *args, **kwargs):
+        from pathlib import Path
+
+        if Path(dotenv_path).resolve() in _real_dotenv_paths():
+            raise AssertionError(f"test tried to write a real config file: {dotenv_path}")
+        return original(dotenv_path, *args, **kwargs)
+
+    return set_key
+
+
+def _snapshot_real_dotenvs():
+    import hashlib
+
+    snap = {}
+    for path in sorted(_real_dotenv_paths()):
+        if path.exists():
+            st = path.stat()
+            snap[str(path)] = (hashlib.sha256(path.read_bytes()).hexdigest(), st.st_mode)
+        else:
+            snap[str(path)] = None
+    return snap
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _real_dotenv_unchanged():
+    """Fail the session if any real .env changed bytes or mode (values never printed)."""
+    before = _snapshot_real_dotenvs()
+    yield
+    after = _snapshot_real_dotenvs()
+    changed = [p for p in before if before[p] != after.get(p)]
+    assert not changed, f"real config files changed during the test run: {changed}"
+
+
+@pytest.fixture(autouse=True)
+def _no_real_dotenv(monkeypatch):
+    import dotenv
+
+    import cli.prompts
+    import webui.service
+
+    for module in (cli.prompts, webui.service):
+        monkeypatch.setattr(module, "find_dotenv", _cwd_only_find_dotenv)
+        monkeypatch.setattr(module, "set_key", _guarded_set_key(dotenv.set_key))

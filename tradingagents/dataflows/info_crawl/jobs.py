@@ -2,18 +2,28 @@
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 from tradingagents.dataflows.info_crawl.base import (
+    NO_TIME_NOTE,
     InfoQuery,
     SourceUnavailable,
     iso_utc,
+    parse_time,
+    published_by,
     utc_now,
     within,
 )
 from tradingagents.dataflows.info_crawl.registry import ASSET_TYPES, SOURCES
-from tradingagents.dataflows.info_crawl.store import dedupe, valid_item_id, valid_job_id
+from tradingagents.dataflows.info_crawl.store import (
+    dedupe,
+    mark_active,
+    mark_finished,
+    valid_item_id,
+    valid_job_id,
+)
 from tradingagents.redaction import redact_secrets
 
 ALLOWED_HOURS = (24, 72, 168)
@@ -30,6 +40,9 @@ def new_job(payload: dict) -> dict:
     keyword = str(payload.get("keyword") or "").strip()
     if not keyword or len(keyword) > 80:
         raise JobRequestError("请填写标的代码或关键词（不超过 80 个字符）")
+    # AUDIT-CHECK-03: a credential pasted by mistake is never stored, returned or
+    # sent to a source; the crawl uses the redacted text.
+    keyword = redact_secrets(keyword)
     asset = str(payload.get("asset_type") or "stock").strip().lower()
     if asset not in ASSET_TYPES:
         raise JobRequestError("资产类型只能是 股票、加密货币 或 宏观")
@@ -61,7 +74,27 @@ def new_job(payload: dict) -> dict:
 
 
 def run_job(job: dict, store, *, sources=None, cache=None) -> dict:
-    """Fetch every source of ``job``; one failure only marks that source 不可用."""
+    """Fetch every source of ``job``; one failure only marks that source 不可用.
+
+    A failure outside the sources (e.g. the items cannot be written) ends the job
+    as failed, never left running (AUDIT-CHECK-03 / W159).
+    """
+    mark_active(job["id"])
+    try:
+        return _run_job(job, store, sources=sources, cache=cache)
+    except Exception as exc:  # noqa: BLE001 - the job must reach a final state
+        job["status"] = "failed"
+        job["reason"] = redact_secrets(f"抓取结果没有保存成功（{type(exc).__name__}），请重新抓取。")
+        job["finished_at"] = iso_utc(utc_now())
+        # If this save fails too, load reports the job as interrupted instead.
+        with contextlib.suppress(Exception):
+            store.save_job(job)
+        return job
+    finally:
+        mark_finished(job["id"])
+
+
+def _run_job(job: dict, store, *, sources=None, cache=None) -> dict:
     registry = sources or SOURCES
     query = InfoQuery(keyword=job["keyword"], asset_type=job["asset_type"], hours=int(job["hours"]))
     store.save_job(job)
@@ -94,8 +127,24 @@ def run_job(job: dict, store, *, sources=None, cache=None) -> dict:
     job["status"] = "failed" if all(state == "unavailable" for state in states) else ("partial" if "unavailable" in states else "done")
     job["finished_at"] = iso_utc(utc_now())
     job["total"] = len(items)
+    undated = sum(1 for item in items if not item.published_at)
+    job["undated"] = undated
+    job["undated_note"] = NO_TIME_NOTE if undated else ""
     store.save_job(job)
     return job
+
+
+FENCE_OPEN = "<<<EXTERNAL_NEWS_DATA>>>"
+FENCE_CLOSE = "<<<END_EXTERNAL_NEWS_DATA>>>"
+
+
+def _quoted(text: str) -> str:
+    """External text made safe to quote inside the data fence (AUDIT-CHECK-01):
+    one line, no fence markers, no citation brackets that could fake a source."""
+    text = " ".join(str(text or "").split())
+    for marker in ("<<<", ">>>"):
+        text = text.replace(marker, " ")
+    return text.replace("[", "(").replace("]", ")").strip()
 
 
 def format_items_for_prompt(items, limit: int = PROMPT_ITEM_LIMIT) -> str:
@@ -103,14 +152,17 @@ def format_items_for_prompt(items, limit: int = PROMPT_ITEM_LIMIT) -> str:
     lines = []
     for item in list(items)[:limit]:
         name = SOURCES[item.source].name_zh if item.source in SOURCES else item.source
-        lines.append(f"- {item.title} [{name}·{item.published_at[:10]}·{item.url}]")
+        url = _quoted(item.url).replace(" ", "%20")
+        lines.append(f"- {_quoted(item.title)} [{name}·{item.published_at[:10]}·{url}]")
     return "\n".join(lines)
 
 
-def get_info_items(job_id: str, item_ids=None, store=None) -> str:
+def get_info_items(job_id: str, item_ids=None, store=None, as_of=None) -> str:
     """Router method: only the rows the user ticked (``item_ids``) of ``job_id``.
 
     No ids means nothing is brought in: 「带入分析」 is opt-in per row (PM).
+    ``as_of`` (the analysis time point, AUDIT-FIX-03): only items published at
+    or before it; an undated item is never injected. Defaults to now.
     """
     if not valid_job_id(job_id):
         return ""
@@ -120,5 +172,8 @@ def get_info_items(job_id: str, item_ids=None, store=None) -> str:
     if store is None:
         from tradingagents.dataflows.info_crawl.store import default_store
         store = default_store()
+    cutoff = parse_time(as_of) if as_of is not None else None
+    cutoff = min(cutoff, utc_now()) if cutoff else utc_now()
     chosen = set(wanted)
-    return format_items_for_prompt([item for item in store.load_items(job_id) if item.id in chosen])
+    return format_items_for_prompt([item for item in store.load_items(job_id)
+                                    if item.id in chosen and published_by(item, cutoff)])

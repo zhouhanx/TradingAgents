@@ -12,9 +12,20 @@ from tradingagents.dataflows.errors import NoMarketDataError, VendorError
 from tradingagents.dataflows.symbols import normalize_symbol
 from tradingagents.dataflows.vendors import sina
 from tradingagents.dataflows.vendors.yahoo.common import price_text, raise_for_empty, yf_retry
-from tradingagents.dataflows.vendors.yahoo.ohlcv import _assert_ohlcv_not_stale, load_ohlcv
+from tradingagents.dataflows.vendors.yahoo.ohlcv import (
+    MAYBE_NOT_UPDATED_EN,
+    MAYBE_NOT_UPDATED_ZH,
+    _assert_ohlcv_not_stale,
+    _pick_fresh_a_share,
+    load_notes,
+    load_ohlcv,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _nonempty(frame):
+    return None if frame is None or frame.empty else frame
 
 
 def method_name() -> str:
@@ -37,22 +48,22 @@ def get_YFin_data_online(
     # end_date row (and the current day when end_date is today). Request one day
     # past end_date so the requested range is actually inclusive (#986/#987).
     end_inclusive = (end_dt + relativedelta(days=1)).strftime("%Y-%m-%d")
-    # A shares: BJ reads Sina only; SH/SZ read Yahoo, then Sina if Yahoo has nothing.
-    data, source = None, "yahoo"
-    for source in sina.chain(canonical):
-        try:
-            if source == "sina":
-                data = sina.history_frame(canonical, start_date, end_inclusive)
-            else:
-                data = yf_retry(lambda: yf.Ticker(canonical).history(start=start_date, end=end_inclusive))
-        except Exception:
-            if source == sina.chain(canonical)[-1]:
-                raise
-            logger.warning("%s: %s failed for %s; trying the next source.", method_name(), source, canonical)
-            data = None
-            continue
-        if data is not None and not data.empty:
-            break
+    # A shares: BJ reads Sina only; SH/SZ read Yahoo and Sina, and Yahoo is used
+    # unless its last bar is older than Sina's (AUDIT-FIX-06, PM rule).
+    sources = sina.chain(canonical)
+
+    def fetch(source):
+        if source == "sina":
+            return sina.history_frame(canonical, start_date, end_inclusive)
+        return yf_retry(lambda: yf.Ticker(canonical).history(start=start_date, end=end_inclusive))
+
+    freshness_note = None
+    if sources == ["yahoo", "sina"]:
+        data, source, freshness_note = _pick_fresh_a_share(
+            lambda src: _nonempty(fetch(src)), canonical, end_dt)
+    else:
+        source = sources[0]
+        data = fetch(source)
 
     # Empty result means the symbol is unknown/delisted. Raise a typed error
     # instead of returning prose: the routing layer turns it into a single
@@ -67,7 +78,8 @@ def get_YFin_data_online(
     # Reject a stale frame (e.g. a year-old partial response) before it is
     # formatted into the report. Raises NoMarketDataError, which the router
     # turns into one clear unavailable signal (#1021).
-    _assert_ohlcv_not_stale(data, end_date, symbol, canonical)
+    if sources != ["yahoo", "sina"]:
+        _assert_ohlcv_not_stale(data, end_date, symbol, canonical)
 
     data, fixed = ohlc_check.fix_frame(data, canonical, date_col=None)
 
@@ -85,6 +97,8 @@ def get_YFin_data_online(
     header += f"# Total records: {len(data)}\n"
     if fixed:
         header += f"# Note: {fixed} bar(s): {ohlc_check.NOTE_EN} / {ohlc_check.NOTE_ZH}\n"
+    if freshness_note:
+        header += f"# Freshness: {MAYBE_NOT_UPDATED_EN} / {MAYBE_NOT_UPDATED_ZH}\n"
     header += "\n"
     sina.last_source[canonical] = source
 
@@ -226,12 +240,19 @@ def get_stock_stats_indicators_window(
         + "\n\n"
         + best_ind_params.get(indicator, "No description available.")
     )
-    used = sina.last_source.get(normalize_symbol(symbol))
+    # Notes of the frame this call used (AUDIT-CHECK-04): never a global counter.
+    try:
+        notes = load_notes(symbol, as_of_date)
+    except Exception:  # noqa: BLE001 - the values above already reported any failure
+        notes = {}
+    used = notes.get("source") or sina.last_source.get(normalize_symbol(symbol))
     if used:
         result_str += f"\n\nData source: {sina.SOURCE_LABEL[used]}"
-    note = ohlc_check.note_for(normalize_symbol(symbol))
+    note = ohlc_check.note_text(notes.get("ohlc_fixed", 0))
     if note:
         result_str += f"\nData check: {note}"
+    if notes.get("freshness_note"):
+        result_str += f"\nFreshness: {MAYBE_NOT_UPDATED_EN} / {MAYBE_NOT_UPDATED_ZH}"
 
     return result_str
 
