@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 · TradingAgents 控制台</title>
+  <link rel="icon" type="image/svg+xml" href="/icons/logo.svg">
+  <link rel="stylesheet" href="/login.css">
+</head>
+<body>
+<template id="err-icon"><svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="8" fill="currentColor"/><rect x="7" y="3.5" width="2" height="6" rx="1" fill="#fff"/><circle cx="8" cy="12" r="1.15" fill="#fff"/></svg></template>
+<template id="eye-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg></template>
+<template id="brand"><div class="brand"><img src="/icons/logo.svg" alt=""><span>TradingAgents</span></div></template>
+<template id="beacon"><div class="beacon" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M7 10V7a5 5 0 0 1 9.6-2" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><rect x="4" y="10" width="16" height="12" rx="2"/><rect x="11" y="14" width="2" height="4" rx="1" fill="#fff"/></svg><div class="stars">****</div></div></template>
+
+<!-- 第一步：邮箱 -->
+<section class="wrap" id="step-email" hidden>
+  <div class="lang"><svg class="globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2c3 3 4 6.5 4 10s-1 7-4 10M12 2c-3 3-4 6.5-4 10s1 7 4 10M4 6.5h16M4 17.5h16"/></svg><div class="code">CN<br>ZH</div></div>
+  <main class="card"><div class="hdr" data-brand></div>
+    <form class="content" id="email-form" novalidate><h1>登录</h1>
+      <div class="fs"><div class="lbl"><label for="email">电子邮箱</label></div><div class="ctl"><input id="email" name="email" type="email" autocomplete="username" autofocus></div>
+        <p class="err" id="email-error" role="alert" hidden></p></div>
+      <div class="gap2"></div>
+      <button class="btn" type="submit" id="email-next">下一步</button>
+      <div class="foot" aria-hidden="true"><span class="foot-gap">&nbsp;</span></div>
+    </form>
+  </main>
+</section>
+
+<!-- 第二步：密码 -->
+<section class="wrap" id="step-password" hidden>
+  <main class="card top"><div class="hdr" data-brand data-beacon></div>
+    <form class="content" id="password-form" novalidate><h1>通过密码验证</h1>
+      <input type="email" id="email-echo" autocomplete="username" hidden>
+      <div class="fs"><div class="lbl"><label for="password">密码</label></div><div class="ctl"><input id="password" type="password" autocomplete="current-password"><button class="eye" type="button" aria-label="显示密码" title="显示密码" data-eye></button></div>
+        <p class="err" id="password-error" role="alert" hidden></p></div>
+      <div class="gap"></div>
+      <button class="btn" type="submit" id="password-submit">验证</button>
+      <div class="foot"><span class="foot-gap" aria-hidden="true">&nbsp;</span><a href="/login" id="back-to-email">返回登录页</a></div>
+    </form>
+  </main>
+</section>
+
+<!-- 修改密码（首次登录强制 / 账户菜单） -->
+<section class="wrap" id="step-change" hidden>
+  <main class="card top"><div class="hdr" data-brand data-beacon></div>
+    <form class="content" id="change-form" novalidate><h1 id="change-title">首次登录请修改密码</h1><p class="sub" id="change-sub">初始密码只能用一次，请设置新密码</p>
+      <div class="fs" id="old-row" hidden><div class="lbl"><label for="old-password">旧密码</label></div><div class="ctl"><input id="old-password" type="password" autocomplete="current-password"><button class="eye" type="button" aria-label="显示密码" title="显示密码" data-eye></button></div></div>
+      <div class="fs"><div class="lbl"><label for="new-password">新密码</label></div><div class="ctl"><input id="new-password" type="password" placeholder="至少 8 位" autocomplete="new-password"><button class="eye" type="button" aria-label="显示密码" title="显示密码" data-eye></button></div></div>
+      <div class="fs"><div class="lbl"><label for="confirm-password">确认新密码</label></div><div class="ctl"><input id="confirm-password" type="password" autocomplete="new-password"><button class="eye" type="button" aria-label="显示密码" title="显示密码" data-eye></button></div>
+        <p class="err" id="change-error" role="alert" hidden></p></div>
+      <div class="gap"></div>
+      <button class="btn" type="submit" id="change-submit">保存并进入</button>
+      <div class="foot"><a href="/" id="change-cancel" hidden>返回控制台</a><a href="/login" id="change-logout">返回登录页</a></div>
+    </form>
+  </main>
+</section>
+
+<!-- 还没有账户 -->
+<section class="wrap" id="step-init" hidden>
+  <main class="card top"><div class="hdr" data-brand data-beacon></div>
+    <div class="content init"><h1>还没有登录账户</h1>
+      <p>控制台在设置登录账户之前不会开放。请在运行控制台的电脑上执行：</p>
+      <code>tradingagents-launcher auth init --email &lt;你的邮箱&gt;</code>
+      <p>按提示输入两次初始密码（不回显），然后刷新本页登录。首次登录后必须修改密码。</p>
+    </div>
+  </main>
+</section>
+<script src="/login.js"></script>
+</body>
+</html>

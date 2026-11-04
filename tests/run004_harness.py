@@ -20,6 +20,7 @@ import http.client
 import json
 import os
 import re
+import secrets
 import signal
 import subprocess
 import sys
@@ -45,6 +46,8 @@ class Console:
         self.process = None
         self.port = None
         self.token = None
+        self.password = None
+        self.cookie = None
 
     # -- process ---------------------------------------------------------------
     def env(self) -> dict:
@@ -74,9 +77,29 @@ class Console:
                 break
             if not line and self.process.poll() is not None:
                 raise RuntimeError("console did not start")
+        self._sign_in()
         page = self._request("GET", "/", token=False)[1]
         self.token = re.search(r'name="tradingagents-token" content="([^"]+)"', page).group(1)
         return self
+
+    def _sign_in(self) -> None:
+        """V2-AUTH-LOGIN: a throwaway account (random password, made once per HOME) and a session."""
+        from webui import console_auth
+
+        store = self.home / ".tradingagents" / "webui" / console_auth.USER_STORE_NAME
+        if self.password is None:
+            self.password = secrets.token_urlsafe(18)
+            console_auth.create_user("harness@example.invalid", self.password, must_change=False, path=store,
+                                     force=True)
+        self.cookie = None
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=15)
+        connection.request("POST", "/api/account/login", headers={"Content-Type": "application/json"},
+                           body=json.dumps({"email": "harness@example.invalid", "password": self.password}))
+        response = connection.getresponse()
+        response.read()
+        connection.close()
+        assert response.status == 200, response.status
+        self.cookie = response.getheader("Set-Cookie").split(";", 1)[0]
 
     def kill(self) -> None:
         """Stop the console the hard way (a crash or a closed terminal). Workers keep running."""
@@ -103,6 +126,8 @@ class Console:
     def _request(self, method: str, path: str, body=None, token=True):
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=15)
         headers = {"Content-Type": "application/json"}
+        if self.cookie:
+            headers["Cookie"] = self.cookie
         if token:
             headers["X-TradingAgents-Token"] = self.token
         connection.request(method, path, body=None if body is None else json.dumps(body), headers=headers)

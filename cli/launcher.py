@@ -864,6 +864,7 @@ commands:
   logs [--lines N]                Show the background log tail and path
   login/logout/auth-status ...    Exec the corresponding cli.main command
   cli ...                         Raw passthrough to cli.main
+  auth init --email E [--force]   Create the console sign-in account
   web [--host H] [--port N] [--allow-lan]  Open the local Chinese console
 
 Runtime files live under ~/.tradingagents/runtime/<checkout-hash>.
@@ -934,6 +935,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         return _run_supervisor(runtime_paths(), args[1:], True, lock_handle)
 
+    if args and args[0] == "auth":
+        # V2-AUTH-LOGIN: ``auth init --email <邮箱>`` creates the console sign-in account.
+        from webui.console_auth import cli_main as auth_main
+        return auth_main(args[1:])
     command, command_args = _parse_manager_command(args)
     paths = runtime_paths()
     if command == "start":

@@ -69,6 +69,7 @@ _pin_terminal()
 
 
 def pytest_configure(config):
+    config.addinivalue_line("markers", "console_signed_out: see the WebUI console without a signed-in session")
     for marker in ("unit", "integration", "smoke"):
         config.addinivalue_line("markers", f"{marker}: {marker}-level tests")
     # yfinance caches each symbol's time zone on disk, in the home directory
@@ -239,3 +240,50 @@ def _no_real_dotenv(monkeypatch):
     for module in (cli.prompts, webui.service):
         monkeypatch.setattr(module, "find_dotenv", _cwd_only_find_dotenv)
         monkeypatch.setattr(module, "set_key", _guarded_set_key(dotenv.set_key))
+
+
+# V2-AUTH-LOGIN: the console now needs a signed-in session for every page and API.
+# Tests that start ``webui.server.serve`` in-process and talk to it get a signed-in
+# session by default: a throwaway account with a random password (generated here,
+# never written anywhere but the test's own temp store), a session cookie added to
+# every http.client request to that server's port, and ``httpd.session_token`` set
+# to that session's API token. Mark a test ``console_signed_out`` to see the console
+# as a stranger does.
+@pytest.fixture(autouse=True)
+def _console_signed_in(request, monkeypatch, tmp_path_factory):
+    import http.client
+    import secrets
+    import sys
+
+    server = sys.modules.get("webui.server")
+    if server is None or request.node.get_closest_marker("console_signed_out"):
+        yield
+        return
+    from webui import console_auth
+
+    cookies: dict[int, str] = {}
+    original_serve = server.serve
+    original_request = http.client.HTTPConnection.request
+
+    def serve(*args, **kwargs):
+        httpd = original_serve(*args, **kwargs)
+        store = tmp_path_factory.mktemp("console-auth") / console_auth.USER_STORE_NAME
+        password = secrets.token_urlsafe(18)
+        console_auth.create_user("tester@example.invalid", password, must_change=False, path=store)
+        httpd.auth = console_auth.AuthState(store)
+        sid, data = httpd.auth.login("tester@example.invalid", password, "127.0.0.1")
+        httpd.session_token = data["token"]
+        httpd.test_session_cookie = f"{console_auth.COOKIE_NAME}={sid}"
+        cookies[httpd.server_address[1]] = httpd.test_session_cookie
+        return httpd
+
+    def request(self, method, url, body=None, headers=None, **kwargs):
+        headers = dict(headers or {})
+        cookie = cookies.get(self.port)
+        if cookie and not any(name.lower() == "cookie" for name in headers):
+            headers["Cookie"] = cookie
+        return original_request(self, method, url, body=body, headers=headers, **kwargs)
+
+    monkeypatch.setattr(server, "serve", serve)
+    monkeypatch.setattr(http.client.HTTPConnection, "request", request)
+    yield

@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, urlsplit
 
-from webui import info_crawl, service
+from webui import console_auth, info_crawl, service
 from webui.catalog import PROVIDER_ICONS, provider_rows, public_catalog
 from webui.frameworks import DEFAULT_FRAMEWORK, public_frameworks, public_tools
 
@@ -44,6 +44,14 @@ _WILDCARD_BINDS = {"", "0.0.0.0", "::", "[::]"}
 # Sec-Fetch-Site checks. A request without Sec-Fetch headers (old browser, curl) still
 # needs the key (W1).
 _NAVIGABLE_API = {"/api/reports/file"}
+# V2-AUTH-LOGIN: the only routes open without a session: the login page and what it loads,
+# sign-in state, sign-in and sign-out. Every other page redirects to /login; every other
+# /api/* answers 401.
+_PUBLIC_GET = {"/login", "/login.js", "/login.css", "/console.css", "/api/account/state"}
+_PUBLIC_POST = {"/api/account/login", "/api/account/logout"}
+_ACCOUNT_POST = {"/api/account/login", "/api/account/logout", "/api/account/password"}
+# Before the first password change only these work.
+_MUST_CHANGE_ALLOWED = _PUBLIC_GET | _PUBLIC_POST | {"/api/account/password"}
 REPORT_CSP = (
     "sandbox allow-popups allow-popups-to-escape-sandbox; default-src 'none'; "
     "style-src 'unsafe-inline'; img-src data:; frame-ancestors 'none'"
@@ -111,8 +119,24 @@ class Handler(BaseHTTPRequestHandler):
 
     # --- SEC-001 request guards -----------------------------------------------------
 
+    def _auth(self) -> console_auth.AuthState:
+        state = getattr(self.server, "auth", None)
+        if state is None:
+            state = self.server.auth = console_auth.AuthState()
+        return state
+
+    def _current(self) -> dict | None:
+        """V2-AUTH-LOGIN: the signed-in session this request's cookie names, or None."""
+        if not hasattr(self, "_session_cache"):
+            sid = console_auth.cookie_sid(self.headers.get("Cookie"))
+            self._session_sid = sid
+            self._session_cache = self._auth().session(sid)
+        return self._session_cache
+
     def _session_token(self) -> str:
-        return getattr(self.server, "session_token", "") or ""
+        # The API token belongs to the signed-in session: no session, no token.
+        current = self._current()
+        return current["token"] if current else ""
 
     def _host_ok(self) -> bool:
         host = (self.headers.get("Host") or "").strip().lower()
@@ -154,23 +178,50 @@ class Handler(BaseHTTPRequestHandler):
     def _refuse(self, status: int, message: str) -> None:
         self._json({"error": message}, status)
 
+    def _redirect(self, location: str) -> None:
+        self.send_response(303)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
     def _guard(self, path: str, *, state_changing: bool) -> bool:
         """Return True when the request may proceed; otherwise the refusal is already sent."""
         if not self._host_ok():
             self._refuse(421, "Host 不是本机控制台地址，请求已拒绝。")
             return False
+        if state_changing and (not self._same_origin() or self._cross_site_fetch()):
+            self._refuse(403, "跨站请求已拒绝。")
+            return False
+        if path.startswith("/api/") and self._cross_site_fetch():
+            self._refuse(403, "跨站请求已拒绝。")
+            return False
+        public = (_PUBLIC_POST if state_changing else _PUBLIC_GET)
+        if path in public or (not state_changing and path.startswith("/icons/")):
+            return True
+        # V2-AUTH-LOGIN: everything else needs a signed-in session (cookie) first.
+        current = self._current()
+        if current is None:
+            if path.startswith("/api/"):
+                initialized = self._auth().initialized()
+                self._json({"error": console_auth.LOGIN_REQUIRED if initialized else console_auth.NOT_INITIALIZED,
+                            "login_required": True}, 401)
+            else:
+                self._redirect("/login")
+            return False
+        if current.get("must_change") and path not in _MUST_CHANGE_ALLOWED:
+            if path.startswith("/api/"):
+                self._json({"error": console_auth.MUST_CHANGE, "must_change": True}, 403)
+            else:
+                self._redirect("/login")
+            return False
+        # SEC-001: on top of the cookie, API calls carry the session's own token.
         if state_changing:
-            if not self._same_origin() or self._cross_site_fetch():
-                self._refuse(403, "跨站请求已拒绝。")
-                return False
             if not self._token_ok():
                 self._refuse(403, "缺少或错误的控制台会话令牌。请刷新控制台页面后重试。")
                 return False
             return True
         if path.startswith("/api/"):
-            if self._cross_site_fetch():
-                self._refuse(403, "跨站请求已拒绝。")
-                return False
             if path in _NAVIGABLE_API:
                 if not (self._link_key_ok() or self._token_ok()):
                     self._refuse(403, LINK_KEY_REFUSED)
@@ -183,6 +234,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         if not self._guard(parsed.path, state_changing=False):
+            return
+        if parsed.path == "/login":
+            self._login_page()
+            return
+        if parsed.path == "/api/account/state":
+            self._account_state()
             return
         if parsed.path == "/api/catalog":
             self._json(self._catalog())
@@ -324,7 +381,7 @@ class Handler(BaseHTTPRequestHandler):
             self._index()
             return
         relative = parsed.path.lstrip("/")
-        if relative in {"app.js", "app.css", "console.css"}:
+        if relative in {"app.js", "app.css", "console.css", "login.js", "login.css"}:
             self._static(STATIC / relative)
             return
         self._json({"error": "没有这个页面。"}, 404)
@@ -337,6 +394,9 @@ class Handler(BaseHTTPRequestHandler):
             body = self._body()
         except service.ConsoleError as exc:
             self._json({"error": str(exc)}, exc.status)
+            return
+        if parsed.path in _ACCOUNT_POST:
+            self._account_post(parsed.path, body)
             return
         routes = {
             "/api/auth/login": lambda: service.start_login(body.get("provider") if "provider" in body else None),
@@ -417,23 +477,61 @@ class Handler(BaseHTTPRequestHandler):
             raise service.ConsoleError("请求体必须是对象。")
         return data
 
-    def _json(self, payload, status: int = 200) -> None:
-        # "replace": a lone surrogate read back from a file never breaks the reply (R2-MF1)
-        body = json.dumps(service.redact(payload), ensure_ascii=False).encode("utf-8", "replace")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        self.wfile.write(body)
+    # --- V2-AUTH-LOGIN account routes -------------------------------------------------
 
-    def _index(self) -> None:
-        """The console page, carrying this process's session token for the page's own JS."""
-        markup = (STATIC / "index.html").read_text(encoding="utf-8")
+    def _account_state(self) -> None:
+        current = self._current()
+        self._json({"initialized": self._auth().initialized(), "signed_in": current is not None,
+                    "must_change": bool(current and current.get("must_change"))})
+
+    def _https(self) -> bool:
+        """W206: the request came over TLS, directly or via a proxy that says so."""
+        import ssl
+
+        if isinstance(getattr(self, "connection", None), ssl.SSLSocket):
+            return True
+        return (self.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower() == "https"
+
+    def _account_post(self, path: str, body: dict) -> None:
+        auth = self._auth()
+        try:
+            if path == "/api/account/login":
+                sid, data = auth.login(str(body.get("email") or ""), str(body.get("password") or ""),
+                                       str(self.client_address[0]))
+                self._json({"ok": True, "must_change": bool(data.get("must_change"))},
+                           headers=[("Set-Cookie", console_auth.session_cookie(sid, secure=self._https()))])
+            elif path == "/api/account/logout":
+                self._current()
+                auth.logout(self._session_sid)
+                self._json({"ok": True}, headers=[("Set-Cookie", console_auth.clear_cookie(secure=self._https()))])
+            else:  # /api/account/password (the guard already checked session + token)
+                current = self._current()
+                sid, _data = auth.change_password(
+                    self._session_sid, body.get("old_password"), str(body.get("new_password") or ""),
+                    require_old=not current.get("must_change"))
+                self._json({"ok": True}, headers=[("Set-Cookie", console_auth.session_cookie(sid, secure=self._https()))])
+        except console_auth.AuthError as exc:
+            self._json({"error": str(exc), **exc.extra}, exc.status)
+
+    def _login_page(self) -> None:
+        current = self._current()
+        if current is not None and not current.get("must_change") and "change" not in parse_qs(
+                urlparse(self.path).query):
+            self._redirect("/")
+            return
+        if not self._auth().initialized():
+            mode = "init"
+        elif current is None:
+            mode = "login"
+        else:
+            mode = "force" if current.get("must_change") else "change"
+        markup = (STATIC / "login.html").read_text(encoding="utf-8")
         meta = (f'<meta name="{TOKEN_META}" content="{self._session_token()}">\n  '
-                f'<meta name="{LINK_KEY_META}" content="{getattr(self.server, "link_key", "") or ""}">')
+                f'<meta name="tradingagents-login-mode" content="{mode}">')
         markup = markup.replace('<meta charset="utf-8">', f'<meta charset="utf-8">\n  {meta}', 1)
+        self._html(markup)
+
+    def _html(self, markup: str) -> None:
         data = markup.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -445,6 +543,31 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "same-origin")
         self.end_headers()
         self.wfile.write(data)
+
+    def _json(self, payload, status: int = 200, headers=None) -> None:
+        # "replace": a lone surrogate read back from a file never breaks the reply (R2-MF1)
+        body = json.dumps(service.redact(payload), ensure_ascii=False).encode("utf-8", "replace")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        for name, value in headers or ():
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _index(self) -> None:
+        """The console page, carrying this session's API token for the page's own JS."""
+        import html as html_lib
+
+        markup = (STATIC / "index.html").read_text(encoding="utf-8")
+        current = self._current() or {}
+        meta = (f'<meta name="{TOKEN_META}" content="{self._session_token()}">\n  '
+                f'<meta name="{LINK_KEY_META}" content="{getattr(self.server, "link_key", "") or ""}">\n  '
+                f'<meta name="tradingagents-account" content="{html_lib.escape(str(current.get("email") or ""))}">')
+        markup = markup.replace('<meta charset="utf-8">', f'<meta charset="utf-8">\n  {meta}', 1)
+        self._html(markup)
 
     def _kline(self, symbol: str, tf: str) -> None:
         from webui import kline as kline_data
@@ -649,7 +772,7 @@ def serve(host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:
     host = normalize_bind_host(host)
     server_class = ConsoleHTTPServerV6 if ":" in host else ConsoleHTTPServer
     httpd = server_class((host, port), Handler)
-    httpd.session_token = secrets.token_urlsafe(32)
+    httpd.auth = console_auth.AuthState()
     httpd.link_key = secrets.token_urlsafe(24)
     httpd.allowed_hosts = allowed_hosts(host, httpd.server_address[1])
     return httpd
@@ -708,7 +831,7 @@ def build_console_parser(prog: str | None = None):
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--allow-lan", action="store_true",
-                        help="允许 --host 绑定到非本机地址（局域网里任何能打开该地址的人都会拿到控制台令牌）")
+                        help="允许 --host 绑定到非本机地址（局域网访问同样需要登录控制台账户）")
     return parser
 
 
@@ -726,13 +849,13 @@ def is_loopback_host(host: str) -> bool:
 
 
 LAN_REFUSED = (
-    "拒绝启动：--host {host} 不是本机回环地址。控制台页面会把会话令牌交给任何能打开这个地址的人"
-    "（局域网里的其他电脑也可以），拿到令牌就能用你的订阅启动分析、读报告。"
+    "拒绝启动：--host {host} 不是本机回环地址，局域网里的其他电脑也能打开这个地址"
+    "（进入控制台仍需登录控制台账户）。"
     "只在本机使用请去掉 --host（默认 127.0.0.1）；确实要让局域网访问，请加 --allow-lan。"
 )
 LAN_WARNING = (
-    "警告：控制台绑定在 {host}，不是本机回环地址。能打开这个地址的人都会拿到会话令牌，"
-    "可以用你的订阅启动分析、读报告。只在可信网络里这样用，用完请关掉控制台。"
+    "警告：控制台绑定在 {host}，不是本机回环地址，局域网里的电脑都能打开登录页。"
+    "进入控制台必须先用控制台账户登录（登录有限速）；建议走 HTTPS（例如放在 HTTPS 反向代理后面），否则密码和会话在局域网里是明文传输；只在可信网络里这样用，用完请关掉控制台。"
 )
 
 

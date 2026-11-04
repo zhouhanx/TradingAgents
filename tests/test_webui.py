@@ -179,6 +179,8 @@ def test_model_picker_is_custom_and_uses_the_model_api():
 
 def test_catalog_covers_launcher_commands():
     covered = {item["cli"] for item in LAUNCHER_COMMANDS}
+    # `auth` reads the password from the terminal, so the console never runs it.
+    terminal_only = {"auth"}
     in_commands = False
     for line in HELP.splitlines():
         if line.strip() == "commands:":
@@ -191,7 +193,7 @@ def test_catalog_covers_launcher_commands():
             for part in command.split("/"):
                 assert part in covered, part
             continue
-        assert command in covered, command
+        assert command in covered or command in terminal_only, command
 
 
 def test_catalog_covers_analyze_and_backtest_flags():

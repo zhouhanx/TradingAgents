@@ -59,7 +59,8 @@ def _get(host: str, port: str) -> str:
         import urllib.request
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({{}}))
         with opener.open("http://{host}:{port}/", timeout=10) as r:
-            print(r.status, b'src="/app.js"' in r.read())
+            # V2-AUTH-LOGIN: signed out, / redirects to the login page.
+            print(r.status, r.geturl().endswith("/login") and b'src="/login.js"' in r.read())
     """)
     return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30).stdout.strip()
 

@@ -2634,3 +2634,99 @@ test('K 线行情: Sina source pill + 未复权 note on fallback; unknown Chines
     assert.equal(doc.querySelector('#kline-suggest-hint').textContent, '没有找到这个名称，请用 6 位代码查询。');
   } finally { ui.dom.window.close(); }
 });
+
+// V2-AUTH-LOGIN: the login page (two steps, empty-field error, eye toggle, same wrong-credential
+// message) and the account menu. Passwords are random per run.
+async function loginPage(mode = 'login', reply = {status: 401, body: {error: '邮箱或密码错误'}}) {
+  const html = readFileSync(resolve(root, 'webui/static/login.html'), 'utf8')
+    .replace('<meta charset="utf-8">', `<meta charset="utf-8"><meta name="tradingagents-login-mode" content="${mode}"><meta name="tradingagents-token" content="${mode === 'login' ? '' : 'tok-fixture'}">`)
+    .replace('<script src="/login.js"></script>', '');
+  const dom = new JSDOM(html, {url: 'http://localhost/login', runScripts: 'outside-only'});
+  const {window} = dom;
+  const calls = [];
+  const assigned = [];
+  window.fetch = async (path, options = {}) => {
+    calls.push({path, ...options});
+    return {ok: reply.status < 300, status: reply.status, json: async () => structuredClone(reply.body)};
+  };
+  window.__assign = (url) => assigned.push(url);   // jsdom cannot navigate; record where the page would go
+  window.eval(readFileSync(resolve(root, 'webui/static/login.js'), 'utf8').replaceAll('window.location.assign(', 'window.__assign('));
+  return {window, doc: window.document, calls, assigned};
+}
+const randomPassword = () => require('node:crypto').randomBytes(12).toString('base64url');
+const submit = async (doc, id) => { doc.getElementById(id).requestSubmit(); for (let i = 0; i < 6; i++) await settle(); };
+
+test('登录页: step 1 empty email shows 此字段不能为空, then step 2 通过密码验证 with eye toggle and 返回登录页 (V2-AUTH-LOGIN)', async () => {
+  const {doc, calls} = await loginPage();
+  assert.equal(doc.getElementById('step-email').hidden, false);
+  assert.equal(doc.getElementById('email-next').textContent, '下一步');
+  await submit(doc, 'email-form');
+  assert.equal(doc.getElementById('email-error').hidden, false);
+  assert.match(doc.getElementById('email-error').textContent, /此字段不能为空/);
+  assert.equal(calls.length, 0, 'step 1 never asks the server (no user enumeration)');
+  doc.getElementById('email').value = 'owner@example.invalid';
+  await submit(doc, 'email-form');
+  assert.equal(doc.getElementById('step-password').hidden, false);
+  assert.match(doc.querySelector('#step-password h1').textContent, /通过密码验证/);
+  const input = doc.getElementById('password');
+  const eye = doc.querySelector('#step-password [data-eye]');
+  eye.click();
+  assert.equal(input.type, 'text');
+  eye.click();
+  assert.equal(input.type, 'password');
+  await submit(doc, 'password-form');
+  assert.match(doc.getElementById('password-error').textContent, /此字段不能为空/);
+  doc.getElementById('back-to-email').click();
+  assert.equal(doc.getElementById('step-email').hidden, false);
+  assert.equal(doc.body.textContent.includes('注册') || doc.body.textContent.includes('忘记密码') || doc.body.textContent.includes('解锁'), false);
+});
+
+test('登录页: wrong credentials show 邮箱或密码错误 and clear the field; success goes to the console (V2-AUTH-LOGIN)', async () => {
+  const wrong = await loginPage();
+  wrong.doc.getElementById('email').value = 'owner@example.invalid';
+  await submit(wrong.doc, 'email-form');
+  wrong.doc.getElementById('password').value = randomPassword();
+  await submit(wrong.doc, 'password-form');
+  assert.equal(wrong.calls[0].path, '/api/account/login');
+  assert.match(wrong.doc.getElementById('password-error').textContent, /邮箱或密码错误/);
+  assert.equal(wrong.doc.getElementById('password').value, '');
+  const ok = await loginPage('login', {status: 200, body: {ok: true, must_change: true}});
+  ok.doc.getElementById('email').value = 'owner@example.invalid';
+  await submit(ok.doc, 'email-form');
+  ok.doc.getElementById('password').value = randomPassword();
+  await submit(ok.doc, 'password-form');
+  assert.deepEqual(ok.assigned, ['/login'], 'must_change → back to /login for the forced change');
+});
+
+test('首次登录: forced change checks length and match, sends the session token (V2-AUTH-LOGIN)', async () => {
+  const {doc, calls, assigned} = await loginPage('force', {status: 200, body: {ok: true}});
+  assert.equal(doc.getElementById('step-change').hidden, false);
+  assert.match(doc.getElementById('change-title').textContent, /首次登录请修改密码/);
+  assert.equal(doc.getElementById('old-row').hidden, true);
+  const next = randomPassword();
+  doc.getElementById('new-password').value = next;
+  doc.getElementById('confirm-password').value = next + 'x';
+  await submit(doc, 'change-form');
+  assert.match(doc.getElementById('change-error').textContent, /两次输入的密码不一致/);
+  doc.getElementById('confirm-password').value = next;
+  await submit(doc, 'change-form');
+  assert.equal(calls[0].path, '/api/account/password');
+  assert.equal(calls[0].headers['X-TradingAgents-Token'], 'tok-fixture');
+  assert.deepEqual(assigned, ['/']);
+  const change = await loginPage('change');
+  assert.equal(change.doc.getElementById('old-row').hidden, false);
+  assert.match(change.doc.getElementById('change-title').textContent, /修改密码/);
+});
+
+test('账户菜单: bottom-left button opens 修改密码 / 退出登录 (V2-AUTH-LOGIN)', async () => {
+  const html = markup.replace('<meta charset="utf-8">', '<meta charset="utf-8"><meta name="tradingagents-account" content="owner@example.invalid">');
+  const ui = await setup({'/api/account/logout': {ok: true}}, {html});
+  const menu = ui.doc.querySelector('#account-menu');
+  assert.equal(menu.hidden, true);
+  assert.equal(ui.doc.querySelector('#account-name').textContent, 'owner@example.invalid');
+  assert.match(ui.doc.querySelector('#identity-name').textContent, /^模型服务/, 'top-right is model-service status, not console login');
+  await ui.click('#account-button');
+  assert.equal(menu.hidden, false);
+  assert.equal(ui.doc.querySelector('#account-change-password').getAttribute('href'), '/login?change=1');
+  assert.match(ui.doc.querySelector('#account-logout').textContent, /退出登录/);
+});

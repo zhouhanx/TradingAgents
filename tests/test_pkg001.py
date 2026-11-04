@@ -280,7 +280,9 @@ def test_the_installed_console_serves_the_webui(venv, tmp_path, monkeypatch):
         port = re.search(r":(\d+)\s*$", line)
         assert port, line
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        for path, needle in (("/", b'src="/app.js"'), ("/app.js", b"function"), ("/console.css", b"font-family"),
+        # V2-AUTH-LOGIN: with no account yet, / and /app.js lead to the login page (init notice).
+        for path, needle in (("/", b'src="/login.js"'), ("/app.js", b"auth init"), ("/login.js", b"function"),
+                             ("/console.css", b"font-family"),
                              ("/icons/logo.svg", b"<svg")):
             with opener.open(f"http://127.0.0.1:{port.group(1)}{path}", timeout=10) as response:
                 assert response.status == 200 and needle in response.read(), path

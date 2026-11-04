@@ -1,0 +1,37 @@
+/* V2-AUTH-LOGIN: layout and sizes from Proto's approved login mock v2 (ta/login-mock-v2/mock.html);
+   colours from the mock too (login page only; the console keeps console.css #3c72b0). */
+*{box-sizing:border-box}
+html,body{margin:0;background:#f9f9f9;color:#6e6e78;font:400 14px/1.4 -apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",Arial,"Noto Sans CJK SC","Noto Sans SC",sans-serif}
+a{color:#0175a2;text-decoration:none}a:hover{text-decoration:underline}
+[hidden]{display:none!important}
+.wrap{padding-top:78px;padding-bottom:40px}
+.lang{width:400px;height:58px;margin:0 auto;background:#fff;border:1px solid #ddd;border-bottom:0;border-radius:3px 3px 0 0;position:relative;color:#333}
+.lang .globe{position:absolute;left:330px;top:19px;width:25px;height:25px;color:#6c757d}
+.lang .code{position:absolute;left:361px;top:12px;font-size:12px;line-height:16px;color:#6c757d}
+.card{width:400px;margin:0 auto 8px;background:#fff;border:1px solid #ddd;border-top:0;border-bottom-color:#d8d8d8;border-radius:0 0 3px 3px;box-shadow:0 2px 0 rgba(176,176,176,.12)}
+.card.top{border-top:1px solid #ddd;border-radius:3px}
+.hdr{height:98px;padding:0 90px 15px;border-bottom:1px solid #ddd;display:flex;align-items:center;justify-content:center;position:relative}
+.card.top .hdr{height:155px;padding-top:57px}
+.brand{display:flex;align-items:center;gap:8px;height:63px;color:#1d1d21}
+.brand img{width:34px;height:34px}.brand span{font-size:20px;font-weight:600;letter-spacing:.2px}
+.beacon{position:absolute;left:156.5px;top:calc(100% - 17.5px);width:85px;height:85px;border-radius:50%;background:#dff4ff;box-shadow:0 0 0 2px #fff,0 0 0 5px #ababab;display:flex;align-items:center;justify-content:center;flex-direction:column;color:#1a87c6}
+.beacon .stars{font-size:17px;letter-spacing:2px;line-height:14px;margin-top:4px;font-weight:600}
+.content{padding:60px 37px 20px;margin-top:26px}
+h1{margin:10px 0 15px;font-size:24px;line-height:36px;font-weight:400;color:#5e5e5e;text-align:center}
+.sub{margin:-6px 0 4px;text-align:center;color:#6e6e78}
+.fs{margin-bottom:20px}
+.lbl{padding:7px 0;font-size:14px;font-weight:600;line-height:16px;color:#1d1d21}
+.ctl{height:40px;border:1px solid #8c8c96;border-radius:3px;background:#fff;display:flex;align-items:center}
+.ctl:focus-within{border-color:#7fb3d5;box-shadow:0 0 0 2px rgba(1,117,162,.18)}
+.ctl input{flex:1;min-width:0;height:38px;border:0;outline:0;background:transparent;padding:6px 8px;font:inherit;font-size:14px;line-height:16px;color:#1d1d21}
+.eye{width:30px;height:38px;border:0;background:none;color:#6e6e78;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0}
+.err{position:relative;padding:8px 0 6px 18px;font-size:12px;line-height:18px;color:#d93934;margin:0}
+.err svg{position:absolute;left:-1px;top:10px}
+.gap{height:14px}.gap2{height:34px}
+.btn{display:block;width:100%;height:50px;border:1px solid #0175a2;border-radius:30px;background:#0175a2;color:#fff;font:inherit;font-size:16px;line-height:36px;padding:0 15px;margin-top:-1px;box-shadow:0 1px 0 rgba(0,0,0,.15),inset 0 1px 0 rgba(255,255,255,.1);cursor:pointer}
+.btn:hover{background:#016a93}.btn:disabled{opacity:.7;cursor:default}
+.foot{padding-top:20px}
+.foot a{display:table;margin-top:12px;padding:3px 0;line-height:19.6px}
+.init code{display:block;margin:12px 0;padding:10px;background:#f9f9f9;border:1px solid #ddd;border-radius:3px;color:#1d1d21;font-size:13px;word-break:break-all}
+@media (max-width:600px){.wrap{padding-top:20px}.lang,.card{width:calc(100% - 20px)}.lang .globe{left:auto;right:45px}.lang .code{left:auto;right:16px}.beacon{left:50%;margin-left:-42.5px}.hdr{padding-left:20px;padding-right:20px}}
+.foot .foot-gap{display:table;margin-top:12px;padding:3px 0;line-height:19.6px;visibility:hidden}

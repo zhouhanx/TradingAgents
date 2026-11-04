@@ -201,6 +201,9 @@ async function api(path, options = {}) {
   });
   const data = await response.json().catch(() => ({ error: "响应不是 JSON。" }));
   if (!response.ok) {
+    // V2-AUTH-LOGIN: signed out (or the session expired) / first password change pending.
+    if (response.status === 401 && data.login_required) window.location.assign("/login");
+    if (response.status === 403 && data.must_change) window.location.assign("/login");
     if (response.status === 403 && String(data.error || "").includes(SESSION_REFUSED)) showSessionBanner();
     throw new Error(data.error || "请求失败。");
   }
@@ -3651,9 +3654,9 @@ function accountStateLabel(item) {
 
 function identityText(accounts) {
   const signed = (accounts || []).filter((item) => item.signed_in && !item.read_error);
-  if (!signed.length) return {name: "未登录", title: "还没有登录任何订阅"};
+  if (!signed.length) return {name: "模型服务未登录", title: "还没有登录任何模型服务订阅"};
   return {
-    name: signed.map((item) => authProviderName(item.provider)).join(" · "),
+    name: `模型服务：${signed.map((item) => authProviderName(item.provider)).join(" · ")}`,
     title: signed.map((item) => `${authProviderName(item.provider)}：${item.account}`).join("\n"),
   };
 }
@@ -5252,3 +5255,27 @@ document.addEventListener("change", (event) => {
   const card = event.target && event.target.closest && event.target.closest(".ic-src");
   if (card && event.target.type === "checkbox") card.classList.toggle("ic-src--on", event.target.checked);
 });
+
+// V2-AUTH-LOGIN: the account menu at the bottom left (修改密码 / 退出登录).
+(function setupAccountMenu() {
+  const email = document.querySelector('meta[name="tradingagents-account"]')?.getAttribute("content") || "";
+  const button = document.querySelector("#account-button");
+  const menu = document.querySelector("#account-menu");
+  if (!button || !menu) return;
+  document.querySelector("#account-email").textContent = email;
+  document.querySelector("#account-name").textContent = email;
+  document.querySelector("#account-avatar").textContent = (email[0] || "?").toUpperCase();
+  const close = () => { menu.hidden = true; button.setAttribute("aria-expanded", "false"); };
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    menu.hidden = !menu.hidden;
+    button.setAttribute("aria-expanded", String(!menu.hidden));
+  });
+  document.addEventListener("click", (event) => { if (!menu.contains(event.target)) close(); });
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape") close(); });
+  document.querySelector("#account-logout").addEventListener("click", async (event) => {
+    event.preventDefault();
+    await api("/api/account/logout", {method: "POST", body: "{}"}).catch(() => null);
+    window.location.assign("/login");
+  });
+})();
