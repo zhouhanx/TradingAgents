@@ -56,6 +56,29 @@ class KlineError(ValueError):
     """A request the page should show as a plain message."""
 
 
+RATE_LIMITED = "rate_limited"
+RATE_LIMITED_TEXT = "行情源限流，稍后重试。"
+
+
+class KlineRateLimited(KlineError):
+    """Every source failed and at least one said "too many requests" (V2-WATCHLIST R7)."""
+
+    code = RATE_LIMITED
+
+
+def _rate_limited(exc: BaseException | None) -> bool:
+    """HTTP 429, yfinance's YFRateLimitError, or OKX code 50011 anywhere in the chain."""
+    seen = 0
+    while exc is not None and seen < 8:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status == 429 or type(exc).__name__ == "YFRateLimitError":
+            return True
+        if str(exc).startswith("OKX 50011"):
+            return True
+        exc, seen = exc.__cause__ or exc.__context__, seen + 1
+    return False
+
+
 def clear_cache() -> None:
     with _lock:
         _cache.clear()
@@ -707,16 +730,21 @@ def clear_live_cache() -> None:
 
 
 def live_okx(base: str) -> dict | None:
-    resp = requests.get(OKX_LIVE_URL, params={"instId": f"{base}-USDT", "bar": "1Dutc", "limit": "1"}, timeout=HTTP_TIMEOUT)
+    # Two UTC daily candles: the newest, and the one before it (V2-WATCHLIST 昨收, R1).
+    resp = requests.get(OKX_LIVE_URL, params={"instId": f"{base}-USDT", "bar": "1Dutc", "limit": "2"}, timeout=HTTP_TIMEOUT)
     resp.raise_for_status()
     body = resp.json()
     if str(body.get("code")) != "0":
-        raise RuntimeError(f"OKX: {body.get('msg') or body.get('code')}")
+        raise RuntimeError(f"OKX {body.get('code')}: {body.get('msg') or ''}".strip())
     rows = body.get("data") or []
     if not rows:
         return None
     row = rows[0]
-    return _bar(int(row[0]) // 1000, row[1], row[2], row[3], row[4], row[5])
+    bar = _bar(int(row[0]) // 1000, row[1], row[2], row[3], row[4], row[5])
+    if len(rows) > 1:
+        prev = rows[1]
+        return _with_prev(bar, int(prev[0]) // 1000, prev[4])
+    return bar
 
 
 def live_coinbase(base: str) -> dict | None:
@@ -731,8 +759,12 @@ def live_coinbase(base: str) -> dict | None:
     rows = resp.json()
     if not rows:
         return None
-    t, low, high, op, close, vol = max(rows, key=lambda r: r[0])
-    return _bar(t, op, high, low, close, vol)
+    ordered = sorted(rows, key=lambda r: r[0])
+    t, low, high, op, close, vol = ordered[-1]
+    bar = _bar(t, op, high, low, close, vol)
+    if len(ordered) > 1:
+        return _with_prev(bar, ordered[-2][0], ordered[-2][4])
+    return bar
 
 
 def live_yahoo(canonical: str) -> dict | None:
@@ -747,7 +779,33 @@ def live_yahoo(canonical: str) -> dict | None:
     if any(row.get(k) != row.get(k) for k in ("Open", "High", "Low", "Close")):
         return None
     day = datetime(idx.year, idx.month, idx.day, tzinfo=UTC)
-    return _bar(day.timestamp(), row["Open"], row["High"], row["Low"], row["Close"], row.get("Volume", 0))
+    bar = _bar(day.timestamp(), row["Open"], row["High"], row["Low"], row["Close"], row.get("Volume", 0))
+    if len(frame.index) > 1:
+        pidx, prow = frame.index[-2], frame.iloc[-2]
+        pday = datetime(pidx.year, pidx.month, pidx.day, tzinfo=UTC)
+        return _with_prev(bar, pday.timestamp(), prow.get("Close"))
+    return bar
+
+
+def _with_prev(bar: dict, when, close) -> dict:
+    """The daily candle before ``bar``: its close is the page's 昨收 (V2-WATCHLIST)."""
+    try:
+        number = float(close)
+        stamp = int(float(when))
+    except (TypeError, ValueError):
+        return bar
+    if number != number or number <= 0 or number in (float("inf"), float("-inf")):
+        return bar
+    return {**bar, "prev_close": number, "prev_time": stamp}
+
+
+def _split_prev(bar: dict) -> tuple[dict, float | None, str | None]:
+    """(bar without the previous-candle keys, previous close, previous candle's day)."""
+    bar = dict(bar)
+    close = bar.pop("prev_close", None)
+    when = bar.pop("prev_time", None)
+    day = datetime.fromtimestamp(when, UTC).date().isoformat() if close is not None and when is not None else None
+    return bar, close, day
 
 
 def _live_fetcher(name: str) -> Callable[[str], dict | None]:
@@ -755,12 +813,16 @@ def _live_fetcher(name: str) -> Callable[[str], dict | None]:
 
 
 def live_sina(ident: str) -> dict | None:
-    rows = sina.daily_rows(ident, 1)
+    rows = sina.daily_rows(ident, 2)
     if not rows:
         return None
     r = rows[-1]
     ts = int(datetime.strptime(r["day"], "%Y-%m-%d").replace(tzinfo=UTC).timestamp())
-    return _bar(ts, r["open"], r["high"], r["low"], r["close"], r["volume"])
+    bar = _bar(ts, r["open"], r["high"], r["low"], r["close"], r["volume"])
+    if len(rows) > 1:
+        p = rows[-2]
+        return _with_prev(bar, datetime.strptime(p["day"], "%Y-%m-%d").replace(tzinfo=UTC).timestamp(), p["close"])
+    return bar
 
 
 def _fresher_live(info: dict, yahoo_ident: str, yahoo_bar: dict, errors: list[str]):
@@ -809,12 +871,13 @@ def _latest_intraday(symbol: str, tf: str) -> dict:
     if cached:
         answer = hit[1]
     else:
-        errors, answer = [], None
+        errors, answer, limited = [], None, False
         for name, ident in info["providers"]:
             try:
                 bars = _fetch_intraday(name, ident, info, tf)
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"{name}: {type(exc).__name__}")
+                limited = limited or _rate_limited(exc)
                 continue
             if not bars:
                 errors.append(f"{name}: 无数据")
@@ -828,6 +891,8 @@ def _latest_intraday(symbol: str, tf: str) -> dict:
                       "freshness_note": None, "unpriced_note": skipped, "fetched_at": int(now)}
             break
         if answer is None:
+            if limited:
+                raise KlineRateLimited(RATE_LIMITED_TEXT)
             raise KlineError("暂时拿不到最新行情，稍后会自动重试。")
         with _lock:
             _live_cache[key] = (now, answer)
@@ -863,12 +928,13 @@ def latest(symbol: str, tf: str | None = None) -> dict:
     if cached:
         answer = hit[1]
     else:
-        errors, answer = [], None
+        errors, answer, limited = [], None, False
         for name, ident in info["providers"]:
             try:
                 bar = _live_fetcher(name)(info["base"] if name in ("okx", "coinbase") else ident)
             except Exception as exc:  # noqa: BLE001 - the next provider is the fallback
                 errors.append(f"{name}: {type(exc).__name__}")
+                limited = limited or _rate_limited(exc)
                 continue
             if bar and not _priced_bar(bar):
                 errors.append(f"{name}: 没有正价格")
@@ -880,12 +946,19 @@ def latest(symbol: str, tf: str | None = None) -> dict:
                 if not _priced_bar(bar):
                     errors.append(f"{name}: 没有正价格")
                     continue
+                bar, prev_close, prev_day = _split_prev(bar)
                 ohlc_check.fix_bars([bar], info["canonical"])
                 answer = {"provider": name, "provider_symbol": ident, "bar": bar, "fallback_errors": errors,
-                          "freshness_note": note, "fetched_at": int(now)}
+                          "freshness_note": note, "fetched_at": int(now),
+                          # V2-WATCHLIST: the vendor's daily candle before this one (crypto: the UTC
+                          # day, 北京 08:00) and this candle's own date. None when not returned.
+                          "prev_close": prev_close, "prev_day": prev_day,
+                          "trading_day": _bar_day(bar).isoformat()}
                 break
             errors.append(f"{name}: 无数据")
         if answer is None:
+            if limited:
+                raise KlineRateLimited(RATE_LIMITED_TEXT)
             raise KlineError("暂时拿不到最新行情，稍后会自动重试。")
         with _lock:
             _live_cache[key] = (now, answer)

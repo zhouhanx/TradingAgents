@@ -92,7 +92,7 @@ async function setup(overrides = {}, {html = markup, url = WIZARD_URL} = {}) {
     if (value && value.__status) return {ok: false, status: value.__status, json: async () => structuredClone(value.body)};
     return {ok: true, json: async () => structuredClone(value)};
   };
-  window.eval(`${script}\nwindow.uiTest = {state, showPage, openRunDetail, closeRunDetail, readForm, renderAnalyze, renderRuns, renderAccounts, renderReports, submitAnalysis, resultPanel, renderMarkdown, openSaveDrawer, markScrollableTables, paintHolding, paintReview, nextStepPanel, restartRefusal, restartRefusalHtml, liveSectionTable, analystRequiredHtml, infoItemsHtml, customModelRow, infoAttachHtml, showToast, formNoteHtml, compareCard, infoStatusHtml, paintReplay, modelTable, renderModelChoices};`);
+  window.eval(`${script}\nwindow.uiTest = {state, showPage, openRunDetail, closeRunDetail, readForm, renderAnalyze, renderRuns, renderAccounts, renderReports, submitAnalysis, resultPanel, renderMarkdown, openSaveDrawer, markScrollableTables, paintHolding, paintReview, nextStepPanel, restartRefusal, restartRefusalHtml, liveSectionTable, analystRequiredHtml, infoItemsHtml, customModelRow, infoAttachHtml, showToast, formNoteHtml, compareCard, infoStatusHtml, paintReplay, modelTable, renderModelChoices, api, watchWhen, watchQuoteContext, watchClock};`);
   for (let i = 0; i < 5; i++) await settle();
   const doc = window.document;
   const click = async (selector) => {
@@ -6523,8 +6523,8 @@ test('kline errors, live marks, and fallback headings do not split 老代码 or 
     ui.routes['/api/watchlist'] = () => { throw new Error('列表暂时读不到。'); };
     await ui.click('[data-page=watchlist]');
     const watch = doc.querySelector('.page-description');
-    assert.equal(watch.textContent, '股票、加密货币和贵金属。价格或决定变化只记录触发。观察模式不会自动启动分析。');
-    assert.match(watch.innerHTML, /贵金属。<br class="notice-break">价格或决定变化只记录触发。<br class="notice-break">观察模式不会自动启动分析。/);
+    assert.equal(watch.textContent, '股票、加密货币和贵金属。规则命中时记一条触发并提醒。观察模式不会自动启动分析。');
+    assert.match(watch.innerHTML, /贵金属。<br class="notice-break">规则命中时记一条触发并提醒。<br class="notice-break">观察模式不会自动启动分析。/);
 
     ui.routes['/api/schedule/tick'] = () => { throw new Error('定时暂时读不到。'); };
     await ui.click('[data-page=schedule]');
@@ -7142,4 +7142,354 @@ test('compare shows two finished runs with sections and replays across pages', a
     assert.match(ui.doc.querySelector('.compare-step').textContent, /组合经理/);
     assert.ok(ui.doc.querySelectorAll('.compare-prompts li').length >= 12);
   } finally { ui.dom.window.close(); }
+});
+
+test('V2-WATCHLIST R7: api() keeps the HTTP status and the server code on a failure', async () => {
+  const ui = await setup({
+    '/api/kline/latest': {__status: 429, body: {error: '行情源限流，稍后重试。', code: 'rate_limited'}},
+    '/api/fixture-bad': {__status: 400, body: {error: '不支持的代码。'}},
+  });
+  try {
+    const limited = await ui.ui.api('/api/kline/latest?symbol=NVDA').catch((error) => error);
+    assert.equal(limited.status, 429);
+    assert.equal(limited.code, 'rate_limited');
+    assert.equal(limited.message, '行情源限流，稍后重试。');
+    const bad = await ui.ui.api('/api/fixture-bad').catch((error) => error);
+    assert.equal(bad.status, 400);
+    assert.equal(bad.code, undefined);
+  } finally { ui.dom.window.close(); }
+});
+
+// ---- V2-WATCHLIST W4: rules column, price labels, rule drawer, 查看全部 (Proto mock v1).
+const WL_RULES = {
+  NVDA: [
+    {id: 'r1', kind: 'above', value: 190, enabled: true, state: 'hit', label: '高于 190.00', chip: '高于 190.00', state_label: '已触发（北京 11-13 22:40）。价格回到 190.00 以下后重新生效。'},
+    {id: 'r2', kind: 'pct', value: 3, enabled: true, state: 'armed', label: '涨跌 ≥ 3%（较昨收）', chip: '涨跌 ≥ 3%', state_label: '生效中。'},
+    {id: 'r3', kind: 'win', value: 1.5, enabled: false, state: 'off', label: '一个刷新间隔内涨跌 ≥ 1.5%', chip: '间隔内涨跌 ≥ 1.5%', state_label: '已停用。'},
+  ],
+  XAUUSD: [{id: 'r4', kind: 'pct', value: 1, enabled: true, state: 'today', label: '涨跌 ≥ 1%（较昨收）', chip: '涨跌 ≥ 1%', state_label: '已触发（北京 11-12 23:15）。同一方向每个交易日只提醒一次，下个交易日重新生效。'}],
+};
+
+function wlItems() {
+  return [
+    {symbol: 'NVDA', asset_label: '股票', asset_type: 'stock', market: 'us', enabled: true, last_price: 190.62, change_pct: 2.39, delayed: true,
+      quote_at: '2026-11-13T14:40:05+00:00', trading_day: '2099-01-01', rules: WL_RULES.NVDA, rule_cap: 5, at_cap: false},
+    {symbol: 'BTC-USDT', asset_label: '加密货币', asset_type: 'crypto', market: 'crypto', enabled: true, last_price: 91240.5, change_pct: -2.35, delayed: false,
+      quote_at: '2026-11-13T14:35:04+00:00', trading_day: '2026-11-13', rules: [], rule_cap: 5, at_cap: false},
+    {symbol: 'XAUUSD', asset_label: '贵金属/商品期货', asset_type: 'commodity', market: 'commodity', enabled: true, last_price: 4082.6, change_pct: 0.42, delayed: true,
+      quote_at: '2026-11-13T14:35:04+00:00', trading_day: '2026-11-13', rules: WL_RULES.XAUUSD, rule_cap: 5, at_cap: false},
+    {symbol: '600519', asset_label: '股票', asset_type: 'stock', market: 'cn', enabled: true, last_price: 1452, change_pct: -0.65, delayed: true,
+      quote_at: '2026-11-13T07:01:00+00:00', trading_day: '2026-11-12', rules: [], rule_cap: 5, at_cap: false},
+  ];
+}
+
+function wlData(extra = {}) {
+  return {mode: 'observe', mode_label: '观察', rule_version: 'watch-1', note: '', items: wlItems(), triggers: [], visible_triggers: [],
+    poll_minutes: 5, poll_stored: false, has_rules: true, rule_cap: 5, unseen_count: 0, trigger_total: 0, ...extra};
+}
+
+test('V2-WATCHLIST: the table shows rules, the hit row, change labels and the Beijing fetch time; no UTC', async () => {
+  const ui = await setup({'/api/watchlist': wlData(), '/api/watchlist/seen': wlData()});
+  try {
+    await ui.click('[data-page=watchlist]');
+    const head = [...ui.doc.querySelectorAll('.watch-table th')].map((node) => node.textContent);
+    assert.deepEqual(head, ['代码', '最近价格', '提醒规则', '操作']);
+    const rows = [...ui.doc.querySelectorAll('.watch-table tbody tr')];
+    assert.equal(rows.length, 4);
+    assert.ok(rows[0].classList.contains('wl-row--hit'));
+    assert.equal(rows[0].querySelector('.status-badge--alert').textContent, '已触发');
+    assert.deepEqual([...rows[0].querySelectorAll('.wl-chip')].map((node) => node.textContent), ['高于 190.00', '涨跌 ≥ 3%', '间隔内涨跌 ≥ 1.5%']);
+    assert.ok(rows[0].querySelector('.wl-chip--hit') && rows[0].querySelector('.wl-chip--off'));
+    assert.equal(rows[0].querySelector('[data-watch-rules]').textContent, '提醒规则');
+    assert.match(rows[0].textContent, /190\.62 \+2\.39%延迟较昨收 · 取价 北京 22:40/);
+    assert.equal(rows[1].querySelector('.wl-meta').textContent, '较昨收（北京 08:00） · 取价 北京 22:35');
+    assert.equal(rows[1].querySelector('.wl-none').textContent, '还没有规则');
+    assert.equal(rows[1].querySelector('[data-watch-rules]').textContent, '添加规则');
+    assert.equal(rows[1].querySelector('.wl-tag'), null);
+    assert.equal(rows[2].querySelector('.wl-chip--wait').textContent, '涨跌 ≥ 1% · 今天已提醒');
+    assert.equal(rows[2].querySelector('.wl-meta').textContent, '较昨收 · 取价 北京 22:35');
+    // R3: an A-share price from an earlier trading day is that day's close.
+    assert.equal(rows[3].querySelector('.wl-meta').textContent, '较前一交易日收盘 · 收盘价 · 北京 11-12 15:00');
+    assert.doesNotMatch(ui.doc.querySelector('#page').textContent, /UTC/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('V2-WATCHLIST R3: close and session labels follow each market clock', async () => {
+  const ui = await setup();
+  try {
+    const ctx = ui.ui.watchQuoteContext;
+    const cn = {market: 'cn', asset_type: 'stock', trading_day: '2026-11-13'};
+    assert.deepEqual([ctx(cn, new Date('2026-11-13T03:00:00Z')).label, ctx(cn, new Date('2026-11-13T03:00:00Z')).closed], ['较昨收', false]);
+    const after = ctx(cn, new Date('2026-11-13T08:00:00Z'));
+    assert.equal(after.closed, true);
+    assert.equal(ui.ui.watchClock(after.closeAt), '15:00');
+    const preOpen = ctx(cn, new Date('2026-11-16T00:30:00Z'));  // Monday 08:30 Beijing, Friday's bar
+    assert.equal(preOpen.label, '较前一交易日收盘');
+    const us = ctx({market: 'us', asset_type: 'stock', trading_day: '2026-11-13'}, new Date('2026-11-13T22:00:00Z'));
+    assert.equal(us.closed, true);
+    assert.equal(ui.ui.watchClock(us.closeAt), '05:00');  // 16:00 New York (EST) is 05:00 Beijing
+    const summer = ctx({market: 'us', asset_type: 'stock', trading_day: '2026-07-01'}, new Date('2026-07-01T21:00:00Z'));
+    assert.equal(ui.ui.watchClock(summer.closeAt), '04:00');  // EDT
+    assert.equal(ctx({market: 'crypto', asset_type: 'crypto', trading_day: '2026-11-12'}).label, '较昨收（北京 08:00）');
+  } finally { ui.dom.window.close(); }
+});
+
+test('V2-WATCHLIST R9: watchWhen is Beijing time even when the browser runs in New York', async () => {
+  const before = process.env.TZ;
+  process.env.TZ = 'America/New_York';
+  const ui = await setup();
+  try {
+    assert.equal(new Date('2026-11-13T14:40:00Z').getHours(), 9);  // the zone really changed
+    assert.equal(ui.ui.watchWhen('2026-11-13T14:40:00+00:00'), '11-13 22:40');
+    assert.equal(ui.ui.watchWhen('2026-11-13T17:05:00Z'), '11-14 01:05');
+    assert.equal(ui.ui.watchWhen('not a time'), '');
+  } finally {
+    ui.dom.window.close();
+    if (before === undefined) delete process.env.TZ; else process.env.TZ = before;
+  }
+});
+
+test('V2-WATCHLIST: the rule drawer lists rules, validates, saves and stops at five', async () => {
+  const posts = [];
+  let data = wlData();
+  const ui = await setup({
+    '/api/watchlist': () => data,
+    '/api/watchlist/seen': () => data,
+    '/api/watchlist/rules': (options) => {
+      const body = JSON.parse(options.body);
+      posts.push(body);
+      if (body.op === 'add' && body.value === 3) return {__status: 400, body: {error: '已有一条「涨跌 ≥ 3%（较昨收）」，不用重复加。', code: 'duplicate'}};
+      if (body.op === 'add') {
+        data = structuredClone(data);
+        const item = data.items[0];
+        item.rules = item.rules.concat([{id: 'r9', kind: body.kind, value: body.value, enabled: true, state: 'armed', label: '低于 180.00', chip: '低于 180.00', state_label: '生效中。'},
+          {id: 'r10', kind: 'below', value: 170, enabled: true, state: 'armed', label: '低于 170.00', chip: '低于 170.00', state_label: '生效中。'}]);
+        item.at_cap = true;
+      }
+      return data;
+    },
+  });
+  try {
+    await ui.click('[data-page=watchlist]');
+    await ui.click('[data-watch-rules="NVDA"]');
+    const drawer = () => ui.doc.querySelector('.rule-drawer');
+    assert.equal(ui.doc.querySelector('#rule-drawer-title').textContent, 'NVDA 提醒规则');
+    assert.match(drawer().querySelector('.rule-now').textContent, /现价 190\.62 \+2\.39% 较昨收 · 取价 北京 22:40 · 可能延迟/);
+    const items = [...drawer().querySelectorAll('.rule-item')];
+    assert.equal(items.length, 3);
+    assert.equal(items[0].querySelector('.rule-state').textContent, '已触发（北京 11-13 22:40）。价格回到 190.00 以下后重新生效。');
+    assert.equal(items[2].querySelector('[role=switch]').getAttribute('aria-checked'), 'false');
+    // Editing to -5 is refused before any request.
+    await ui.click('[data-rule-edit="r1"]');
+    ui.fill('#rule-edit-value', '-5');
+    await ui.click('#rule-edit-save');
+    assert.equal(drawer().querySelector('.rule-item--editing .rule-err').textContent, '请输入大于 0 的价格。');
+    assert.ok(drawer().querySelector('#rule-edit-value').classList.contains('bad'));
+    assert.equal(posts.length, 0);
+    await ui.click('#rule-edit-cancel');
+    // A duplicate is refused by the server with its own text.
+    await ui.click('[data-rule-kinds="add"] [data-rule-kind="pct"]');
+    ui.fill('#rule-add-value', '3');
+    assert.equal(drawer().querySelector('#rule-preview').textContent, '较昨收涨或跌 3% 及以上时提醒。同一方向每个交易日只提醒一次。');
+    assert.equal(drawer().querySelector('.unit').textContent, '%（较昨收，涨或跌都算）');
+    await ui.click('#rule-add');
+    assert.equal(drawer().querySelector('.rule-err').textContent, '已有一条「涨跌 ≥ 3%（较昨收）」，不用重复加。');
+    assert.deepEqual(posts.at(-1), {symbol: 'NVDA', op: 'add', kind: 'pct', value: 3});
+    await ui.click('[data-rule-kinds="add"] [data-rule-kind="below"]');
+    assert.equal(drawer().querySelector('.unit').textContent, '美元');
+    ui.fill('#rule-add-value', '180');
+    assert.equal(drawer().querySelector('#rule-preview').textContent, '价格跌到 180.00 或以下时提醒一次。回到 180.00 以上后重新生效。');
+    await ui.click('#rule-add');
+    // R11: at five rules 添加规则 is disabled with the cap beside it.
+    assert.equal(drawer().querySelectorAll('.rule-item').length, 5);
+    const add = drawer().querySelector('#rule-add');
+    assert.equal(add.disabled, true);
+    assert.equal(add.textContent, '添加规则');
+    assert.equal(add.nextElementSibling.textContent, '每个代码最多 5 条');
+    assert.ok(add.nextElementSibling.classList.contains('form-hint'));
+    assert.equal(drawer().querySelector('#rule-add-value'), null);
+    assert.equal(ui.doc.querySelectorAll('.watch-table tbody tr')[0].querySelectorAll('.wl-chip').length, 5);
+    await ui.click('#rule-drawer-done');
+    assert.equal(drawer(), null);
+  } finally { ui.dom.window.close(); }
+});
+
+test('V2-WATCHLIST R6: twenty triggers, then 查看全部 with the drawer link style; new hits have a dot', async () => {
+  const triggers = Array.from({length: 25}, (_, i) => ({id: `t${i}`, symbol: 'NVDA', kind: 'rule', text: `高于 ${i}.00 · 现价 ${i + 1}.00`,
+    created_at: `2026-11-13T14:${String(i).padStart(2, '0')}:00+00:00`, checked: false, status_label: '未检查', unseen: i >= 23}));
+  const visible = triggers.slice(-20).reverse();
+  const ui = await setup({'/api/watchlist': wlData({triggers, visible_triggers: visible, trigger_total: 25}), '/api/watchlist/seen': wlData()});
+  try {
+    await ui.click('[data-page=watchlist]');
+    assert.equal(ui.doc.querySelectorAll('.watch-triggers li').length, 20);
+    const first = ui.doc.querySelector('.watch-triggers li');
+    assert.ok(first.classList.contains('wl-log-hit') && first.querySelector('.wl-new'));
+    assert.match(first.textContent, /NVDA 高于 24\.00 · 现价 25\.00 11-13 22:24/);
+    const more = ui.doc.querySelector('#watch-triggers-all');
+    assert.equal(more.textContent, '查看全部（25 条）');
+    assert.ok(more.classList.contains('link-button'));
+    await ui.click('#watch-triggers-all');
+    assert.equal(ui.doc.querySelectorAll('.watch-triggers li').length, 25);
+    await ui.click('#watch-triggers-less');
+    assert.equal(ui.doc.querySelectorAll('.watch-triggers li').length, 20);
+  } finally { ui.dom.window.close(); }
+});
+
+test('V2-WATCHLIST: no symbols shows the empty state; a price reminder on 定时 carries 自选', async () => {
+  const ui = await setup({
+    '/api/watchlist': wlData({items: [], has_rules: false, poll_minutes: 0}),
+    '/api/watchlist/seen': wlData({items: []}),
+    '/api/schedule/tick': {schedules: [], checks: [], mode: 'observe', mode_label: '观察', rule_version: 'sched-1', reminders: [
+      {id: 'rule|NVDA|r1#1', kind: 'price', symbol: 'NVDA', body: 'NVDA 高于 190.00，现价 190.62（北京 11-13 22:40）', status: 'sent'},
+      {id: 'decision|NVDA', kind: 'decision', symbol: 'NVDA', body: 'NVDA 的决定从 持有 变为 买入。', status: 'sent'}]},
+  });
+  try {
+    await ui.click('[data-page=watchlist]');
+    assert.match(ui.doc.querySelector('.wl-empty').textContent, /^还没有自选在上面输入代码加入/);
+    await ui.click('[data-page=schedule]');
+    const rows = [...ui.doc.querySelectorAll('.schedule-reminders li')];
+    assert.equal(rows[0].querySelector('.wl-tag').textContent, '自选');
+    assert.match(rows[0].textContent, /^自选NVDA 高于 190\.00，现价 190\.62（北京 11-13 22:40）/);
+    assert.equal(rows[1].querySelector('.wl-tag'), null);
+  } finally { ui.dom.window.close(); }
+});
+
+// ---- V2-WATCHLIST W5: auto refresh, rate limits, alert toast and the 自选 badge.
+function wlLatest(price, extra = {}) {
+  return {bar: {close: price, time: 1794528000}, prev_close: price * 0.98, trading_day: '2026-11-13', fetched_at: 1794580000, delayed: true, ...extra};
+}
+
+test('V2-WATCHLIST R10/R7: one request at a time, stop at the first 429, back off 2/4/8/15 minutes', async () => {
+  const asked = [];
+  let inFlight = 0;
+  let most = 0;
+  const posted = [];
+  const ui = await setup({
+    '/api/watchlist': wlData(),
+    '/api/watchlist/refresh': (options) => { posted.push(JSON.parse(options.body)); return wlData(); },
+    '/api/kline/latest': async (options, path) => {
+      const symbol = new URL(path, 'http://x').searchParams.get('symbol');
+      asked.push(symbol);
+      inFlight += 1; most = Math.max(most, inFlight);
+      await new Promise((done) => setImmediate(done));
+      inFlight -= 1;
+      if (symbol === 'BTC-USDT') return {__status: 429, body: {error: '行情源限流，稍后重试。', code: 'rate_limited'}};
+      return wlLatest(190.62);
+    },
+  });
+  try {
+    await ui.click('[data-page=watchlist]');
+    await ui.click('#watch-refresh');
+    for (let i = 0; i < 20; i++) await settle();
+    assert.deepEqual(asked, ['NVDA', 'BTC-USDT']);
+    assert.equal(most, 1);
+    assert.deepEqual(Object.keys(posted[0].quotes), ['NVDA']);
+    assert.deepEqual(posted[0].quotes.NVDA, {price: 190.62, prev_close: 190.62 * 0.98, trading_day: '2026-11-13', fetched_at: 1794580000, delayed: true});
+    const rows = [...ui.doc.querySelectorAll('.watch-table tbody tr')];
+    for (const row of rows.slice(1)) {
+      assert.match(row.querySelector('.wl-meta').textContent, /限流，稍后重试$/);
+      assert.equal(row.querySelector('.wl-tag').textContent, '旧价');
+    }
+    const status = ui.doc.querySelector('.wl-status');
+    assert.ok(status.classList.contains('wl-status--warn'));
+    assert.match(status.textContent, /已暂停：行情源限流/);
+    assert.match(ui.doc.querySelector('#watch-error').textContent, /BTC-USDT、XAUUSD、600519 这次没拿到最新价：行情源限流。表里是上次的价格，不拿旧价判断规则。/);
+    const poll = ui.ui.state.watchPoll;
+    const waits = [];
+    waits.push(Math.round((poll.retryAt - poll.lastAt) / 60000));
+    for (let i = 0; i < 4; i++) {
+      await ui.click('#watch-refresh');
+      for (let k = 0; k < 20; k++) await settle();
+      waits.push(Math.round((poll.retryAt - poll.lastAt) / 60000));
+    }
+    assert.deepEqual(waits, [2, 4, 8, 15, 15]);
+    assert.match(status.ownerDocument.querySelector('.wl-status').textContent, /\d\d:\d\d 自动重试/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('V2-WATCHLIST R10: at most 30 symbols per refresh', async () => {
+  const many = Array.from({length: 35}, (_, i) => ({symbol: `S${i}`, asset_label: '股票', asset_type: 'stock', market: 'us', enabled: true, last_price: 10, rules: []}));
+  const asked = [];
+  const ui = await setup({
+    '/api/watchlist': wlData({items: many}),
+    '/api/watchlist/refresh': () => wlData({items: many}),
+    '/api/kline/latest': (options, path) => { asked.push(path); return wlLatest(11); },
+  });
+  try {
+    await ui.click('[data-page=watchlist]');
+    await ui.click('#watch-refresh');
+    for (let i = 0; i < 80; i++) await settle();
+    assert.equal(asked.length, 30);
+    assert.match(ui.doc.querySelector('#watch-error').textContent, /自选超过 30 个，这次只刷新前 30 个。/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('V2-WATCHLIST: a refresh with hits shows one 「!」 toast; the 自选 badge counts unseen hits and clears on the page', async () => {
+  const fired = [{id: 'a', symbol: 'NVDA', label: '高于 190.00', text: 'NVDA 高于 190.00'}, {id: 'b', symbol: 'BTC-USDT', label: '低于 90000.0', text: 'BTC-USDT 低于 90000.0'}];
+  let unseen = 0;
+  const seen = [];
+  const ui = await setup({
+    '/api/watchlist': () => wlData({unseen_count: unseen}),
+    '/api/watchlist/refresh': () => { unseen = 2; return wlData({fired, unseen_count: 2}); },
+    '/api/watchlist/seen': () => { seen.push(1); unseen = 0; return wlData({unseen_count: 0}); },
+    '/api/kline/latest': () => wlLatest(190.62),
+  });
+  try {
+    await ui.click('[data-page=watchlist]');
+    ui.ui.state.page = 'runs';  // a hit while another page is open
+    await ui.window.eval('runWatchRefresh({manual: false})');
+    for (let i = 0; i < 20; i++) await settle();
+    const toast = ui.doc.querySelector('#toast-host .toast');
+    assert.ok(toast.classList.contains('toast--alert'));
+    assert.equal(toast.querySelector('.ck').textContent, '!');
+    assert.equal(toast.textContent.replace('!', ''), '2 条提醒：NVDA 高于 190.00，BTC-USDT 低于 90000.0');
+    const badge = ui.doc.querySelector('.nav-item[data-page="watchlist"] .nav-badge');
+    assert.equal(badge.textContent, '2');
+    assert.equal(badge.getAttribute('aria-label'), '2 条新提醒');
+    await ui.click('[data-page=watchlist]');
+    assert.equal(seen.length, 1);
+    assert.equal(ui.doc.querySelector('.nav-item[data-page="watchlist"] .nav-badge'), null);
+  } finally { ui.dom.window.close(); }
+});
+
+test('V2-WATCHLIST R2: the status line and choice follow rules; the choice is saved; hidden pauses', async () => {
+  const polls = [];
+  let data = wlData({poll_minutes: 5});
+  const ui = await setup({
+    '/api/watchlist': () => data,
+    '/api/watchlist/poll': (options) => { const body = JSON.parse(options.body); polls.push(body.minutes); data = wlData({poll_minutes: body.minutes, poll_stored: true}); return data; },
+  });
+  try {
+    await ui.click('[data-page=watchlist]');
+    const on = () => ui.doc.querySelector('#watch-poll .seg-item.on').textContent;
+    assert.equal(on(), '5 分钟');
+    assert.match(ui.doc.querySelector('.wl-status').textContent, /^自动刷新中 · 每 5 分钟上次 北京 22:40:05下次 \d\d:\d\d$/);
+    assert.match(ui.doc.querySelector('#watch-poll-hint').textContent, /只在控制台页面开着时刷新/);
+    await ui.click('[data-poll="0"]');
+    assert.deepEqual(polls, [0]);
+    assert.equal(on(), '关');
+    assert.match(ui.doc.querySelector('.wl-status').textContent, /^自动刷新已关/);
+    assert.equal(ui.ui.state.watchPoll.timer, null);
+    await ui.click('[data-poll="1"]');
+    assert.ok(ui.ui.state.watchPoll.timer);
+    Object.defineProperty(ui.doc, 'visibilityState', {value: 'hidden', configurable: true});
+    ui.doc.dispatchEvent(new ui.window.Event('visibilitychange'));
+    assert.match(ui.doc.querySelector('.wl-status').textContent, /已暂停：页面在后台.*回到页面后马上刷新一次/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('V2-WATCHLIST: no enabled rules says auto refresh only updates prices; no symbols disables everything', async () => {
+  const ui = await setup({'/api/watchlist': wlData({has_rules: false, poll_minutes: 0, items: wlItems().map((item) => ({...item, rules: []}))})});
+  try {
+    await ui.click('[data-page=watchlist]');
+    assert.equal(ui.doc.querySelector('#watch-poll-hint').textContent, '还没有启用的规则。打开自动刷新也只会更新价格，不会提醒。');
+    assert.equal(ui.doc.querySelector('#watch-poll .seg-item.on').textContent, '关');
+  } finally { ui.dom.window.close(); }
+  const empty = await setup({'/api/watchlist': wlData({items: [], has_rules: false, poll_minutes: 0})});
+  try {
+    await empty.click('[data-page=watchlist]');
+    assert.equal(empty.doc.querySelector('.wl-status').textContent, '还没有自选，不会刷新。');
+    assert.ok([...empty.doc.querySelectorAll('#watch-poll .seg-item')].every((node) => node.disabled));
+    assert.equal(empty.doc.querySelector('#watch-refresh').disabled, true);
+  } finally { empty.dom.window.close(); }
 });

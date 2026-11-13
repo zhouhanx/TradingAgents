@@ -1,9 +1,28 @@
 """V2-WATCHLIST: price and decision changes are triggers, not automatic runs."""
 
 import json
+import time
 from pathlib import Path
 
 from webui import watchlist
+
+_CLOCK = [0.0]
+
+
+def _quote(price):
+    """A fetched quote newer than any rule made so far in the test (R2: only a fresh quote fires).
+
+    Taken from the clock at call time: a full run imports this module minutes before it runs.
+    """
+    _CLOCK[0] = max(_CLOCK[0] + 1, time.time() + 60)
+    return {"price": price, "fetched_at": _CLOCK[0]}
+
+
+def _rule_hit(root, symbol):
+    """R4: a price trigger now needs a rule. 高于 11, then 10 -> 12 fires it once."""
+    watchlist.change_rule({"symbol": symbol, "op": "add", "kind": "above", "value": 11}, root)
+    watchlist.refresh({symbol: _quote(10)}, root)
+    return watchlist.refresh({symbol: _quote(12)}, root)
 
 
 def test_add_remove_and_duplicate(tmp_path):
@@ -22,17 +41,19 @@ def test_add_remove_and_duplicate(tmp_path):
     assert emptied["items"] == []
 
 
-def test_price_change_is_one_trigger_and_does_not_start(tmp_path):
+def test_price_change_alone_is_not_a_trigger_and_a_rule_hit_is_one(tmp_path):
+    # R4: before V2-WATCHLIST rules every price change was a trigger; now only a rule hit is.
     watchlist.add_symbol("600519", tmp_path)
-    first = watchlist.refresh({"600519": 10}, tmp_path)
-    assert first["triggers"] == []
-    second = watchlist.refresh({"600519": 12}, tmp_path)
+    assert watchlist.refresh({"600519": 10}, tmp_path)["triggers"] == []
+    assert watchlist.refresh({"600519": 12}, tmp_path)["triggers"] == []
+    second = _rule_hit(tmp_path, "600519")
     assert len(second["triggers"]) == 1
+    assert second["triggers"][0]["kind"] == "rule"
     assert second["triggers"][0]["started"] is False
     assert second["triggers"][0]["run_id"] is None
-    again = watchlist.refresh({"600519": 12.0}, tmp_path)
+    again = watchlist.refresh({"600519": _quote(12.0)}, tmp_path)
     assert len(again["triggers"]) == 1
-    watchlist.refresh({"600519": 12}, tmp_path)
+    watchlist.refresh({"600519": _quote(12)}, tmp_path)
     assert len(watchlist.list_watch(tmp_path)["triggers"]) == 1
 
 
@@ -55,8 +76,7 @@ def test_decision_change_is_one_trigger_and_matches_canonical_symbol(tmp_path):
 
 def test_kline_open_does_not_consume_trigger(tmp_path):
     watchlist.add_symbol("NVDA", tmp_path)
-    watchlist.refresh({"NVDA": 1}, tmp_path)
-    watchlist.refresh({"NVDA": 2}, tmp_path)
+    _rule_hit(tmp_path, "NVDA")
     opened = watchlist.open_kline("NVDA", tmp_path)
     assert opened == {"action": "kline", "symbol": "NVDA", "consumed_trigger": False}
     assert len(watchlist.list_watch(tmp_path)["triggers"]) == 1
@@ -73,8 +93,7 @@ def test_explicit_analyze_records_one_trigger_per_rule(tmp_path):
 
 def test_observe_mode_refuses_start_and_auto_admits_once_without_a_run(tmp_path):
     watchlist.add_symbol("600519", tmp_path)
-    watchlist.refresh({"600519": 10}, tmp_path)
-    changed = watchlist.refresh({"600519": 12}, tmp_path)
+    changed = _rule_hit(tmp_path, "600519")
     trigger_id = changed["triggers"][0]["id"]
     refused = watchlist.admit("600519", trigger_id, tmp_path)
     assert refused["allowed"] is False
@@ -94,7 +113,7 @@ def test_observe_mode_refuses_start_and_auto_admits_once_without_a_run(tmp_path)
     assert len(json.loads(path.read_text(encoding="utf-8"))["admissions"]) == 1
 
     data = json.loads(path.read_text(encoding="utf-8"))
-    data["items"][0]["last_price"] = 13
+    data["items"][0]["last_price"] = 10  # back under the 高于 11 rule
     data["admissions"] = []
     path.write_text(json.dumps(data), encoding="utf-8")
     stale = watchlist.admit("600519", trigger_id, tmp_path)
@@ -239,8 +258,7 @@ def test_stored_non_positive_price_is_not_published(tmp_path):
 
 def test_unchecked_trigger_is_not_called_started(tmp_path):
     watchlist.add_symbol("NVDA", tmp_path)
-    watchlist.refresh({"NVDA": 1}, tmp_path)
-    changed = watchlist.refresh({"NVDA": 2}, tmp_path)
+    changed = _rule_hit(tmp_path, "NVDA")
     row = changed["triggers"][0]
     assert row["status_label"] == "未检查"
     assert row["checked"] is False
@@ -250,8 +268,7 @@ def test_unchecked_trigger_is_not_called_started(tmp_path):
 
 def test_observe_check_is_visible_and_does_not_block_a_later_admission(tmp_path):
     watchlist.add_symbol("AAPL", tmp_path)
-    watchlist.refresh({"AAPL": 1}, tmp_path)
-    changed = watchlist.refresh({"AAPL": 2}, tmp_path)
+    changed = _rule_hit(tmp_path, "AAPL")
     ident = changed["triggers"][0]["id"]
     refused = watchlist.admit("AAPL", ident, tmp_path)
     assert refused["allowed"] is False
@@ -279,8 +296,7 @@ def test_observe_check_is_visible_and_does_not_block_a_later_admission(tmp_path)
 
 def test_start_flag_without_a_run_is_not_published_as_started(tmp_path):
     watchlist.add_symbol("600519", tmp_path)
-    watchlist.refresh({"600519": 10}, tmp_path)
-    watchlist.refresh({"600519": 12}, tmp_path)
+    _rule_hit(tmp_path, "600519")
     path = tmp_path / "watchlist.json"
     data = json.loads(path.read_text(encoding="utf-8"))
     data["triggers"][0]["started"] = True
@@ -319,8 +335,7 @@ def test_start_flag_without_a_run_is_not_published_as_started(tmp_path):
 
 def test_older_checked_trigger_is_not_hidden_by_newer_rows(tmp_path):
     watchlist.add_symbol("600519", tmp_path)
-    watchlist.refresh({"600519": 10}, tmp_path)
-    changed = watchlist.refresh({"600519": 12}, tmp_path)
+    changed = _rule_hit(tmp_path, "600519")
     ident = changed["triggers"][0]["id"]
     path = tmp_path / "watchlist.json"
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -332,7 +347,7 @@ def test_older_checked_trigger_is_not_hidden_by_newer_rows(tmp_path):
         "started": False,
         "run_id": None,
     }]
-    for index in range(6):
+    for index in range(21):  # R6: the recent window is twenty rows
         data["triggers"].append({
             "id": f"extra-{index}",
             "symbol": "600519",
@@ -340,7 +355,7 @@ def test_older_checked_trigger_is_not_hidden_by_newer_rows(tmp_path):
             "rule_version": "watch-1",
             "old_value": index,
             "new_value": index + 1,
-            "created_at": f"2026-11-11T00:0{index}:00+00:00",
+            "created_at": f"2026-11-11T00:{index:02d}:00+00:00",
             "started": True,
             "run_id": f"run-{index}",
         })
@@ -353,7 +368,7 @@ def test_older_checked_trigger_is_not_hidden_by_newer_rows(tmp_path):
     assert visible[ident]["started"] is False
     assert "extra-0" not in visible
     assert visible_ids[-1] == ident
-    assert visible_ids[0] == "extra-5"
+    assert visible_ids[0] == "extra-20"
     assert all(item["status_label"] == "未检查" for item in visible.values() if item["id"] != ident)
     assert all(item["started"] is False for item in view["triggers"])
 
@@ -420,7 +435,7 @@ def test_explicit_click_stays_visible_outside_the_recent_window(tmp_path):
     clicked = watchlist.explicit_analyze("600519", tmp_path)
     path = tmp_path / "watchlist.json"
     data = json.loads(path.read_text(encoding="utf-8"))
-    for index in range(6):
+    for index in range(21):  # R6: the recent window is twenty rows
         data["triggers"].append({
             "id": f"extra-{index}",
             "symbol": "600519",
@@ -428,7 +443,7 @@ def test_explicit_click_stays_visible_outside_the_recent_window(tmp_path):
             "rule_version": "watch-1",
             "old_value": index,
             "new_value": index + 1,
-            "created_at": f"2026-11-11T00:0{index}:00+00:00",
+            "created_at": f"2026-11-11T00:{index:02d}:00+00:00",
             "started": True,
             "run_id": f"run-{index}",
         })
@@ -464,8 +479,7 @@ def test_disabled_item_is_labeled_stopped_and_not_enabled(tmp_path):
 
 def test_non_observe_mode_is_not_called_observe(tmp_path):
     watchlist.add_symbol("MSFT", tmp_path)
-    watchlist.refresh({"MSFT": 10}, tmp_path)
-    changed = watchlist.refresh({"MSFT": 12}, tmp_path)
+    changed = _rule_hit(tmp_path, "MSFT")
     path = tmp_path / "watchlist.json"
     data = json.loads(path.read_text(encoding="utf-8"))
     data["mode"] = "off"
@@ -484,8 +498,7 @@ def test_non_observe_mode_is_not_called_observe(tmp_path):
 
 def test_blank_watch_mode_is_not_called_observe(tmp_path):
     watchlist.add_symbol("600519", tmp_path)
-    watchlist.refresh({"600519": 10}, tmp_path)
-    changed = watchlist.refresh({"600519": 12}, tmp_path)
+    changed = _rule_hit(tmp_path, "600519")
     path = tmp_path / "watchlist.json"
     data = json.loads(path.read_text(encoding="utf-8"))
     data["mode"] = ""

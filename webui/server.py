@@ -448,6 +448,9 @@ class Handler(BaseHTTPRequestHandler):
                 decisions=body.get("decisions") if isinstance(body.get("decisions"), dict) else None,
                 observe_local=not isinstance(body.get("decisions"), dict),
             ),
+            "/api/watchlist/rules": lambda: watchlist.change_rule(body),
+            "/api/watchlist/poll": lambda: watchlist.set_poll(body.get("minutes")),
+            "/api/watchlist/seen": lambda: watchlist.mark_seen(),
             "/api/watchlist/kline": lambda: watchlist.open_kline(body.get("symbol")),
             "/api/watchlist/analyze": lambda: watchlist.explicit_analyze(body.get("symbol")),
             "/api/schedule": lambda: schedule.create_schedule(body.get("symbol"), body.get("at")),
@@ -504,7 +507,7 @@ class Handler(BaseHTTPRequestHandler):
         except service.ConsoleError as exc:
             self._json({"error": str(exc)}, exc.status)
         except watchlist.WatchlistError as exc:
-            self._json({"error": str(exc)}, exc.status)
+            self._json({"error": str(exc), **({"code": exc.code} if exc.code else {})}, exc.status)
         except schedule.ScheduleError as exc:
             self._json({"error": str(exc)}, exc.status)
         except cost.CostError as exc:
@@ -642,6 +645,9 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             self._json(kline_data.latest(symbol, tf or None))
+        except kline_data.KlineRateLimited as exc:
+            # V2-WATCHLIST R7: the page backs off on this code, not on the text.
+            self._json({"error": str(exc), "code": kline_data.RATE_LIMITED}, 429)
         except kline_data.KlineError as exc:
             self._json({"error": str(exc)}, 400)
 
@@ -769,7 +775,7 @@ def _schedule_tick(body: dict) -> dict:
     if raw:
         moment = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
     events = body.get("events") if isinstance(body.get("events"), list) else None
-    return schedule.tick(moment, events=events, observe_local=events is None)
+    return schedule.tick(moment, events=events, observe_local=events is None, enable_local=events is None)
 
 
 def _run_id(body: dict) -> str:
@@ -848,7 +854,9 @@ SCHEDULE_TICK_EVERY = 60.0
 def tick_open_schedules() -> None:
     """Record a due slot while the console is open, even off the schedule page.
 
-    Does not call a model. A home with no schedule file is left untouched.
+    Does not call a model. A home with no schedule file is left untouched. Decision-change
+    and run-complete reminders follow the file's own switch (V2-WATCHLIST R5): a file first
+    written by a price reminder does not turn them on.
     """
     if not (service.webui_home() / "schedule.json").is_file():
         return

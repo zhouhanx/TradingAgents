@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import json
 import math
+import secrets
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from webui.service import webui_home
 
@@ -25,12 +27,24 @@ _LOCK = threading.Lock()
 DEFAULT_RULE = "watch-1"
 DEFAULT_MODE = "observe"
 MODE_LABEL = {"observe": "观察", "auto": "自动"}
+BEIJING = ZoneInfo("Asia/Shanghai")
 
 
 class WatchlistError(ValueError):
-    def __init__(self, message: str, status: int = 400):
+    def __init__(self, message: str, status: int = 400, code: str | None = None):
         super().__init__(message)
         self.status = status
+        self.code = code
+
+
+# V2-WATCHLIST rules (R2, R11). Four kinds per symbol, at most five rules per symbol.
+RULE_KINDS = ("above", "below", "pct", "win")
+RULE_CAP = 5
+RULE_CAP_TEXT = "每个代码最多 5 条"
+PRICE_TEXT = "请输入大于 0 的价格。"
+PCT_TEXT = "涨跌幅填 0.1 到 50 之间。"
+POLL_CHOICES = (0, 1, 5, 15)
+POLL_DEFAULT_WITH_RULES = 5
 
 
 def _now() -> str:
@@ -75,6 +89,9 @@ def _load(root: Path | None) -> dict:
             item.setdefault("enabled", True)
             item.setdefault("last_price", None)
             item.setdefault("last_decision", None)
+            # Files written before V2-WATCHLIST rules have no rules; they load with none.
+            rules = item.get("rules")
+            item["rules"] = [rule for rule in rules if isinstance(rule, dict)] if isinstance(rules, list) else []
     return data
 
 
@@ -132,6 +149,21 @@ def _asset_type(symbol: str) -> str:
     return "stock"
 
 
+def _market(symbol: str) -> str:
+    """Where the symbol trades, for the page's close and pre-open labels (R3)."""
+    from tradingagents.dataflows.symbols import normalize_symbol
+
+    kind = _asset_type(symbol)
+    if kind != "stock":
+        return kind
+    canonical = str(normalize_symbol(symbol) or symbol).upper()
+    if canonical.endswith((".SS", ".SZ", ".BJ")):
+        return "cn"
+    if canonical.endswith(".HK"):
+        return "hk"
+    return "us"
+
+
 def _asset_label(symbol: str) -> str:
     return {"crypto": "加密货币", "commodity": "贵金属/商品期货"}.get(_asset_type(symbol), "股票")
 
@@ -182,9 +214,9 @@ def _watch_note(mode: str | None) -> str:
     name = _known_mode(mode)
     tail = "打开K线不消耗触发。未检查表示还没有规则检查。已检查并不表示已启动。"
     if name == "observe":
-        return f"价格或决定变化只记录触发。观察模式不会自动启动分析。{tail}"
+        return f"规则命中或决定变化只记录触发。观察模式不会自动启动分析。{tail}"
     if name == "auto":
-        return f"价格或决定变化只记录触发。自动模式本页也不调用模型。{tail}"
+        return f"规则命中或决定变化只记录触发。自动模式本页也不调用模型。{tail}"
     return f"当前规则状态未知，不把它写成观察模式，也不会自动启动分析。{tail}"
 
 
@@ -197,8 +229,12 @@ def _public_item(item: dict) -> dict:
         "enabled_label": "" if enabled else "已停用",
         "asset_type": _asset_type(symbol),
         "asset_label": _asset_label(symbol),
+        "market": _market(symbol),
         # A stored 0 or negative is not a price. The page must not show it as the latest close.
         "last_price": _price(item.get("last_price")),
+        "rules": [_public_rule(rule) for rule in item.get("rules") or [] if isinstance(rule, dict)],
+        "rule_cap": RULE_CAP,
+        "at_cap": len(item.get("rules") or []) >= RULE_CAP,
     }
 
 
@@ -256,8 +292,8 @@ def _public_trigger(trigger: dict, admissions: list[dict], checks: list[dict]) -
 
 
 def _visible_triggers(rows: list[dict]) -> list[dict]:
-    """Newest first. Checked triggers stay even when they are older than the last five."""
-    recent = rows[-5:]
+    """Newest first. Checked triggers stay even when they are older than the last twenty (R6)."""
+    recent = rows[-TRIGGER_VISIBLE:]
     recent_ids = {item.get("id") for item in recent}
     sticky = [item for item in rows if item.get("checked") and item.get("id") not in recent_ids]
     return list(reversed(sticky + recent))
@@ -269,11 +305,15 @@ def list_watch(root: Path | None = None) -> dict:
     mode = _known_mode(data.get("mode") if isinstance(data.get("mode"), str) else None)
     admissions = _rows(data.get("admissions"))
     checks = _rows(data.get("checks"))
-    triggers = [
-        _public_trigger(item, admissions, checks)
-        for item in data["triggers"]
-        if isinstance(item, dict)
-    ]
+    seen_at = _when(data.get("alerts_seen_at"))
+    triggers = []
+    for item in data["triggers"]:
+        if not isinstance(item, dict):
+            continue
+        row = _public_trigger(item, admissions, checks)
+        made = _when(item.get("created_at"))
+        row["unseen"] = item.get("kind") == "rule" and made is not None and (seen_at is None or made > seen_at)
+        triggers.append(row)
     return {
         "rule_version": data["rule_version"],
         "mode": mode,
@@ -282,6 +322,13 @@ def list_watch(root: Path | None = None) -> dict:
         "triggers": triggers,
         "visible_triggers": _visible_triggers(triggers),
         "note": _watch_note(mode),
+        "poll_minutes": _poll_minutes(data),
+        "poll_stored": isinstance(data.get("poll_minutes"), int) and data.get("poll_minutes") in POLL_CHOICES,
+        "has_rules": _has_enabled_rule(data),
+        "rule_cap": RULE_CAP,
+        "trigger_total": len(triggers),
+        "unseen_count": sum(1 for row in triggers if row["unseen"]),
+        "alerts_seen_at": data.get("alerts_seen_at"),
     }
 
 
@@ -297,6 +344,7 @@ def add_symbol(raw, root: Path | None = None) -> dict:
             "enabled": True,
             "last_price": None,
             "last_decision": None,
+            "rules": [],
         })
         _save(root, data)
     return list_watch(root)
@@ -312,6 +360,217 @@ def remove_symbol(raw, root: Path | None = None) -> dict:
             raise WatchlistError(f"自选里没有 {symbol}。", 404)
         _save(root, data)
     return list_watch(root)
+
+
+def _number_text(value: float) -> str:
+    """3 -> 3, 1.5 -> 1.5: the way the page prints a percentage the user typed."""
+    return f"{float(value):g}"
+
+
+def price_text(value: float) -> str:
+    """The page's price format (>= 1000 one decimal, >= 1 two, else four significant).
+
+    A typed threshold keeps its own digits when that format would round it away.
+    """
+    number = float(value)
+    size = abs(number)
+    if size >= 1000:
+        text = f"{number:.1f}"
+    elif size >= 1:
+        text = f"{number:.2f}"
+    else:
+        text = f"{number:#.4g}"
+    if float(text) != number:
+        text = f"{number:.10g}"
+    return text
+
+
+def rule_label(kind: str, value: float) -> str:
+    return {
+        "above": f"高于 {price_text(value)}",
+        "below": f"低于 {price_text(value)}",
+        "pct": f"涨跌 ≥ {_number_text(value)}%（较昨收）",
+        "win": f"一个刷新间隔内涨跌 ≥ {_number_text(value)}%",
+    }.get(kind, "")
+
+
+def rule_chip(kind: str, value: float) -> str:
+    if kind == "pct":
+        return f"涨跌 ≥ {_number_text(value)}%"
+    if kind == "win":
+        return f"间隔内涨跌 ≥ {_number_text(value)}%"
+    return rule_label(kind, value)
+
+
+def beijing_text(stamp, fmt: str = "%m-%d %H:%M") -> str:
+    """A stored UTC ISO time in Beijing time. Empty when unreadable."""
+    try:
+        when = datetime.fromisoformat(str(stamp))
+    except (TypeError, ValueError):
+        return ""
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return when.astimezone(BEIJING).strftime(fmt)
+
+
+def _rule_state_label(rule: dict) -> tuple[str, str]:
+    """(text, state) for the drawer: 生效中 / 已触发 with the re-arm condition / 已停用."""
+    if rule.get("enabled") is False:
+        return "已停用。", "off"
+    kind, value = rule.get("kind"), rule.get("value")
+    hit_at = beijing_text(rule.get("fired_at"))
+    if rule.get("state") == "hit" and kind in {"above", "below"}:
+        side = "以下" if kind == "above" else "以上"
+        return f"已触发（北京 {hit_at}）。价格回到 {price_text(value)} {side}后重新生效。", "hit"
+    if rule.get("state") == "today" and kind == "pct":
+        return f"已触发（北京 {hit_at}）。同一方向每个交易日只提醒一次，下个交易日重新生效。", "today"
+    return "生效中。", "armed"
+
+
+def _public_rule(rule: dict) -> dict:
+    kind = str(rule.get("kind") or "")
+    value = rule.get("value")
+    usable = kind in RULE_KINDS and isinstance(value, (int, float)) and not isinstance(value, bool)
+    text, state = _rule_state_label(rule) if usable else ("规则无法读取，不会判断。", "off")
+    return {
+        "id": rule.get("id"),
+        "kind": kind,
+        "value": value,
+        "enabled": rule.get("enabled") is not False,
+        "state": state,
+        "state_label": text,
+        "label": rule_label(kind, value) if usable else "",
+        "chip": rule_chip(kind, value) if usable else "",
+        "fired_at": rule.get("fired_at"),
+    }
+
+
+def _rule_value(kind, raw) -> float:
+    if kind not in RULE_KINDS:
+        raise WatchlistError("请选择规则类型。")
+    if kind in {"above", "below"}:
+        number = _price(raw)
+        if number is None:
+            raise WatchlistError(PRICE_TEXT, code="bad_price")
+        return number
+    number = _price(raw)
+    if number is None or number < 0.1 or number > 50:
+        raise WatchlistError(PCT_TEXT, code="bad_pct")
+    return number
+
+
+def _same_rule(rule: dict, kind: str, value: float) -> bool:
+    other = rule.get("value")
+    return (
+        rule.get("kind") == kind
+        and isinstance(other, (int, float))
+        and math.isclose(float(other), value, rel_tol=1e-9, abs_tol=1e-12)
+    )
+
+
+def _arm(rule: dict) -> None:
+    """A fresh arm: a new trigger id, and only a quote fetched after now may fire it (R2)."""
+    rule["arm_seq"] = int(rule.get("arm_seq") or 0) + 1
+    rule["armed_at"] = _now()
+    rule["state"] = "armed"
+    rule["fired_at"] = None
+
+
+def _find_item(data: dict, symbol: str) -> dict:
+    item = next((row for row in data["items"] if isinstance(row, dict) and row.get("symbol") == symbol), None)
+    if item is None:
+        raise WatchlistError(f"自选里没有 {symbol}。", 404)
+    return item
+
+
+def _find_rule(item: dict, rule_id) -> dict:
+    rule = next((row for row in item["rules"] if row.get("id") == str(rule_id or "")), None)
+    if rule is None:
+        raise WatchlistError("这条规则已经不在了。", 404)
+    return rule
+
+
+def change_rule(body: dict, root: Path | None = None) -> dict:
+    """POST /api/watchlist/rules: op add | update | toggle | delete. Never calls a model."""
+    body = body if isinstance(body, dict) else {}
+    symbol = _symbol(body.get("symbol"))
+    op = str(body.get("op") or "")
+    if op not in {"add", "update", "toggle", "delete"}:
+        raise WatchlistError("不支持的规则操作。")
+    with _LOCK:
+        data = _load(root)
+        item = _find_item(data, symbol)
+        rules = item["rules"]
+        if op == "add":
+            if len(rules) >= RULE_CAP:
+                raise WatchlistError(f"{RULE_CAP_TEXT}。", code="rule_cap")
+            kind = str(body.get("kind") or "")
+            value = _rule_value(kind, body.get("value"))
+            for rule in rules:
+                if _same_rule(rule, kind, value):
+                    raise WatchlistError(f"已有一条「{rule_label(kind, value)}」，不用重复加。", code="duplicate")
+            rule = {
+                "id": f"r{secrets.token_hex(4)}",
+                "kind": kind,
+                "value": value,
+                "enabled": body.get("enabled") is not False,
+                "created_at": _now(),
+                "arm_seq": 0,
+                "fired_days": {},
+            }
+            _arm(rule)
+            rules.append(rule)
+        else:
+            rule = _find_rule(item, body.get("rule_id"))
+            if op == "delete":
+                item["rules"] = [row for row in rules if row is not rule]
+            elif op == "toggle":
+                enabled = body.get("enabled")
+                if not isinstance(enabled, bool):
+                    enabled = rule.get("enabled") is False
+                if enabled and rule.get("enabled") is False:
+                    _arm(rule)
+                rule["enabled"] = enabled
+            else:
+                kind = str(rule.get("kind") or "")
+                value = _rule_value(kind, body.get("value"))
+                for other in rules:
+                    if other is not rule and _same_rule(other, kind, value):
+                        raise WatchlistError(f"已有一条「{rule_label(kind, value)}」，不用重复加。", code="duplicate")
+                if not _same_rule(rule, kind, value):
+                    rule["value"] = value
+                    # A new threshold is a new rule for the once-a-day count too.
+                    rule["fired_days"] = {}
+                    _arm(rule)
+        _save(root, data)
+    return list_watch(root)
+
+
+def set_poll(minutes, root: Path | None = None) -> dict:
+    """POST /api/watchlist/poll: 0 (关), 1, 5 or 15 minutes. Stored so every tab agrees."""
+    if isinstance(minutes, bool) or minutes not in POLL_CHOICES:
+        raise WatchlistError("自动刷新只能选关、1 分钟、5 分钟或 15 分钟。")
+    with _LOCK:
+        data = _load(root)
+        data["poll_minutes"] = int(minutes)
+        _save(root, data)
+    return list_watch(root)
+
+
+def _poll_minutes(data: dict) -> int:
+    """R2: a stored choice wins; otherwise 5 minutes when an enabled rule exists, else off."""
+    stored = data.get("poll_minutes")
+    if isinstance(stored, int) and not isinstance(stored, bool) and stored in POLL_CHOICES:
+        return stored
+    return POLL_DEFAULT_WITH_RULES if _has_enabled_rule(data) else 0
+
+
+def _has_enabled_rule(data: dict) -> bool:
+    return any(
+        isinstance(item, dict) and _enabled(item)
+        and any(rule.get("enabled") is not False for rule in item.get("rules") or [])
+        for item in data["items"]
+    )
 
 
 def _trigger_id(rule: str, symbol: str, kind: str, old, new) -> str:
@@ -457,26 +716,244 @@ def local_decisions() -> dict[str, str]:
     return {symbol: rating for symbol, (_key, rating) in best.items()}
 
 
+TRIGGER_VISIBLE = 20
+TRIGGER_STORE_CAP = 500
+WINDOW_MAX_GAP = 20 * 60  # 间隔内涨跌 compares with a quote at most 20 minutes older
+
+
+def _quote(raw) -> dict | None:
+    """One quote from the page: a bare number (older pages, tests) or the latest answer.
+
+    {price, prev_close, trading_day, fetched_at, delayed}. fetched_at is the server's
+    fetch time (epoch seconds or ISO); a bare number counts as fetched now.
+    """
+    if isinstance(raw, dict):
+        price = _price(raw.get("price"))
+        if price is None:
+            return None
+        return {
+            "price": price,
+            "prev_close": _price(raw.get("prev_close")),
+            "trading_day": str(raw.get("trading_day") or "")[:10] or None,
+            "fetched_at": _stamp_of(raw.get("fetched_at")) or _now(),
+            "delayed": raw.get("delayed") is True,
+        }
+    price = _price(raw)
+    if price is None:
+        return None
+    return {"price": price, "prev_close": None, "trading_day": None, "fetched_at": _now(), "delayed": False}
+
+
+def _stamp_of(value) -> str | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0:
+        return datetime.fromtimestamp(float(value), UTC).replace(microsecond=0).isoformat()
+    when = _when(value)
+    return when.replace(microsecond=0).isoformat() if when else None
+
+
+def _when(value) -> datetime | None:
+    try:
+        when = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=UTC)
+
+
+def _change_pct(price: float, base) -> float | None:
+    base = _price(base)
+    if base is None:
+        return None
+    return (price / base - 1.0) * 100.0
+
+
+def _signed(value: float) -> str:
+    return f"{'+' if value > 0 else ''}{value:.2f}%"
+
+
+def change_label(symbol: str, *, pre_open: bool = False) -> str:
+    """R1/R3: crypto 较昨收（北京 08:00）; stocks and metals 较昨收; before the open 较前一交易日收盘."""
+    if pre_open:
+        return "较前一交易日收盘"
+    return "较昨收（北京 08:00）" if _asset_type(symbol) == "crypto" else "较昨收"
+
+
+def _fire(data: dict, item: dict, rule: dict, quote: dict, detail: str, extra: dict) -> dict:
+    """Record one rule trigger. The id is rule id + which arm, so a repeat poll adds nothing."""
+    symbol = item["symbol"]
+    ident = f"rule|{symbol}|{rule['id']}#{int(rule.get('arm_seq') or 1)}"
+    found = next((row for row in data["triggers"] if row.get("id") == ident), None)
+    if found:
+        return {}
+    label = rule_label(rule["kind"], rule["value"])
+    price = quote["price"]
+    when = beijing_text(quote["fetched_at"])
+    row = {
+        "id": ident,
+        "symbol": symbol,
+        "kind": "rule",
+        "rule_version": data["rule_version"],
+        "rule_id": rule["id"],
+        "rule_kind": rule["kind"],
+        "rule_value": rule["value"],
+        "rule_label": label,
+        "old_value": None,
+        "new_value": price,
+        "price": price,
+        "fetched_at": quote["fetched_at"],
+        "text": f"{rule_chip(rule['kind'], rule['value'])} · {detail}",
+        "created_at": _now(),
+        "started": False,
+        "run_id": None,
+        **extra,
+    }
+    data["triggers"].append(row)
+    rule["fired_at"] = _now()
+    return {
+        "id": ident,
+        "symbol": symbol,
+        "label": label,
+        "body": f"{symbol} {label}，{detail.replace(' · ', '，')}（北京 {when}）",
+        "toast": f"{symbol} {label}",
+    }
+
+
+def _evaluate(data: dict, item: dict, quote: dict, before: dict) -> list[dict]:
+    """R2. Only a quote fetched after a rule was armed may fire it; the old price never does."""
+    fired: list[dict] = []
+    fetched = _when(quote["fetched_at"])
+    price = quote["price"]
+    symbol = item["symbol"]
+    for rule in item["rules"]:
+        kind, value = rule.get("kind"), rule.get("value")
+        if rule.get("enabled") is False or kind not in RULE_KINDS:
+            continue
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        armed = _when(rule.get("armed_at"))
+        fresh = fetched is not None and (armed is None or fetched > armed)
+        if kind in {"above", "below"}:
+            holds = price >= value if kind == "above" else price <= value
+            if rule.get("state") == "hit":
+                if not holds:  # crossed back: armed again, the next crossing reminds again
+                    _arm(rule)
+                    rule["armed_at"] = quote["fetched_at"]
+                continue
+            if holds and fresh:
+                hit = _fire(data, item, rule, quote, f"现价 {price_text(price)}", {})
+                rule["state"] = "hit"
+                if hit:
+                    fired.append(hit)
+        elif kind == "pct":
+            day = quote.get("trading_day")
+            change = _change_pct(price, quote.get("prev_close"))
+            days = rule.get("fired_days") if isinstance(rule.get("fired_days"), dict) else {}
+            rule["fired_days"] = days
+            rule["state"] = "today" if day and day in days.values() else "armed"
+            if change is None or not day or not fresh:
+                continue
+            side = "up" if change >= value else "down" if change <= -value else None
+            if side is None or days.get(side) == day:
+                continue
+            text = f"{change_label(symbol)} {_signed(change)}"
+            hit = _fire(data, item, rule, quote, text, {"change_pct": round(change, 4), "side": side,
+                                                        "trading_day": day})
+            days[side] = day
+            rule["state"] = "today"
+            rule["arm_seq"] = int(rule.get("arm_seq") or 1) + 1
+            if hit:
+                fired.append(hit)
+        elif kind == "win":
+            last = _price(before.get("last_price"))
+            last_at = _when(before.get("quote_at"))
+            if last is None or last_at is None or fetched is None or not fresh:
+                continue
+            if armed is not None and last_at < armed:
+                continue  # the earlier quote predates this rule
+            if (fetched - last_at).total_seconds() > WINDOW_MAX_GAP:
+                continue
+            change = _change_pct(price, last)
+            if change is None or abs(change) < value:
+                continue
+            text = f"{_signed(change)}（上次 {price_text(last)}）"
+            hit = _fire(data, item, rule, quote, text, {"change_pct": round(change, 4), "base_price": last})
+            rule["arm_seq"] = int(rule.get("arm_seq") or 1) + 1
+            if hit:
+                fired.append(hit)
+    return fired
+
+
+def _referenced(data: dict) -> set[str]:
+    return {
+        str(row.get("trigger_id"))
+        for key in ("checks", "admissions")
+        for row in data.get(key) or []
+        if isinstance(row, dict)
+    }
+
+
+def _prune_triggers(data: dict) -> None:
+    """R6: keep at most 500. Drop the oldest unchecked ones; a checked trigger is kept."""
+    rows = data["triggers"]
+    if len(rows) <= TRIGGER_STORE_CAP:
+        return
+    keep = _referenced(data)
+    excess = len(rows) - TRIGGER_STORE_CAP
+    kept = []
+    for row in rows:
+        if excess > 0 and str(row.get("id")) not in keep:
+            excess -= 1
+            continue
+        kept.append(row)
+    data["triggers"] = kept
+
+
+def _remind(fired: list[dict], root: Path | None) -> None:
+    """R5: after the watchlist lock is released, queue each hit in the 定时 outbox, then deliver.
+
+    With no sender, deliver marks it 已发送 (shown in the page only). A file first made
+    here keeps decision-change and run-complete reminders as they were (off).
+    """
+    if not fired:
+        return
+    from webui import schedule
+
+    for hit in fired:
+        schedule.enqueue_reminder("price", hit["id"], hit["body"], root, symbol=hit["symbol"], quiet_create=True)
+    schedule.deliver(root)
+
+
 def refresh(quotes: dict, root: Path | None = None, decisions: dict | None = None, *,
             observe_local: bool = False) -> dict:
-    """Record a trigger when a known price or decision changes. Never starts a model run."""
+    """Store fetched prices, check rules, record decision changes. Never starts a model run.
+
+    R4: a price change alone is no longer a trigger; only a rule that fires records one,
+    whether the refresh was automatic or manual. Stored price triggers still display.
+    """
     if decisions is None and observe_local:
         decisions = local_decisions()
     price_index = _indexed(quotes if isinstance(quotes, dict) else {})
     decision_index = _indexed(decisions if isinstance(decisions, dict) else {})
+    fired: list[dict] = []
     with _LOCK:
         data = _load(root)
         for item in data["items"]:
             if not isinstance(item, dict) or not item.get("enabled", True):
                 continue
             symbol = item["symbol"]
-            price = _price(_lookup(symbol, price_index))
-            if price is not None:
-                old = item.get("last_price")
-                item["last_price"] = price
+            quote = _quote(_lookup(symbol, price_index))
+            if quote is not None:
+                before = {"last_price": item.get("last_price"), "quote_at": item.get("quote_at")}
+                same = before["quote_at"] == quote["fetched_at"] and _price(before["last_price"]) == quote["price"]
+                item["last_price"] = quote["price"]
                 item["priced_at"] = _now()
-                if old is not None and old != price:
-                    _add_trigger(data, symbol, "price", old, price)
+                item["quote_at"] = quote["fetched_at"]
+                item["prev_close"] = quote["prev_close"]
+                item["trading_day"] = quote["trading_day"]
+                item["delayed"] = quote["delayed"]
+                change = _change_pct(quote["price"], quote["prev_close"])
+                item["change_pct"] = round(change, 4) if change is not None else None
+                if not same:  # the same cached answer twice is one quote, judged once
+                    fired.extend(_evaluate(data, item, quote, before))
             decision = _decision(_lookup(symbol, decision_index))
             if decision is not None:
                 old_decision = item.get("last_decision")
@@ -484,6 +961,20 @@ def refresh(quotes: dict, root: Path | None = None, decisions: dict | None = Non
                 item["decided_at"] = _now()
                 if old_decision and old_decision != decision:
                     _add_trigger(data, symbol, "decision", old_decision, decision)
+        _prune_triggers(data)
+        _save(root, data)
+    _remind(fired, root)
+    view = list_watch(root)
+    view["fired"] = [{"id": hit["id"], "symbol": hit["symbol"], "label": hit["label"], "text": hit["toast"]}
+                     for hit in fired]
+    return view
+
+
+def mark_seen(root: Path | None = None) -> dict:
+    """R8: the 自选 page was opened. The unseen count is stored, so every tab agrees."""
+    with _LOCK:
+        data = _load(root)
+        data["alerts_seen_at"] = _now()
         _save(root, data)
     return list_watch(root)
 
@@ -524,6 +1015,20 @@ def explicit_analyze(raw, root: Path | None = None) -> dict:
 
 def _condition_holds(item: dict, trigger: dict) -> bool:
     kind = trigger.get("kind")
+    if kind == "rule":
+        rule = next((row for row in item.get("rules") or [] if row.get("id") == trigger.get("rule_id")), None)
+        price = _price(item.get("last_price"))
+        if rule is None or rule.get("enabled") is False or price is None:
+            return False
+        value = rule.get("value")
+        if rule.get("kind") == "above":
+            return price >= value
+        if rule.get("kind") == "below":
+            return price <= value
+        change = item.get("change_pct")
+        if rule.get("kind") == "pct" and isinstance(change, (int, float)):
+            return abs(change) >= value
+        return False
     if kind == "price":
         return item.get("last_price") == trigger.get("new_value")
     if kind == "decision":

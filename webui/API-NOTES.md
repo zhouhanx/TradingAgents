@@ -67,7 +67,18 @@
   - 一次运行里已计价的角色用了不止一种币种时，合计显示「币种不一致，不计入合计」，各角色仍各自显示金额和币种（W245）。页面没有跨运行的总计。
   - 单价文件可带 UTF-8 BOM（W247）。
 - **V2-COST-PRICING-2**：
-  - 运行合计：各角色金额显示时仍各自舍入到 0.000001；合计用各角色未舍入的精确金额（Decimal）相加，最后只舍入一次（W251）。所以合计可能和页面上各角色金额之和差最后一位。
+  - 运行合计：各角色金额显示时仍各自舍入到 0.000001；合计用各角色未舍入的精确金额（Decimal）相加，最后只舍入一次（W251）。所以合计和页面上各角色金额之和最多相差 角色数 × 0.0000005（W257）。
+  - 舍入规则：运行合计和各角色金额都用四舍六入五成双（银行家舍入，Decimal `ROUND_HALF_EVEN`），例如 0.0065485 → 0.006548（W256）。
   - `cache_read_per_million: null` 等同于没写：缓存命中按输入单价计，旁注「缓存命中按输入单价计」（W254）。
   - `cache_read`（`cached_tokens`）不是整数、为负数或大于 `input_tokens` 时，如果原始 `token_usage` 里有合法的 `prompt_cache_hit_tokens`（0 ≤ 命中数 ≤ 输入），用量记录改用它，只记一次，并写 `cache_read_source: "prompt_cache_hit_tokens:invalid_cache_read"`（W252）。只有 `prompt_cache_hit_tokens` 时仍写 `"prompt_cache_hit_tokens"`。
   - 回退之后仍不合法的缓存命中数按 0 个命中计价，即全部输入按 `input_per_million` 计（W254）。
+
+## 自选提醒规则（V2-WATCHLIST）
+- `GET /api/kline/latest`（日线路径）多给 `prev_close`、`prev_day`、`trading_day`：最新一根之前那根日线的收盘价和日期。加密货币用行情源的 UTC 日线，和日 K 线上前一根的收盘价相同，页面写「较昨收（北京 08:00）」；股票、贵金属写「较昨收」（R1）。没有前一根时为 `null`。
+- 行情源限流（HTTP 429、`YFRateLimitError`、OKX `50011`）且没有别的源拿到价时，`/api/kline/latest` 回 HTTP 429 和 `{"error": "行情源限流，稍后重试。", "code": "rate_limited"}`；其他失败仍是 400、没有 `code`（R7）。
+- `POST /api/watchlist/rules`：`{symbol, op: add|update|toggle|delete, kind: above|below|pct|win, value, rule_id, enabled}`。每个代码最多 5 条（`code: "rule_cap"`，「每个代码最多 5 条。」），重复规则 `code: "duplicate"`（R11）。
+- `POST /api/watchlist/poll`：`{minutes: 0|1|5|15}`。没存过时，有启用的规则默认 5 分钟，没有就关（R2）。
+- `POST /api/watchlist/refresh` 的 `quotes` 可以是数字，也可以是 `{price, prev_close, trading_day, fetched_at, delayed}`。只有规则命中才记价格触发（R4），回包多 `fired`。高于 / 低于命中一次，价格回到另一侧后重新生效；涨跌幅同一方向每个交易日最多一次；只有在规则生效之后取到的价才判断；同一份缓存回答只判断一次（R2）。
+- 命中写进定时的提醒发件箱（`kind: "price"`，已发送）。`schedule.json` 新增 `local_events`：由价格提醒第一次建出来的文件不打开决定变化和运行完成提醒；打开定时页或新增定时才打开；没有这个字段的旧文件照旧（R5）。
+- `GET /api/watchlist` 多 `unseen_count`、`trigger_total`、`poll_minutes`、`has_rules`；`visible_triggers` 是最近 20 条加已检查的，最多存 500 条（R6）。`POST /api/watchlist/seen` 把未看数清零，各标签页一致（R8）。
+- 截图（14 个状态 × 1440/390）：`/workspace/ta-sync/watchlist-logs/shots/`，脚本在 `/workspace/ta-sync/watchlist-logs/harness/`。

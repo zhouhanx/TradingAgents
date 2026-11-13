@@ -66,6 +66,10 @@ def _blank() -> dict:
         "receipts": [],
         "last_decisions": {},
         "seen_completions": None,
+        # V2-WATCHLIST R5: decision-change and run-complete reminders. A file without the
+        # flag keeps its old behaviour (on). Only a file first created by a price reminder
+        # says False, so a price reminder never switches the other two on by itself.
+        "local_events": True,
     }
 
 
@@ -320,6 +324,8 @@ def create_schedule(symbol, at, root: Path | None = None) -> dict:
             "status": "active",
             "created_at": _stamp(),
         })
+        # Adding a schedule is a visit to the 定时 page: its reminders work as before (R5).
+        data["local_events"] = True
         _save(root, data)
     return list_schedules(root)
 
@@ -601,13 +607,20 @@ def _receipt(data: dict, ident: str) -> dict | None:
 
 
 def enqueue_reminder(kind: str, key: str, body: str, root: Path | None = None, *, symbol: str = "",
-                     now: datetime | None = None) -> dict:
-    """Save a pending receipt before any send. A dropped or existing id is not queued again."""
+                     now: datetime | None = None, quiet_create: bool = False) -> dict:
+    """Save a pending receipt before any send. A dropped or existing id is not queued again.
+
+    ``quiet_create`` (price reminders, R5): when this call creates schedule.json, the new
+    file keeps decision-change and run-complete reminders off, as they were without a file.
+    """
     ident = str(key or "").strip()
     if not ident:
         raise ScheduleError("提醒缺少标识。")
     with _LOCK:
+        creating = not _path(root).is_file()
         data = _load(root)
+        if creating and quiet_create:
+            data["local_events"] = False
         existing = _receipt(data, ident)
         if existing:
             return {**existing, "queued": False}
@@ -799,14 +812,21 @@ def _local_events(data: dict) -> list[dict]:
 
 def tick(now: datetime | None = None, root: Path | None = None, *, events: list | None = None,
          observe_local: bool = False, version_during_check: str | None = None, starter=None,
-         sender=None) -> dict:
-    """One local pass: due triggers, reminder receipts, then delivery. No model call."""
+         sender=None, enable_local: bool = False) -> dict:
+    """One local pass: due triggers, reminder receipts, then delivery. No model call.
+
+    ``enable_local`` is the 定时 page's own visit: it turns decision-change and run-complete
+    reminders on, as it always did. The background tick only follows the stored flag (R5).
+    """
     local = _now_dt(now)
     fire_due(local, root, version_during_check=version_during_check, starter=starter)
     if events is None and observe_local:
         with _LOCK:
             data = _load(root)
-            events = _local_events(data)
+            if enable_local:
+                data["local_events"] = True
+            if data.get("local_events") is not False:
+                events = _local_events(data)
             _save(root, data)
     observe_events(events or [], root, now=local)
     return deliver(root, now=local, sender=sender)
