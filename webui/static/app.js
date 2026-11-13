@@ -5544,7 +5544,7 @@ Promise.all([api("/api/catalog"), api("/api/auth/status"), api("/api/config"), a
 // drawn with the open-source Lightweight Charts library bundled under /vendor/
 // (Apache-2.0). Realtime ticks are a separate batch (V2-KLINE-RT).
 const KLINE_ASSETS = [["stock", "股票"], ["crypto", "加密货币"], ["commodity", "贵金属/商品期货"]];
-const KLINE_TFS = [["1D", "日线"], ["1W", "周线"], ["1M", "月线"], ["1H", "小时"], ["5m", "5分钟"]];
+const KLINE_TFS = [["1D", "日线"], ["1W", "周线"], ["1M", "月线"], ["1H", "小时线"], ["5m", "5分钟线"]];
 const KLINE_DEFAULT = { stock: "NVDA", crypto: "BTC-USDT", commodity: "XAUUSD" };
 let klineLibPromise = null;
 let klineChart = null;
@@ -5557,6 +5557,8 @@ function removeKlineCharts() {
   klineScaleLock = 0;
   const vol = document.querySelector("#kline-vol");
   if (vol) vol.innerHTML = "";
+  const overlay = document.querySelector("#kline-overlay");
+  if (overlay) overlay.innerHTML = "";
 }
 
 function loadKlineLib() {
@@ -6263,7 +6265,7 @@ function renderKline() {
     <section class="panel kline-card" id="kline-card">
       <div class="kline-head"><b id="kline-name">${escapeHtml(ks.symbol)}</b><span class="kline-tag kline-tag--future" id="kline-future" hidden></span><span class="kline-price" id="kline-price">—</span><span class="kline-change" id="kline-change"></span></div>
       <div class="kline-ohlc" id="kline-ohlc"></div>
-      <div class="kline-chart-wrap"><div class="kline-chart" id="kline-chart"></div><div class="kline-vol" id="kline-vol"></div><p class="kline-status" id="kline-status" role="status">正在加载…</p><div class="kline-stale" id="kline-stale" role="status" hidden></div></div>
+      <div class="kline-chart-wrap" id="kline-wrap"><div class="kline-chart" id="kline-chart"></div><div class="kline-vol" id="kline-vol"></div><div class="kline-overlay" id="kline-overlay" aria-hidden="true"></div><div class="kline-edge" id="kline-edge" role="status" hidden></div><p class="kline-status" id="kline-status" role="status">正在加载…</p><div class="kline-stale" id="kline-stale" role="status" hidden></div></div>
       <div class="kline-foot"><span id="kline-note">等待行情。</span><span class="kline-adjnote" id="kline-adjnote" hidden></span><span class="kline-live" id="kline-live" hidden></span><span>图表：Lightweight Charts（开源组件，<br class="notice-break"><a href="/vendor/lightweight-charts.LICENSE.txt" target="_blank" rel="noopener">Apache-2.0 许可证</a>）</span></div>
     </section>`;
   const form = document.querySelector("#kline-form");
@@ -6299,6 +6301,14 @@ function renderKline() {
     ks.tf = button.dataset.tf;
     loadKline();
   });
+  document.querySelector("#kline-wrap").addEventListener("click", (event) => {
+    const link = event.target.closest("[data-kline-tf]");
+    if (!link) return;
+    event.preventDefault();
+    // 「改看日线」/「重试」 on the empty state, and the period link in the edge hint.
+    ks.tf = link.dataset.klineTf;
+    loadKline();
+  });
   loadKline();
 }
 
@@ -6310,8 +6320,13 @@ async function loadKline() {
   const token = (ks.token || 0) + 1;
   ks.token = token;
   ks.loading = ks.symbol;
+  // Same chart, another period: fade the old chart and say which period is coming
+  // (mock #loading) instead of the 「未更新」 badge, which is for another symbol.
+  ks.tfLoading = Boolean(ks.loaded && ks.drawnTf && ks.drawnTf !== ks.tf
+    && String(ks.loaded).toUpperCase() === String(ks.symbol).toUpperCase());
   markKlineStale();
   document.querySelectorAll("#kline-tf [data-tf]").forEach((b) => b.classList.toggle("on", b.dataset.tf === ks.tf));
+  paintKlineTfLoading(ks.tfLoading ? ks.tf : "");
   const status = document.querySelector("#kline-status");
   if (status) { status.hidden = Boolean(ks.loaded); status.textContent = "正在加载…"; status.classList.remove("error-banner"); }
   let data;
@@ -6324,6 +6339,8 @@ async function loadKline() {
   } catch (error) {
     if (state.page !== "kline" || ks.token !== token) return;
     ks.loading = null;
+    ks.tfLoading = false;
+    paintKlineTfLoading("");
     clearKlineChart(ks.symbol);
     const box = document.querySelector("#kline-status");
     if (box) { box.hidden = false; box.innerHTML = klineStatusHtml(klineErrorText(error.message)); box.classList.add("error-banner"); }
@@ -6331,8 +6348,11 @@ async function loadKline() {
   }
   if (state.page !== "kline" || ks.token !== token) return;
   ks.loading = null;
+  ks.tfLoading = false;
+  paintKlineTfLoading("");
   drawKline(lib, data);
   ks.loaded = ks.symbol;
+  ks.drawnTf = data.tf;
   const done = document.querySelector("#kline-status");
   if (done) done.hidden = true;
   markKlineStale();
@@ -6374,6 +6394,11 @@ function clearKlineChart(symbol) {
   const adj = document.querySelector("#kline-adjnote");
   if (adj) adj.hidden = true;
   ks.loaded = null;
+  ks.drawnTf = null;
+  const overlay = document.querySelector("#kline-overlay");
+  if (overlay) overlay.innerHTML = "";
+  const edge = document.querySelector("#kline-edge");
+  if (edge) { edge.hidden = true; edge.innerHTML = ""; }
   const set = (sel, text) => { const el = document.querySelector(sel); if (el) el.textContent = text; };
   set("#kline-name", symbol || "—");
   set("#kline-source", "数据源：—");
@@ -6396,7 +6421,7 @@ function markKlineStale() {
   const card = document.querySelector("#kline-card");
   if (!input || !badge || !card) return;
   const typed = input.value.trim();
-  const loading = Boolean(ks.loading) && Boolean(ks.loaded);
+  const loading = Boolean(ks.loading) && Boolean(ks.loaded) && !ks.tfLoading;
   const stale = loading || (Boolean(ks.loaded) && typed.toUpperCase() !== String(ks.loaded).toUpperCase());
   card.classList.toggle("kline-card--stale", stale);
   badge.hidden = !stale;
@@ -6632,13 +6657,26 @@ function drawKline(lib, data) {
   if (staleNote && !document.querySelector("#kline-note").textContent.includes(staleNote)) {
     appendKlineNote(staleNote);
   }
+  if (intraday && tfLabel) appendKlineNote(KLINE_CLOCK_NOTE);
   const rawBars = data.bars || [];
-  const bars = rawBars.filter(klineUsableBar);
+  const bars = rawBars.filter(klineUsableBar).map((b) => ({ ...b, time: Number(b.time) }));
   const omitted = rawBars.length - bars.length;
   const host = document.querySelector("#kline-chart");
   removeKlineCharts();
   host.innerHTML = "";
+  const overlay = document.querySelector("#kline-overlay");
+  if (overlay) overlay.innerHTML = "";
+  const edge = document.querySelector("#kline-edge");
+  if (edge) { edge.hidden = true; edge.innerHTML = ""; }
+  klineRt.intraday = Boolean(intraday && tfLabel);
+  klineRt.forming = false;
   if (!bars.length) {
+    if (intraday && tfLabel && !omitted) {
+      // Mock #empty: say why there is no chart and offer 日线 or another try.
+      host.innerHTML = klineEmptyHtml(data, tfLabel);
+      setKlineLive("没有分钟数据，暂不刷新", true);
+      return;
+    }
     host.innerHTML = `<p class="kline-status">${omitted ? "没有可绘制的正价格。" : "没有数据。"}</p>`;
     return;
   }
@@ -6647,14 +6685,22 @@ function drawKline(lib, data) {
     const extra = data.unpriced_note || `有${omitted}根K线没有正价格，未画入图表。`;
     if (note && !note.textContent.includes("没有正价格")) appendKlineNote(extra);
   }
-  const tickMarkFormatter = (time) => klineTickLabel(time, data.tf);
+  // Intraday bars are placed at chart_time (trading day + time into the session)
+  // so the library's day ticks fall on trading-day changes; labels read the real time.
+  indexKlineBars(bars);
+  const tickMarkFormatter = klineRt.intraday
+    ? (time, type) => klineIntradayTick(time, type)
+    : (time) => klineTickLabel(time, data.tf);
+  const localization = klineRt.intraday
+    ? { locale: "zh-CN", timeFormatter: (time) => klineCrosshairTime(time) }
+    : { locale: "zh-CN" };
   const chart = lib.createChart(host, {
     autoSize: true,
     layout: { background: { color: "#ffffff" }, textColor: "#5f6368", attributionLogo: false },
     grid: { vertLines: { color: "#f0f3fa" }, horzLines: { color: "#f0f3fa" } },
     rightPriceScale: { borderColor: "#e0e0e0", minimumWidth: KLINE_SCALE_W },
-    timeScale: { borderColor: "#e0e0e0", visible: false, tickMarkFormatter },
-    localization: { locale: "zh-CN" },
+    timeScale: { borderColor: "#e0e0e0", visible: false, tickMarkFormatter, ...(klineRt.intraday ? { rightOffset: 3, timeVisible: true } : {}) },
+    localization,
   });
   klineChart = chart;
   // W163: volume is its own chart below a real 1px separator, so price grid
@@ -6665,14 +6711,16 @@ function drawKline(lib, data) {
     layout: { background: { color: "#ffffff" }, textColor: "#5f6368", attributionLogo: false },
     grid: { vertLines: { color: "#f0f3fa" }, horzLines: { visible: false } },
     rightPriceScale: { borderColor: "#e0e0e0", minimumWidth: KLINE_SCALE_W, scaleMargins: { top: 0.1, bottom: 0 } },
-    timeScale: { borderColor: "#e0e0e0", tickMarkFormatter },
-    localization: { locale: "zh-CN" },
+    timeScale: { borderColor: "#e0e0e0", tickMarkFormatter, ...(klineRt.intraday ? { rightOffset: 3, timeVisible: true } : {}) },
+    // Volume is read in the readout row; no price label on the volume crosshair.
+    crosshair: { horzLine: { visible: false, labelVisible: false } },
+    localization,
   });
   klineVolChart = volChart;
   const candles = chart.addCandlestickSeries({ upColor: "#26a69a", downColor: "#ef5350", borderVisible: false, wickUpColor: "#26a69a", wickDownColor: "#ef5350" });
-  candles.setData(bars.map((b) => ({ time: b.time, open: b.open, high: b.high, low: b.low, close: b.close })));
-  const volume = volChart.addHistogramSeries({ priceFormat: { type: "volume" }, color: "rgba(38,166,154,.35)" });
-  volume.setData(bars.map((b) => ({ time: b.time, value: b.volume, color: b.close >= b.open ? "rgba(38,166,154,.35)" : "rgba(239,83,80,.35)" })));
+  candles.setData(bars.map((b) => ({ time: klineChartTime(b), open: b.open, high: b.high, low: b.low, close: b.close })));
+  const volume = volChart.addHistogramSeries({ priceFormat: { type: "custom", formatter: klineVolume, minMove: 1 }, color: "rgba(38,166,154,.35)" });
+  volume.setData(bars.map((b) => ({ time: klineChartTime(b), value: b.volume, color: b.close >= b.open ? "rgba(38,166,154,.35)" : "rgba(239,83,80,.35)" })));
   let syncing = false;
   const sync = (from, to) => from.timeScale().subscribeVisibleLogicalRangeChange((range) => {
     if (syncing || !range) return;
@@ -6689,15 +6737,22 @@ function drawKline(lib, data) {
       mirroring = true;
       try {
         if (!param || param.time === undefined) { if (to.clearCrosshairPosition) to.clearCrosshairPosition(); return; }
-        const bar = bars.find((b) => b.time === param.time);
+        const bar = klineBarAt(param.time);
         if (bar) to.setCrosshairPosition(series === "vol" ? bar.volume : bar.close, param.time, series === "vol" ? volume : candles);
       } finally { mirroring = false; }
     });
     follow(chart, volChart, "vol");
     follow(volChart, chart, "price");
   }
-  volChart.timeScale().fitContent();
-  chart.timeScale().fitContent();
+  // Eric 2026-11-13: intraday opens on the newest 160 bars (60 on a narrow
+  // screen); dragging left shows the rest. Daily, weekly and monthly fit all.
+  const range = klineRt.intraday ? klineDefaultRange(bars.length, klineNarrow()) : null;
+  if (range) {
+    for (const c of [chart, volChart]) { try { c.timeScale().setVisibleLogicalRange(range); } catch (_) { /* not ready */ } }
+  } else {
+    volChart.timeScale().fitContent();
+    chart.timeScale().fitContent();
+  }
   const last = bars[bars.length - 1];
   document.querySelector("#kline-price").textContent = klinePrice(last.close);
   const changeEl = document.querySelector("#kline-change");
@@ -6711,21 +6766,39 @@ function drawKline(lib, data) {
     const hit = klineRt.bars.find((b) => b.time === time) || bars.find((b) => b.time === time);
     return Boolean(hit && hit.ohlc_fixed);
   };
+  // Only an explicit fresh last bar (stale_bar false) is called 形成中.
+  klineRt.forming = klineRt.intraday && data.stale_bar === false;
+  klineRt.bars = bars.map((b) => ({ ...b }));
+  ohlcEl.classList.toggle("kline-ohlc--ro", klineRt.intraday);
   const ohlc = (b) => {
-    const text = `开 ${klinePrice(b.open)}  高 ${klinePrice(b.high)}  低 ${klinePrice(b.low)}  收 ${klinePrice(b.close)}`;
     const fixed = b.ohlc_fixed || isFixed(b.time);
     ohlcEl.classList.toggle("kline-ohlc--fixed", fixed);
+    if (klineRt.intraday) {
+      const newest = klineRt.bars[klineRt.bars.length - 1];
+      return klineReadoutHtml(b, klineRt.forming && newest && newest.time === b.time, fixed ? fixedNote : "");
+    }
+    const text = `开 ${klinePrice(b.open)}  高 ${klinePrice(b.high)}  低 ${klinePrice(b.low)}  收 ${klinePrice(b.close)}`;
     return klineOhlcHtml(text, fixed, fixed ? fixedNote : "");
   };
   ohlcEl.innerHTML = ohlc(last);
   chart.subscribeCrosshairMove((param) => {
-    const point = param && param.seriesData && param.seriesData.get(candles);
     const newest = klineRt.bars[klineRt.bars.length - 1] || last;
+    if (klineRt.intraday) {
+      const bar = param && param.time !== undefined ? klineBarAt(param.time) : null;
+      ohlcEl.innerHTML = ohlc(bar || newest);
+      return;
+    }
+    const point = param && param.seriesData && param.seriesData.get(candles);
     ohlcEl.innerHTML = point ? ohlc({ ...point, time: param.time }) : ohlc(newest);
   });
   klineRt.candles = candles;
   klineRt.volume = volume;
   klineRt.bars = bars.map((b) => ({ ...b }));
+  indexKlineBars(klineRt.bars);
+  klineRt.edgeHint = klineEdgeText(data, tfLabel);
+  if (klineRt.intraday && typeof chart.timeScale().subscribeVisibleLogicalRangeChange === "function") {
+    chart.timeScale().subscribeVisibleLogicalRangeChange((r) => paintKlineEdge(r));
+  }
   // Keep the source daily grain as well as the displayed timeframe.  Weekly
   // and monthly volume is derived from this array so a forming day's volume
   // replaces its previous value on the next poll instead of being added again.
@@ -6746,6 +6819,219 @@ function drawKline(lib, data) {
   else klineRt.delayed = null;
   startKlineRt();
   scheduleKlineScaleSync();
+  scheduleKlineOverlay();
+}
+
+// ---- V2-KLINE-INTRADAY (Proto mock v1, Eric 2026-11-13): Beijing clock times,
+// trading-day dates, day separators, bar-count default view, 万/亿 volume.
+const KLINE_CLOCK_NOTE = "时间为北京时间，日期为交易日。";
+const KLINE_VIEW_BARS = { wide: 160, narrow: 60 };
+const KLINE_WEEK = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+
+function klineNarrow() {
+  return Boolean(window.matchMedia && window.matchMedia("(max-width: 700px)").matches);
+}
+
+function klineDefaultBars(narrow) {
+  return narrow ? KLINE_VIEW_BARS.narrow : KLINE_VIEW_BARS.wide;
+}
+
+// Logical range for the newest N bars plus the 3-bar right margin; null = fit all.
+function klineDefaultRange(count, narrow) {
+  const shown = klineDefaultBars(narrow);
+  const n = Number(count) || 0;
+  if (n <= shown) return null;
+  return { from: n - shown, to: n + 3 };
+}
+
+// Volume in 万 / 亿: below 1e4 plain, 1e4 → 1.0万, 1e8-1 → 1.00亿, 1e8 → 1.00亿.
+function klineVolume(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return "—";
+  if (Math.round(n) < 1e4) return String(Math.round(n));
+  if (n >= 1e8 || Number((n / 1e4).toFixed(1)) >= 1e4) return `${(n / 1e8).toFixed(2)}亿`;
+  return `${(n / 1e4).toFixed(1)}万`;
+}
+
+function klinePad(n) {
+  return String(n).padStart(2, "0");
+}
+
+// Beijing has no daylight saving: UTC+8 read with getUTC*.
+function klineBeijing(seconds) {
+  const d = new Date((Number(seconds) + 8 * 3600) * 1000);
+  return { month: klinePad(d.getUTCMonth() + 1), day: klinePad(d.getUTCDate()), hour: klinePad(d.getUTCHours()), minute: klinePad(d.getUTCMinutes()), date: `${d.getUTCFullYear()}-${klinePad(d.getUTCMonth() + 1)}-${klinePad(d.getUTCDate())}` };
+}
+
+// The server names the trading day (exchange rules); an older answer falls back to the Beijing date.
+function klineTradingDay(bar) {
+  const day = bar && typeof bar.trading_day === "string" ? bar.trading_day : "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(day)) return day;
+  return bar && Number.isFinite(Number(bar.time)) ? klineBeijing(bar.time).date : "";
+}
+
+function klineChartTime(bar) {
+  if (klineRt.intraday && bar && Number.isFinite(Number(bar.chart_time))) return Number(bar.chart_time);
+  return Number(bar && bar.time);
+}
+
+function indexKlineBars(bars) {
+  klineRt.byChart = new Map((bars || []).map((b) => [klineChartTime(b), b]));
+}
+
+function klineBarAt(chartTime) {
+  return (klineRt.byChart && klineRt.byChart.get(Number(chartTime))) || null;
+}
+
+// Axis: day ticks show the trading day MM-DD, the others the Beijing HH:mm of that bar.
+function klineIntradayTick(chartTime, type) {
+  const bar = klineBarAt(chartTime);
+  if (Number(type) <= 2) {
+    // chart_time sits on the trading day's UTC date, so a tick between bars still reads it.
+    const day = bar ? klineTradingDay(bar) : new Date(Number(chartTime) * 1000).toISOString().slice(0, 10);
+    return day ? day.slice(5) : "";
+  }
+  if (!bar) return "";
+  const t = klineBeijing(bar.time);
+  return `${t.hour}:${t.minute}`;
+}
+
+function klineCrosshairTime(chartTime) {
+  const bar = klineBarAt(chartTime);
+  if (!bar) return "";
+  const t = klineBeijing(bar.time);
+  return `${t.month}-${t.day} ${t.hour}:${t.minute}`;
+}
+
+function klineTradingDayText(day) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day || "");
+  if (!match) return "";
+  const week = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))).getUTCDay();
+  return `${match[2]}-${match[3]}${KLINE_WEEK[week]}`;
+}
+
+// Readout row: Beijing time, trading day, (形成中), OHLC and 量. Each item stays whole; the row may wrap.
+function klineReadoutHtml(bar, forming, fixedNote) {
+  const t = klineBeijing(bar.time);
+  const day = klineTradingDayText(klineTradingDay(bar));
+  const parts = [
+    `<span class="kline-ro-t">${t.month}-${t.day} ${t.hour}:${t.minute} 北京</span>`,
+    day ? `<span>交易日 ${escapeHtml(day)}</span>` : "",
+    forming ? '<span class="kline-live">形成中</span>' : "",
+    `<span class="kline-ro-grp"><span>开 ${klinePrice(Number(bar.open))}</span><span>高 ${klinePrice(Number(bar.high))}</span><span>低 ${klinePrice(Number(bar.low))}</span><span>收 ${klinePrice(Number(bar.close))}</span></span>`,
+    `<span>量 ${klineVolume(bar.volume)}</span>`,
+    fixedNote ? `<span class="kline-ro-note">${escapeHtml(fixedNote)}</span>` : "",
+  ];
+  return parts.join("");
+}
+
+// Separators between trading days: index of the first bar of the new day, and the
+// label: 周末休市 (narrow 周末) across a weekend, 休市 across a weekday holiday.
+function klineDayBreaks(bars, narrow) {
+  const out = [];
+  for (let i = 1; i < (bars || []).length; i++) {
+    const before = klineTradingDay(bars[i - 1]);
+    const after = klineTradingDay(bars[i]);
+    if (!before || !after || before === after) continue;
+    const a = Date.parse(`${before}T00:00:00Z`);
+    const b = Date.parse(`${after}T00:00:00Z`);
+    const days = Math.round((b - a) / 864e5);
+    let label = "";
+    if (days > 1) {
+      let weekend = false;
+      for (let k = 1; k < days; k++) { const w = new Date(a + k * 864e5).getUTCDay(); if (w === 0 || w === 6) weekend = true; }
+      label = weekend ? (narrow ? "周末" : "周末休市") : "休市";
+    }
+    out.push({ index: i, day: after, label });
+  }
+  return out;
+}
+
+function scheduleKlineOverlay() {
+  paintKlineOverlay();
+  if (typeof window.requestAnimationFrame !== "function") return;
+  window.requestAnimationFrame(() => window.requestAnimationFrame(paintKlineOverlay));
+}
+
+function paintKlineOverlay() {
+  const overlay = document.querySelector("#kline-overlay");
+  if (!overlay) return;
+  const timeScale = klineChart && typeof klineChart.timeScale === "function" ? klineChart.timeScale() : null;
+  const bars = klineRt.bars || [];
+  if (!klineRt.intraday || !timeScale || typeof timeScale.logicalToCoordinate !== "function" || !bars.length) {
+    overlay.innerHTML = "";
+    return;
+  }
+  const right = overlay.clientWidth - Math.max(KLINE_SCALE_W, klineScaleLock || 0);
+  let html = "";
+  for (const item of klineDayBreaks(bars, klineNarrow())) {
+    const x1 = timeScale.logicalToCoordinate(item.index - 1);
+    const x2 = timeScale.logicalToCoordinate(item.index);
+    if (x1 == null || x2 == null) continue;
+    const x = (x1 + x2) / 2;
+    if (x < 0 || x > right) continue;
+    html += `<div class="kline-gap" style="left:${x.toFixed(1)}px">${item.label ? `<b>${item.label}</b>` : ""}</div>`;
+  }
+  const last = bars[bars.length - 1];
+  if (klineRt.forming && klineRt.candles && typeof klineRt.candles.priceToCoordinate === "function") {
+    const x = timeScale.timeToCoordinate ? timeScale.timeToCoordinate(klineChartTime(last)) : null;
+    const y = klineRt.candles.priceToCoordinate(Number(last.close));
+    if (x != null && y != null && x <= right) html += `<div class="kline-live-dot${Number(last.close) < Number(last.open) ? " kline-live-dot--down" : ""}" style="left:${x.toFixed(1)}px;top:${y.toFixed(1)}px"></div>`;
+  }
+  overlay.innerHTML = html;
+}
+
+function klineEdgeText(data, tfLabel) {
+  if (!tfLabel || !(data.tf === "1H" || data.tf === "5m")) return null;
+  const crypto = data.asset_type === "crypto";
+  if (data.tf === "5m") {
+    return crypto
+      ? { span: "5分钟线数据源只给近 24 小时，", tf: "1H", label: "小时线", more: "（近 14 天）" }
+      : { span: "5分钟线数据源只给近 5 个交易日，", tf: "1H", label: "小时线", more: "（近 60 天）" };
+  }
+  return crypto
+    ? { span: "小时线数据源只给近 14 天，", tf: "1D", label: "日线", more: "（近 1 年）" }
+    : { span: "小时线数据源只给近 60 天，", tf: "1D", label: "日线", more: "（近 1 年）" };
+}
+
+// Mock #limited: dragged to the first bar of a series longer than the default view.
+function paintKlineEdge(range) {
+  scheduleKlineOverlay();
+  const edge = document.querySelector("#kline-edge");
+  const bars = klineRt.bars || [];
+  const hint = klineRt.edgeHint;
+  if (!edge) return;
+  const atStart = Boolean(range && hint && bars.length > klineDefaultBars(klineNarrow()) && Number(range.from) <= 0);
+  edge.hidden = !atStart;
+  if (!atStart) { edge.innerHTML = ""; return; }
+  const day = klineTradingDay(bars[0]);
+  edge.innerHTML = `已到最早一根（交易日 ${escapeHtml(day.slice(5))}）。<br class="notice-break">${escapeHtml(hint.span)}<br class="notice-break">更早请看 <a href="#" data-kline-tf="${hint.tf}">${escapeHtml(hint.label)}</a>${escapeHtml(hint.more)}。`;
+}
+
+function klineEmptyHtml(data, tfLabel) {
+  const symbol = escapeHtml(data.symbol || data.canonical || "");
+  return `<div class="kline-empty" id="kline-empty"><strong>还没有${escapeHtml(tfLabel)}K线</strong><span>数据源这次没有返回 ${symbol} 的${escapeHtml(tfLabel)}数据。<br class="notice-break">可能是休市日、刚上市，或分钟数据还没生成。</span><div class="kline-empty-row"><button class="button button--secondary" type="button" data-kline-tf="1D">改看日线</button><button class="button button--secondary" type="button" data-kline-tf="${escapeHtml(data.tf)}">重试</button></div></div>`;
+}
+
+// Mock #loading: switching period on the same chart.
+function paintKlineTfLoading(tf) {
+  const card = document.querySelector("#kline-card");
+  const wrap = document.querySelector("#kline-wrap");
+  if (!card || !wrap) return;
+  const label = klineTfLabel(tf);
+  card.classList.toggle("kline-card--loading", Boolean(label));
+  wrap.querySelector("#kline-loading")?.remove();
+  document.querySelectorAll("#kline-tf [data-tf]").forEach((b) => {
+    const busy = Boolean(label) && b.dataset.tf === tf;
+    if (busy) b.setAttribute("aria-busy", "true"); else b.removeAttribute("aria-busy");
+    b.querySelector(".kline-spin")?.remove();
+    if (busy) b.insertAdjacentHTML("afterbegin", '<span class="kline-spin kline-spin--small" aria-hidden="true"></span>');
+  });
+  if (!label) return;
+  wrap.insertAdjacentHTML("beforeend", `<div class="kline-loading" id="kline-loading" role="status"><span><span class="kline-spin" aria-hidden="true"></span>正在加载${escapeHtml(label)}…</span></div>`);
+  const source = document.querySelector("#kline-source");
+  if (source) source.textContent = "数据源：正在加载…";
+  setKlineLive("加载中，暂停刷新", true);
 }
 
 // V2-KLINE-RT: while the K 线行情 page is open and the tab is visible, poll
@@ -6896,7 +7182,10 @@ function updateKlineRealtimeSummary(next) {
     changeEl.classList.toggle("kline-change--down", Number(next.close) < Number(klineRt.firstOpen));
   }
   const ohlc = document.querySelector("#kline-ohlc");
-  if (ohlc) {
+  if (ohlc && klineRt.intraday) {
+    ohlc.innerHTML = klineReadoutHtml(next, klineRt.forming, next.ohlc_fixed ? "源数据不一致，已修正高低价" : "");
+    ohlc.classList.toggle("kline-ohlc--fixed", Boolean(next.ohlc_fixed));
+  } else if (ohlc) {
     const text = `开 ${klinePrice(next.open)}  高 ${klinePrice(next.high)}  低 ${klinePrice(next.low)}  收 ${klinePrice(next.close)}`;
     ohlc.innerHTML = klineOhlcHtml(text, next.ohlc_fixed);
     ohlc.classList.toggle("kline-ohlc--fixed", Boolean(next.ohlc_fixed));
@@ -6905,14 +7194,26 @@ function updateKlineRealtimeSummary(next) {
 
 function updateKlineSeries(bars) {
   if (!bars.length || !klineRt.candles || !klineRt.volume) return;
-  if (typeof klineRt.candles.setData === "function") klineRt.candles.setData(bars.map((b) => ({ time: b.time, open: b.open, high: b.high, low: b.low, close: b.close })));
-  if (typeof klineRt.volume.setData === "function") klineRt.volume.setData(bars.map((b) => ({ time: b.time, value: b.volume, color: b.close >= b.open ? "rgba(38,166,154,.35)" : "rgba(239,83,80,.35)" })));
+  indexKlineBars(bars);
+  if (typeof klineRt.candles.setData === "function") klineRt.candles.setData(bars.map((b) => ({ time: klineChartTime(b), open: b.open, high: b.high, low: b.low, close: b.close })));
+  if (typeof klineRt.volume.setData === "function") klineRt.volume.setData(bars.map((b) => ({ time: klineChartTime(b), value: b.volume, color: b.close >= b.open ? "rgba(38,166,154,.35)" : "rgba(239,83,80,.35)" })));
   scheduleKlineScaleSync();
+  scheduleKlineOverlay();
 }
 
 async function refreshKlineHistory(seq, latestBar) {
   const path = `/api/kline?symbol=${encodeURIComponent(klineRt.symbol)}&tf=${encodeURIComponent(klineRt.tf)}&refresh=1`;
-  const data = await api(path);
+  // Mock #refresh: while the gap is refetched, the source pill and footer say so.
+  const source = document.querySelector("#kline-source");
+  const sourceHtml = source ? source.innerHTML : "";
+  if (source && sourceHtml && !source.textContent.includes("补齐中")) source.innerHTML = `${sourceHtml} · 补齐中`;
+  setKlineLive(`正在补齐缺口（重新拉取${klineTfLabel(klineRt.tf)}）…`, true);
+  let data;
+  try {
+    data = await api(path);
+  } finally {
+    if (source && sourceHtml) source.innerHTML = sourceHtml;
+  }
   if (seq !== klineRt.seq || !klineRtActive()) return;
   if (data.tf === "1H" || data.tf === "5m") {
     klineRt.bars = (data.bars || []).map((b) => ({ ...b, time: Number(b.time) }));
@@ -6942,12 +7243,22 @@ function applyIntradayBar(bar) {
   const step = klineRt.tf === "1H" ? 3600 : 300;
   if (last && time > Number(last.time) + step * 6) return { gap: true };
   const next = { ...bar, time };
+  // An answer without chart_time keeps the slot of the same bar, or follows the last one.
+  if (!Number.isFinite(Number(next.chart_time))) {
+    const same = last && Number(last.time) === time ? last : null;
+    if (same && Number.isFinite(Number(same.chart_time))) next.chart_time = Number(same.chart_time);
+    else if (last && Number.isFinite(Number(last.chart_time))) next.chart_time = Number(last.chart_time) + (time - Number(last.time));
+  }
+  if (!next.trading_day && last && Number(last.time) === time && last.trading_day) next.trading_day = last.trading_day;
   if (last && Number(last.time) === time) bars[bars.length - 1] = next;
   else bars.push(next);
   klineRt.bars = bars;
-  klineRt.candles.update({ time, open: next.open, high: next.high, low: next.low, close: next.close });
-  klineRt.volume.update({ time, value: next.volume, color: next.close >= next.open ? "rgba(38,166,154,.35)" : "rgba(239,83,80,.35)" });
+  const chartTime = klineChartTime(next);
+  if (klineRt.byChart) klineRt.byChart.set(chartTime, next);
+  klineRt.candles.update({ time: chartTime, open: next.open, high: next.high, low: next.low, close: next.close });
+  klineRt.volume.update({ time: chartTime, value: next.volume, color: next.close >= next.open ? "rgba(38,166,154,.35)" : "rgba(239,83,80,.35)" });
   updateKlineRealtimeSummary(next);
+  scheduleKlineOverlay();
   return next;
 }
 
@@ -6990,7 +7301,7 @@ document.addEventListener("visibilitychange", () => {
   startKlineRt();
 });
 window.addEventListener("resize", () => {
-  if (state.page === "kline") scheduleKlineScaleSync();
+  if (state.page === "kline") { scheduleKlineScaleSync(); scheduleKlineOverlay(); }
 });
 
 // ---- V2-INFO-CRAWL: 信息抓取 (#start/info-crawl). Official public sources only;

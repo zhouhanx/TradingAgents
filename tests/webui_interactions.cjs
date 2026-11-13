@@ -68,7 +68,10 @@ async function setup(overrides = {}, {html = markup, url = WIZARD_URL} = {}) {
   const routes = {
     '/api/catalog': catalog,
     '/api/auth/status': auth,
-    '/api/config': {saved: {}, keys: [{provider: 'openai', configured: false, env_var: 'OPENAI_API_KEY'}], data_env: [], cloud_env: []},
+    // A POST answers like the server ({saved: true, config}); the page only says 已保存 for saved === true.
+    '/api/config': (options) => options.method === 'POST'
+      ? {saved: true, config: {}}
+      : {saved: {}, keys: [{provider: 'openai', configured: false, env_var: 'OPENAI_API_KEY'}], data_env: [], cloud_env: []},
     '/api/updates': {}, '/api/auth/login': {status: 'idle', messages: []},
     '/api/runs': {run: null, progress: {}, result: null},
     '/api/reports': {reports: []}, '/api/backtests': {sweeps: []},
@@ -224,6 +227,7 @@ test('the 保存与续跑 drawer is wide enough, discards on Escape and applies 
   let fail = false;
   const ui = await setup({'/api/config': (options) => {
     if (options.method && fail) throw new Error('配置写入失败');
+    if (options.method === 'POST') return {saved: true, config: {}};
     return {saved: {}, keys: [], data_env: [], cloud_env: []};
   }});
   try {
@@ -1636,7 +1640,7 @@ test('the already-running lock note does not split 这句 on a narrow screen', a
     assert.doesNotMatch(note.textContent, /已经启动|锁已释放/);
     const other = ui.doc.querySelector('#already-socket-note');
     assert.match(other.textContent, /控制套接字仍在监听/);
-    assert.match(other.innerHTML, /拿到<br class="notice-break">文件锁/);
+    assert.match(other.innerHTML, /restart <br class="notice-break">已经拿到文件锁，/, 'the socket note keeps 文件锁 whole, as its own test pins');
   } finally { ui.dom.window.close(); }
 });
 
@@ -3623,7 +3627,8 @@ test('查看状态 shows a 「工具」 column and the detail names the framewor
     assert.equal(cols.length, head.length, 'one grid track per header cell');
     await ui.click('#run-list [data-run-id="run-btc"]');
     await settleMany();
-    assert.match(doc.querySelector('#run-detail-head .sub').textContent, /^TradingAgents · /, 'the detail subtitle starts with the framework name');
+    // The first .sub is #run-kind (分析/回测); the framework line follows it.
+    assert.match(doc.querySelector('#run-detail-head .sub:not(#run-kind)').textContent, /^TradingAgents · /, 'the detail subtitle starts with the framework name');
   } finally { ui.dom.window.close(); }
 });
 
@@ -6144,11 +6149,11 @@ test('a five minute kline is still called five minutes', async () => {
     span_note: '5分钟线，请求近 5 天，长度以实际返回为准。',
   }));
   try {
-    assert.match(ui.doc.querySelector('#kline-source').textContent, /股票5分钟/);
+    assert.match(ui.doc.querySelector('#kline-source').textContent, /股票5分钟线 NVDA/);
     assert.match(ui.doc.querySelector('#kline-note').textContent, /5分钟线/);
     assert.doesNotMatch(ui.doc.querySelector('#kline-source').textContent, /日线/);
     assert.doesNotMatch(ui.doc.querySelector('#kline-note').textContent, /不把它写成日线/);
-    assert.equal(ui.doc.querySelector('#kline-tf .seg-item.on')?.textContent, '5分钟');
+    assert.equal(ui.doc.querySelector('#kline-tf .seg-item.on')?.textContent, '5分钟线');
   } finally { ui.dom.window.close(); }
 });
 
@@ -6818,4 +6823,167 @@ test('a save path refusal does not split 目录', async () => {
     assert.match(error.innerHTML, /reports 下。<br class="notice-break">命令行可以选其他文件夹，<br class="notice-break">控制台不写出这个目录。/);
     assert.doesNotMatch(error.innerHTML, /目<br|录<br/);
   } finally { ui.dom.window.close(); }
+});
+
+// ---- V2-KLINE-INTRADAY mock v1 (Eric 2026-11-13): Beijing clock, trading day,
+// day separators, 160/60-bar default view, 万/亿 volume.
+const ET_1440 = Date.UTC(2026, 10, 12, 19, 40) / 1000; // 11-12 14:40 ET = 11-13 03:40 Beijing
+const DAY_1112 = Date.UTC(2026, 10, 12) / 1000;
+function intradayBars(count, {tradingDay = '2026-11-12', volume = 12345} = {}) {
+  return Array.from({length: count}, (_, i) => {
+    const back = (count - 1 - i) * 300;
+    const close = 170 + (i % 7);
+    return {time: ET_1440 - back, chart_time: DAY_1112 + (18 * 3600 + 40 * 60) - back, trading_day: tradingDay,
+      open: close - 0.5, high: close + 1, low: close - 1, close, volume};
+  });
+}
+
+async function intradaySetup(count, {narrow = false, route = {}, latest} = {}) {
+  const bars = intradayBars(count);
+  const payload = {symbol: 'NVDA', canonical: 'NVDA', asset_type: 'stock', tf: '5m', provider: 'yahoo', provider_symbol: 'NVDA',
+    bars, stale_bar: false, span_note: '5分钟线，请求近 5 天，长度以实际返回为准。', history_label: '近5天', ...route};
+  const ui = await setup({
+    '/api/kline': (options, path) => (typeof payload === 'function' ? payload(path) : (path.includes('tf=1D') ? {...payload, tf: '1D', bars: [{time: DAY_1112, open: 1, high: 2, low: 0.5, close: 1.5, volume: 9}]} : payload)),
+    '/api/kline/latest': latest || {asset_type: 'stock', poll_seconds: 60, delayed: true, bar: bars[bars.length - 1]},
+  });
+  ui.window.matchMedia = (query) => ({matches: narrow && /max-width: 700px/.test(query), addEventListener() {}, removeEventListener() {}});
+  const charts = [];
+  const ranges = [];
+  let fits = 0;
+  const makeSeries = (kind, opts) => ({kind, opts, data: [], setData(p) { this.data = p; }, update() {}, priceScale: () => ({applyOptions() {}})});
+  ui.window.LightweightCharts = {createChart: (host, options) => {
+    const chart = {host, options, series: [], subscribeCrosshairMove() {}, remove() {}, applyOptions() {},
+      addCandlestickSeries(o) { const s = makeSeries('candles', o); this.series.push(s); return s; },
+      addHistogramSeries(o) { const s = makeSeries('volume', o); this.series.push(s); return s; },
+      timeScale: () => ({fitContent() { fits += 1; }, subscribeVisibleLogicalRangeChange() {}, setVisibleLogicalRange(r) { ranges.push(r); }})};
+    charts.push(chart);
+    return chart;
+  }};
+  ui.window.setTimeout = () => 0; // no polling in these tests
+  ui.window.uiTest.state.kline = {symbol: 'NVDA', asset: 'stock', tf: '5m'};
+  await ui.click('.nav-item[data-page=kline]');
+  for (let i = 0; i < 8; i++) await settle();
+  return {...ui, bars, charts, ranges, fits: () => fits};
+}
+
+test('K 线 volume reads in 万 and 亿 at the boundaries (V2-KLINE-INTRADAY)', async () => {
+  const ui = await setup();
+  try {
+    const v = ui.window.klineVolume;
+    assert.equal(v(0), '0');
+    assert.equal(v(9999), '9999');
+    assert.equal(v(9999.4), '9999');
+    assert.equal(v(9999.6), '1.0万', 'rounds up into 万, never 10000');
+    assert.equal(v(10000), '1.0万');
+    assert.equal(v(17_729_000), '1772.9万');
+    assert.equal(v(99_940_000), '9994.0万');
+    assert.equal(v(99_999_999), '1.00亿', 'never 10000.0万');
+    assert.equal(v(1e8), '1.00亿');
+    assert.equal(v(2.5e9), '25.00亿');
+    assert.equal(v(-1), '—');
+    assert.equal(v(Number.NaN), '—');
+  } finally { ui.dom.window.close(); }
+});
+
+test('K 线 intraday opens on the newest 160 bars, 60 on a narrow screen, and fits a short series (V2-KLINE-INTRADAY)', async () => {
+  const pure = await setup();
+  try {
+    const w = pure.window;
+    assert.equal(w.klineDefaultBars(false), 160);
+    assert.equal(w.klineDefaultBars(true), 60);
+    assert.deepEqual({...w.klineDefaultRange(390, false)}, {from: 230, to: 393});
+    assert.deepEqual({...w.klineDefaultRange(390, true)}, {from: 330, to: 393});
+    assert.equal(w.klineDefaultRange(160, false), null, '160 bars or fewer: fit them all');
+    assert.equal(w.klineDefaultRange(60, true), null);
+  } finally { pure.dom.window.close(); }
+  const wide = await intradaySetup(200);
+  try {
+    assert.deepEqual(wide.ranges.map((r) => ({...r})), [{from: 40, to: 203}, {from: 40, to: 203}], 'price and volume panes both');
+    assert.equal(wide.fits(), 0);
+    assert.equal(wide.charts[0].options.rightPriceScale.minimumWidth, 72);
+    assert.equal(wide.charts[1].options.rightPriceScale.minimumWidth, 72);
+  } finally { wide.dom.window.close(); }
+  const narrow = await intradaySetup(200, {narrow: true});
+  try {
+    assert.deepEqual({...narrow.ranges[0]}, {from: 140, to: 203});
+  } finally { narrow.dom.window.close(); }
+  const short = await intradaySetup(100);
+  try {
+    assert.equal(short.ranges.length, 0);
+    assert.equal(short.fits(), 2);
+  } finally { short.dom.window.close(); }
+});
+
+test('K 线 intraday axis and crosshair read Beijing time, day ticks and the readout read the trading day (V2-KLINE-INTRADAY)', async () => {
+  const ui = await intradaySetup(200);
+  try {
+    const [price, volume] = ui.charts;
+    const last = ui.bars[ui.bars.length - 1];
+    const tick = price.options.timeScale.tickMarkFormatter;
+    assert.equal(tick(last.chart_time, 3), '03:40', 'a time tick is the Beijing clock, not New York');
+    assert.equal(tick(last.chart_time, 2), '11-12', 'a day tick is the trading day, not the Beijing date 11-13');
+    assert.equal(price.options.localization.timeFormatter(last.chart_time), '11-13 03:40');
+    assert.equal(price.options.timeScale.timeVisible, true);
+    assert.equal(price.series[0].data.at(-1).time, last.chart_time, 'candles sit on chart_time');
+    // the volume pane: no price label on its crosshair, 万/亿 on its axis
+    assert.deepEqual({...volume.options.crosshair.horzLine}, {visible: false, labelVisible: false});
+    assert.equal(volume.series[0].opts.priceFormat.type, 'custom');
+    assert.equal(volume.series[0].opts.priceFormat.formatter(17_729_000), '1772.9万');
+    const ohlc = ui.doc.querySelector('#kline-ohlc');
+    assert.ok(ohlc.classList.contains('kline-ohlc--ro'), 'the readout row may wrap between items');
+    assert.equal([...ohlc.children].map((c) => c.textContent).join('|'),
+      '11-13 03:40 北京|交易日 11-12周四|形成中|开 172.50高 174.00低 172.00收 173.00|量 1.2万');
+    assert.match(ui.doc.querySelector('#kline-note').textContent, /时间为北京时间，日期为交易日。/);
+  } finally { ui.dom.window.close(); }
+  const daily = await setup();
+  try {
+    assert.equal(daily.window.klineTickLabel(DAY_1112, '1D'), '11-12', 'daily ticks are unchanged');
+  } finally { daily.dom.window.close(); }
+});
+
+test('K 线 day separators sit at trading-day changes; weekends say 周末休市 (周末 when narrow), a weekday holiday 休市 (V2-KLINE-INTRADAY)', async () => {
+  const ui = await setup();
+  try {
+    const breaks = (days, narrow = false) => [...ui.window.klineDayBreaks(days.map((d, i) => ({time: 1_800_000_000 + i * 300, trading_day: d})), narrow)].map((b) => ({...b}));
+    assert.deepEqual(breaks(['2026-11-11', '2026-11-11', '2026-11-12', '2026-11-12']), [{index: 2, day: '2026-11-12', label: ''}]);
+    assert.deepEqual(breaks(['2026-11-13', '2026-11-16']), [{index: 1, day: '2026-11-16', label: '周末休市'}]);
+    assert.deepEqual(breaks(['2026-11-13', '2026-11-16'], true), [{index: 1, day: '2026-11-16', label: '周末'}]);
+    assert.deepEqual(breaks(['2026-11-25', '2026-11-27']), [{index: 1, day: '2026-11-27', label: '休市'}], 'Thanksgiving is not a weekend');
+    assert.deepEqual(breaks(['2026-04-02', '2026-04-06']), [{index: 1, day: '2026-04-06', label: '周末休市'}], 'Good Friday + weekend');
+    assert.deepEqual(breaks(['2026-11-12', '2026-11-12', '2026-11-12']), [], 'an overnight bar inside one trading day is no separator');
+    // An older answer without trading_day falls back to the Beijing date.
+    const old = [...ui.window.klineDayBreaks([{time: Date.UTC(2026, 10, 12, 15, 55) / 1000}, {time: Date.UTC(2026, 10, 12, 16, 0) / 1000}], false)];
+    assert.deepEqual(old.map((b) => b.day), ['2026-11-13'], '16:00 UTC is 00:00 Beijing');
+    assert.match(readFileSync(resolve(root, 'webui/static/app.css'), 'utf8'), /\.kline-gap \{[^}]*border-left: 1px dashed/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('K 线 period switch on the same chart fades it and names the coming period; an empty minute answer offers 日线 and 重试 (V2-KLINE-INTRADAY)', async () => {
+  let release;
+  const ui = await intradaySetup(200);
+  try {
+    ui.routes['/api/kline'] = () => new Promise((done) => { release = done; });
+    await ui.click('#kline-tf [data-tf="1H"]');
+    assert.match(ui.doc.querySelector('#kline-loading').textContent, /正在加载小时线…/);
+    assert.ok(ui.doc.querySelector('#kline-card').classList.contains('kline-card--loading'));
+    assert.equal(ui.doc.querySelector('#kline-tf [data-tf="1H"]').getAttribute('aria-busy'), 'true');
+    assert.equal(ui.doc.querySelector('#kline-source').textContent, '数据源：正在加载…');
+    assert.equal(ui.doc.querySelector('#kline-stale').hidden, true, 'same symbol: no 「未更新」 badge');
+    release({symbol: 'NVDA', canonical: 'NVDA', asset_type: 'stock', tf: '1H', provider: 'yahoo', provider_symbol: 'NVDA', bars: intradayBars(10)});
+    for (let i = 0; i < 8; i++) await settle();
+    assert.equal(ui.doc.querySelector('#kline-loading'), null);
+    assert.ok(!ui.doc.querySelector('#kline-card').classList.contains('kline-card--loading'));
+    assert.equal(ui.doc.querySelector('#kline-tf [data-tf="1H"]').getAttribute('aria-busy'), null);
+    assert.match(ui.doc.querySelector('#kline-source').textContent, /数据源：股票小时线 NVDA/);
+  } finally { ui.dom.window.close(); }
+  const empty = await intradaySetup(0);
+  try {
+    const box = empty.doc.querySelector('#kline-empty');
+    assert.match(box.textContent, /还没有5分钟线K线/);
+    assert.match(box.textContent, /数据源这次没有返回 NVDA 的5分钟线数据/);
+    assert.match(empty.doc.querySelector('#kline-live').textContent, /没有分钟数据，暂不刷新/);
+    await empty.click('#kline-empty [data-kline-tf="1D"]');
+    for (let i = 0; i < 8; i++) await settle();
+    assert.ok(empty.calls.some((c) => c.path.startsWith('/api/kline?') && c.path.includes('tf=1D')), '改看日线 asks for daily bars');
+  } finally { empty.dom.window.close(); }
 });

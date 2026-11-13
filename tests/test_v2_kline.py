@@ -544,7 +544,9 @@ def test_short_daily_history_is_not_labeled_one_year(monkeypatch):
     assert "n <= 0" in script
     assert "if (data.delayed != null) klineRt.delayed" in script
     assert "延时未知，不写成实时" in script
-    assert 'data.asset_type === "crypto" ? null : true' in script
+    # A missing delay is not realtime: only a known stock or metal defaults to delayed, anything else is unknown.
+    assert 'else if (data.asset_type === "stock" || data.asset_type === "commodity") klineRt.delayed = true;' in script
+    assert "else klineRt.delayed = null;" in script
     assert "provider_symbol || \"—\"" in script
 
 def test_non_positive_bar_is_not_drawn(monkeypatch):

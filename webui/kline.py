@@ -17,7 +17,8 @@ import re
 import threading
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -522,6 +523,7 @@ def intraday(symbol: str, tf: str, *, refresh: bool = False) -> dict:
         with _lock:
             _cache[key] = (now, chosen)
     bars, omitted_unpriced = _priced_bars(chosen["bars"])
+    bars = with_sessions(bars, info["canonical"], info["asset_type"])
     stale = _stale_bar(bars[-1]["time"] if bars else None, tf, now)
     ohlc_fixed = sum(1 for b in bars if b.get("ohlc_fixed"))
     payload = {
@@ -553,6 +555,82 @@ def intraday(symbol: str, tf: str, *, refresh: bool = False) -> dict:
     if ohlc_fixed:
         payload["ohlc_note"] = ohlc_check.NOTE_ZH
     return payload
+
+
+# V2-KLINE-INTRADAY (Eric 2026-11-13): the page shows Beijing clock times, and the
+# date on the axis and in the readout is the trading day. Each intraday bar gets
+# ``trading_day`` (YYYY-MM-DD) and ``chart_time``: the trading day's 00:00 UTC plus
+# the time since that session's start, so the chart library's day ticks fall on
+# trading-day changes. ``time`` stays the real epoch and is what the page shows.
+BEIJING = ZoneInfo("Asia/Shanghai")
+NEW_YORK = ZoneInfo("America/New_York")
+HONG_KONG = ZoneInfo("Asia/Hong_Kong")
+# US stocks: pre-market, regular and after-hours share the New York date; a bar at
+# or after 20:00 ET (overnight session) belongs to the next trading day.
+US_STOCK_ROLL_HOUR = 20
+# CME Globex (GC=F and other =F): the trading day starts at 18:00 ET the evening before.
+CME_ROLL_HOUR = 18
+
+
+def session_rule(canonical: str, asset: str) -> tuple[ZoneInfo, int | None]:
+    """(exchange clock, hour the next trading day starts or None for midnight)."""
+    code = (canonical or "").upper()
+    if asset == "crypto":
+        return BEIJING, None
+    if asset == "commodity" or code.endswith("=F"):
+        return NEW_YORK, CME_ROLL_HOUR
+    if code.endswith(".HK"):
+        return HONG_KONG, None
+    if code.endswith((".SS", ".SZ", ".BJ")) or "." in code:
+        return BEIJING, None
+    return NEW_YORK, US_STOCK_ROLL_HOUR
+
+
+def session_day(ts, canonical: str, asset: str) -> tuple[str, int]:
+    """(trading_day, chart_time) for one bar start time ``ts`` (epoch seconds)."""
+    clock, roll = session_rule(canonical, asset)
+    local = datetime.fromtimestamp(int(ts), clock).replace(tzinfo=None)
+    day = local.date()
+    if roll is None:
+        start = datetime(day.year, day.month, day.day)
+    elif local.hour >= roll:
+        start = datetime(day.year, day.month, day.day, roll)
+        day = day + timedelta(days=1)
+    else:
+        start = datetime(day.year, day.month, day.day, roll) - timedelta(days=1)
+    if roll is not None:
+        # Sunday evening futures open Monday's session; nothing trades for Saturday.
+        while day.weekday() >= 5:
+            day = day + timedelta(days=1)
+    offset = int((local - start).total_seconds())
+    offset = min(max(offset, 0), 86399)
+    anchor = int(datetime(day.year, day.month, day.day, tzinfo=UTC).timestamp())
+    return day.isoformat(), anchor + offset
+
+
+def with_sessions(bars: list[dict], canonical: str, asset: str) -> list[dict]:
+    """Copies of ``bars`` with trading_day and a strictly increasing chart_time."""
+    out, last = [], None
+    for bar in bars:
+        trading_day, chart_time = session_day(bar["time"], canonical, asset)
+        if last is not None and chart_time <= last:
+            chart_time = last + 1
+        last = chart_time
+        out.append({**bar, "trading_day": trading_day, "chart_time": chart_time})
+    return out
+
+
+def trading_day_gap(previous: str, current: str) -> str:
+    """How the page names the break between two trading days.
+
+    "" for consecutive days (an ordinary overnight close), "weekend" when the
+    break spans a Saturday or Sunday, "closed" for a weekday holiday.
+    """
+    a, b = date.fromisoformat(previous), date.fromisoformat(current)
+    if (b - a).days <= 1:
+        return ""
+    between = (a + timedelta(days=n) for n in range(1, (b - a).days))
+    return "weekend" if any(d.weekday() >= 5 for d in between) else "closed"
 
 
 def normalize_tf(tf: str | None) -> str:
@@ -753,6 +831,9 @@ def _latest_intraday(symbol: str, tf: str) -> dict:
             raise KlineError("暂时拿不到最新行情，稍后会自动重试。")
         with _lock:
             _live_cache[key] = (now, answer)
+    bar = answer["bar"]
+    trading_day, chart_time = session_day(bar["time"], info["canonical"], asset)
+    answer = {**answer, "bar": {**bar, "trading_day": trading_day, "chart_time": chart_time}}
     return {
         "symbol": (symbol or "").strip().upper(),
         "canonical": info["canonical"],

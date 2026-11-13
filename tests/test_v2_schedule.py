@@ -15,6 +15,16 @@ def _id(view):
     return view["schedules"][0]["id"]
 
 
+def _created_before_due(root):
+    """Schedules created now would not be due at the fixed DUE (a slot before
+    creation is not due), so date them before it, as the newer tests do."""
+    path = root / "schedule.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for item in data["schedules"]:
+        item["created_at"] = "2026-11-10T08:00:00+08:00"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
 def test_create_pause_resume_and_remove(tmp_path):
     view = schedule.create_schedule("aapl", "9:30", tmp_path)
     assert view["schedules"][0]["symbol"] == "AAPL"
@@ -39,6 +49,7 @@ def test_create_pause_resume_and_remove(tmp_path):
 
 def test_due_trigger_is_saved_once_and_observe_does_not_start(tmp_path):
     schedule.create_schedule("600519", "09:30", tmp_path)
+    _created_before_due(tmp_path)
     calls = []
 
     def starter(trigger):
@@ -64,6 +75,7 @@ def test_paused_schedule_does_not_fire(tmp_path):
 
 def test_version_change_discards_and_rechecks_without_starting(tmp_path):
     schedule.create_schedule("XAUUSD", "09:30", tmp_path)
+    _created_before_due(tmp_path)
     calls = []
     schedule.fire_due(DUE, tmp_path, version_during_check="sched-2", starter=lambda trigger: calls.append(trigger))
     view = schedule.list_schedules(tmp_path)
@@ -82,6 +94,7 @@ def test_version_change_discards_and_rechecks_without_starting(tmp_path):
 
 def test_same_trigger_starts_once_only_when_a_starter_is_injected(tmp_path):
     schedule.create_schedule("BTC-USDT", "09:30", tmp_path)
+    _created_before_due(tmp_path)
     path = tmp_path / "schedule.json"
     data = json.loads(path.read_text(encoding="utf-8"))
     data["mode"] = "auto"
@@ -381,6 +394,7 @@ def test_latest_due_is_kept_when_the_recent_window_moves_on(tmp_path):
     first_id = first["schedules"][0]["id"]
     for index in range(12):
         schedule.create_schedule(f"SYM{index:02d}", "09:30", tmp_path)
+    _created_before_due(tmp_path)
     fired = schedule.fire_due(now, tmp_path)
     assert len(fired["triggers"]) == 10
     kept = next(item for item in fired["schedules"] if item["id"] == first_id)
@@ -633,6 +647,7 @@ def test_unknown_mode_is_not_called_enabled(tmp_path):
 
 def test_closed_recheck_is_a_refusal_not_observe(tmp_path):
     schedule.create_schedule("MSFT", "09:30", tmp_path)
+    _created_before_due(tmp_path)
     calls = []
     schedule.fire_due(DUE, tmp_path, version_during_check="sched-2", starter=lambda trigger: calls.append(trigger))
     path = tmp_path / "schedule.json"

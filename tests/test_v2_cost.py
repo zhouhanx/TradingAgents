@@ -162,7 +162,7 @@ def test_cost_page_names_prompt_and_completion_counts():
     script = Path("webui/static/app.js").read_text(encoding="utf-8")
     assert "提示 ${row.prompt_count} · 完成 ${row.completion_count}" in script
     assert "prompt_count}↑" not in script
-    assert "429 记为限流，不是预算超限" in script
+    assert "429 记为限流，不是预算超限" in script.replace('<br class=\\"notice-break\\">', "")
     assert "budget_exceeded" not in script
 
 

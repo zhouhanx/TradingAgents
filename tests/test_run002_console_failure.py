@@ -318,7 +318,9 @@ def test_the_call_budget_is_validated_and_saved(console):
 
 def test_the_page_shows_the_failure_and_the_checkpoint_default():
     script = Path("webui/static/app.js").read_text(encoding="utf-8")
-    assert 'run.status === "failed" && run.failure && run.detail' in script
+    # The detail now goes through shownRunDetail so a non-analysis run is not given the analysis sentence.
+    assert 'run.status === "failed" && run.failure && shownRunDetail(run)' in script
+    assert 'id="run-failure">${punctBreakHtml(shownRunDetail(run))}' in script
     assert 'id="run-failure"' in script
     assert "run.checkpoint?.saved" in script
     # WEBUI-005: the checkpoint switch lives in the 保存与续跑 drawer and is on unless turned off.

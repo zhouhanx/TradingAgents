@@ -1089,7 +1089,8 @@ def test_login_completion_keeps_the_cli_sentence():
     assert "error-banner" in body
     assert body.index("await renderAccounts();") < body.index("error-banner")
     assert "setAuthCardFeedback(provider, `正在启动 ${label} 登录…`);" in body
-    assert "button.textContent = \"等待授权\"" in body
+    # Eric's newer code shows 等待授权 only when the server really is waiting.
+    assert "button.textContent = waiting ? \"等待授权\" : originalLabel" in body
     logout_body = script[script.index("async function logout"):script.index("async function saveKey")]
     assert "button.textContent = \"正在退出\"" in logout_body
     assert "setAuthCardFeedback(provider, error.message, true);" in logout_body
@@ -2643,7 +2644,9 @@ def test_console_status_sentence_matches_launcher_phases_only():
     assert "TradingAgents: ${" not in script
     assert "TradingAgents: not running" not in script
     assert "function statusLine" in script
-    assert "data.status_sentence" in script
+    # The page line is Chinese only (statusLineHtml(run)); the CLI sentence stays in the backend payload.
+    assert "statusLineHtml(run)" in script
+    assert "TradingAgents: running" not in script
 
 
 def test_status_argv_line_is_printed_only_for_a_stored_process_command(monkeypatch, tmp_path, capsys):
@@ -5481,7 +5484,9 @@ def test_check_shows_the_known_report_header_lines(monkeypatch):
     script = Path("webui/static/app.js").read_text(encoding="utf-8")
     assert "data.header" in script
     assert "Generated" not in script
-    assert "Rating" not in script
+    # compareRatingLine (V2-COMPARE) is a function name, not a report header line.
+    assert "Rating:" not in script
+    assert "- Rating" not in script
 
 
 def test_progress_statuses_match_the_cli_panel():
@@ -5584,8 +5589,9 @@ def test_a_queued_restart_toast_is_not_a_success_mark():
     script = Path("webui/static/app.js").read_text(encoding="utf-8")
     body = script.split("function restartToastKind", 1)[1].split("function restartNotice", 1)[0]
     assert 'if (status === "running") return "ok"' in body
-    assert 'if (!status) return "unknown"' in body
-    assert 'return "wait"' in body
+    # Only known in-between states wait; anything else, including no status, is unknown.
+    assert 'if (status === "queued" || status === "starting" || status === "stopping") return "wait"' in body
+    assert body.rstrip().rstrip("}").rstrip().endswith('return "unknown";')
     assert "showToast(restartNotice(result, resume), restartToastKind(result))" in script
 
 
@@ -5626,7 +5632,7 @@ def test_unknown_run_status_is_not_shown_raw():
     body = script.split("function runStatusLabel", 1)[1].split("function runStatusClass", 1)[0]
     assert '|| "状态未知"' in body
     assert '|| status || "未知"' not in body
-    assert "不把它写成已结束，也不写成运行中" in script
+    assert "不把它写成已结束，也不写成运行中" in script.replace('<br class="notice-break">', "")
 
 
 def test_unknown_role_status_is_not_called_in_progress():
