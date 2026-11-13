@@ -3,11 +3,35 @@
 Prices come only from this console's cost-prices.json. A missing price stays
 unknown. Provider budget is only the structured value budget_exceeded. HTTP 429,
 RATE_LIMIT, and this process's wall-clock CallBudgetExceeded are not that.
+
+Usage: the worker writes ``<run>.usage.json`` next to the run's result file
+(``usage_path``), finished or failed. Each call row is the provider's own
+``usage_metadata`` for that call, attributed to the graph role that made it.
+There is no provider total yet (``reported``), so nothing is called reconciled.
+
+Prices: ``<TRADINGAGENTS_WEBUI_HOME>/cost-prices.json`` (default
+``~/.tradingagents/webui/cost-prices.json``)::
+
+    {"models": {"<model id as the run saved it>": {
+        "input_per_million": "0.50", "output_per_million": "1.50", "currency": "USD"}}}
+
+(Example numbers only, not any provider's price.)
+
+Prices are per million tokens, written as strings or numbers. ``currency``
+defaults to USD. Other top-level keys are ignored. A model that is not listed
+shows 价格未知. ``webui/cost-prices.example.json`` is an empty template.
+A price that is negative, NaN, or not finite (``1e999`` overflows to inf) is
+unknown for that model only (W234). A file that is not UTF-8, not JSON (the
+``Infinity`` / ``NaN`` literals included), or not ``{"models": {...}}`` is
+unreadable: no prices at all, ``prices_unreadable`` true, never an error (W233).
 """
 
 from __future__ import annotations
 
 import json
+import math
+import os
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -19,6 +43,10 @@ NOT_BUDGET_CODES = frozenset({"AUTH", "RATE_LIMIT", "CONTEXT", "TOKEN_LIMIT"})
 BUDGET_VALUE = "budget_exceeded"
 NOT_BUDGET_STATUS = frozenset({401, 403, 429})
 SUBSCRIPTION_PROVIDERS = frozenset({"chatgpt", "grok"})
+PRICES_NAME = "cost-prices.json"
+USAGE_SUFFIX = ".usage.json"
+USAGE_SCHEMA = "cost-usage-1"
+MAX_USAGE_BYTES = 4 * 1024 * 1024
 
 ANALYST_NODES = {
     "market": "Market Analyst",
@@ -309,33 +337,133 @@ def reconcile_usage(calls: list[dict], reported: dict | None = None) -> dict:
 
 def _prices_path(root: Path | None) -> Path:
     base = Path(root) if root is not None else webui_home()
-    return base / "cost-prices.json"
+    return base / PRICES_NAME
+
+
+def usage_path(result_path) -> Path:
+    """``<run>.usage.json`` beside the run's result file (like ``<run>.failure.json``)."""
+    path = Path(result_path)
+    return path.with_name(path.stem + USAGE_SUFFIX)
+
+
+def usage_record(stats: dict) -> dict:
+    """What a run keeps for cost: each provider-reported call, plus the calls with none.
+
+    No ``reported`` total: the provider's own total is checked later (REGRESSION-01).
+    """
+    calls = [dict(row) for row in stats.get("calls") or [] if isinstance(row, dict)]
+    return {
+        "schema": USAGE_SCHEMA,
+        "source": "provider usage_metadata per call",
+        "calls": calls,
+        "llm_calls": stats.get("llm_calls"),
+        "usage_reported": stats.get("usage_reported"),
+        "usage_unknown": stats.get("usage_unknown"),
+        "input_tokens": stats.get("tokens_in"),
+        "output_tokens": stats.get("tokens_out"),
+        "written_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+
+
+def write_usage(result_path, stats: dict) -> Path:
+    target = usage_path(result_path)
+    temporary = target.with_name(target.name + ".tmp")
+    temporary.write_text(json.dumps(usage_record(stats), ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temporary, target)
+    return target
+
+
+def _usage_for(record: dict, root: Path | None) -> dict:
+    """The run's usage: on the record (older tests and imports), else its usage file under logs."""
+    if isinstance(record.get("usage"), dict):
+        return record["usage"]
+    result = record.get("result")
+    if not isinstance(result, str) or not result.strip():
+        return {}
+    path = usage_path(result)
+    try:
+        resolved = path.resolve()
+        base = ((Path(root) if root is not None else webui_home()) / "logs").resolve()
+    except OSError:
+        return {}
+    if base not in resolved.parents:
+        return {}
+    try:
+        with resolved.open("rb") as handle:
+            raw = handle.read(MAX_USAGE_BYTES + 1)
+    except OSError:
+        return {}
+    if len(raw) > MAX_USAGE_BYTES:
+        return {}
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+MAX_PRICES_BYTES = 1024 * 1024
+
+
+def _reject_constant(name: str):
+    """Infinity / NaN are not JSON: a file using them is unreadable, not priced (W233)."""
+    raise ValueError(f"not JSON: {name}")
+
+
+def read_prices(root: Path | None = None) -> tuple[dict, bool]:
+    """``(models, unreadable)``. A missing file is not an error; a broken one is (W233).
+
+    Not UTF-8, not JSON (including Infinity / NaN literals), too large, or not
+    ``{"models": {...}}`` -> no prices at all and ``unreadable`` True. Never raises.
+    """
+    path = _prices_path(root)
+    try:
+        if not path.is_file():
+            return {}, False
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_PRICES_BYTES + 1)
+        if len(raw) > MAX_PRICES_BYTES:
+            return {}, True
+        data = json.loads(raw.decode("utf-8"), parse_constant=_reject_constant)
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError):
+        return {}, True
+    models = data.get("models") if isinstance(data, dict) else None
+    if not isinstance(models, dict):
+        return {}, True
+    return models, False
 
 
 def load_prices(root: Path | None = None) -> dict:
-    path = _prices_path(root)
-    if not path.is_file():
-        return {}
+    return read_prices(root)[0]
+
+
+def _unit_price(value) -> Decimal | None:
+    """One per-million price: a finite number >= 0, else unknown (W234). 1e999 overflows to inf."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    models = data.get("models") if isinstance(data, dict) else None
-    return models if isinstance(models, dict) else {}
+        amount = Decimal(str(value).strip())
+        as_float = float(amount)
+    except (InvalidOperation, ValueError, OverflowError):
+        return None
+    if not amount.is_finite() or not math.isfinite(as_float) or amount < 0:
+        return None
+    return amount
 
 
 def _price(model: str, prices: dict) -> dict | None:
-    row = prices.get(model)
+    row = prices.get(model) if isinstance(prices, dict) else None
     if not isinstance(row, dict):
         return None
-    try:
-        return {
-            "input_per_million": Decimal(str(row["input_per_million"])),
-            "output_per_million": Decimal(str(row["output_per_million"])),
-            "currency": _text(row.get("currency")) or "USD",
-        }
-    except (KeyError, InvalidOperation):
+    incoming = _unit_price(row.get("input_per_million"))
+    outgoing = _unit_price(row.get("output_per_million"))
+    if incoming is None or outgoing is None:
         return None
+    return {
+        "input_per_million": incoming,
+        "output_per_million": outgoing,
+        "currency": _text(row.get("currency")) or "USD",
+    }
 
 
 def _money(tokens_in: int, tokens_out: int, price: dict) -> Decimal:
@@ -367,7 +495,7 @@ def _view_run(record: dict, prices: dict, root: Path | None = None) -> dict:
         selections = record.get("selections") if isinstance(record.get("selections"), dict) else {}
         snapshot = role_snapshot(selections)
         snapshot["source"] = "saved_selections"
-    usage = record.get("usage") if isinstance(record.get("usage"), dict) else {}
+    usage = _usage_for(record, root)
     calls = usage.get("calls") if isinstance(usage.get("calls"), list) else []
     reconciled = reconcile_usage(calls, usage.get("reported")) if calls else None
     by_role = _role_usage(reconciled) if reconciled and reconciled["matches_provider"] else {}
@@ -391,11 +519,16 @@ def _view_run(record: dict, prices: dict, root: Path | None = None) -> dict:
             usage_label = "计费方式未知"
         elif used:
             price = _price(role.get("model") or "", prices)
-            if price is None:
+            amount = None
+            if price is not None:
+                try:
+                    amount = _money(incoming, outgoing, price)
+                except (InvalidOperation, ArithmeticError):
+                    amount = None  # too large to state to the cent: unknown, not a 500
+            if amount is None:
                 api_known = False
                 cost_text = "价格未知"
             else:
-                amount = _money(incoming, outgoing, price)
                 api_amount += amount
                 api_currency = price["currency"]
                 cost_text = _money_text(amount, price["currency"])
@@ -495,6 +628,7 @@ def _view_run(record: dict, prices: dict, root: Path | None = None) -> dict:
         "subscription_text": "订阅，不按次计费" if subscription_tokens else "",
         "health_text": health_sentence(_failure_for(record, root)),
         "tolerance_cost": str(TOLERANCE_COST),
+        "usage_unknown": _count(usage.get("usage_unknown")) or 0,
     }
 
 
@@ -553,7 +687,7 @@ def _failure_for(record: dict, root: Path | None) -> dict | None:
 
 
 def list_cost(root: Path | None = None) -> dict:
-    prices = load_prices(root)
+    prices, prices_unreadable = read_prices(root)
     records = []
     if root is None:
         from webui import service
@@ -591,6 +725,9 @@ def list_cost(root: Path | None = None) -> dict:
             })
     return {
         "runs": runs,
+        "prices_path": str(_prices_path(root)),
+        "prices_models": sum(1 for model in prices if _price(model, prices) is not None),
+        "prices_unreadable": prices_unreadable,
         "note": "单价只来自本机 cost-prices.json，不是供应商账单。订阅和 API 分开显示。没有单价就写价格未知。",
         "rule": "429 记为限流。只有 type 或 code 为 budget_exceeded 才记为预算超限。没有这些字段记未知。本机调用时限不是供应商预算。",
         "tolerance_count": TOLERANCE_TOKENS,

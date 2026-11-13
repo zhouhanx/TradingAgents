@@ -53,3 +53,9 @@
 - **W58**：读不到进程启动时间而拒绝停止/重启时（409），说明附带下一步操作。
 - **W44（界面部分，选较小的安全方案）**：回测仍不排队；被拒时页面显示控制台返回的真实原因（错误样式、role=alert），表单提示「回测不排队」。未实现回测排队。
 - **W67**：已注销框架的任务显示「未知工具（id）」。
+
+## 费用用量与单价（V2-COST-STATS，V2-INPROGRESS-2）
+
+- **用量文件**：控制台运行的分析结束时（完成或失败）在结果文件旁写 `<run>.usage.json`（`schema: cost-usage-1`），每次模型调用一行：`role`（图里的角色；子图分析师按外层节点归到具体分析师，不写成 `agent`）、`node`、`model`、`response_id`、`input_tokens`、`output_tokens`、`total_tokens`、`input_token_details`（如 `cache_read`）、`output_token_details`、`ended_at`；另有 `llm_calls`、`usage_reported`、`usage_unknown`（没有返回用量的调用数）。被「停止」的运行（SIGTERM）不写用量文件；命令行运行不写。
+- **没有供应商合计**：文件里没有 `reported`，所以页面只显示合计、不显示各角色数字和金额（「没有供应商合计，不把调用合计当成已核对。」）。核对（REGRESSION-01）之后才写 `reported: {input_tokens, output_tokens}`，相等（容差 0）时显示各角色用量和金额。
+- **单价**：`<TRADINGAGENTS_WEBUI_HOME>/cost-prices.json`，格式 `{"models": {"<模型 id>": {"input_per_million": "…", "output_per_million": "…", "currency": "USD"}}}`，模板 `webui/cost-prices.example.json`（空）。没有列出的模型显示「价格未知」。负数、NaN、无穷（含溢出为无穷的 `1e999`）的单价只让该模型显示「价格未知」，不计入合计（W234）。文件不是 UTF-8、不是 JSON（含 `Infinity`/`NaN` 字面量）或不是 `{"models": {…}}` 时，`/api/cost` 仍正常返回，所有单价按未知处理，`prices_unreadable: true`，页面显示「单价文件无法读取」和路径（W233）。页面不能编辑单价。`GET /api/cost` 新增 `prices_path`、`prices_models`（可用单价的模型数）、`prices_unreadable`，每个运行新增 `usage_unknown`。

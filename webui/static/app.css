@@ -1159,6 +1159,7 @@ table.ic-items th { font-size: 12px; color: var(--muted, #666); font-weight: 500
 }
 
 /* V2-COST-STATS: role rows wrap; subscription and API stay separate. */
+.cost-path { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; overflow-wrap: anywhere; }
 .cost-card { padding: 12px 0; border-bottom: 1px solid var(--border); }
 .cost-card:last-child { border-bottom: 0; }
 .cost-card header { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: baseline; }
@@ -1188,6 +1189,7 @@ table.ic-items th { font-size: 12px; color: var(--muted, #666); font-weight: 500
 .compare-prompts { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; }
 .compare-prompts li, .compare-prompt { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; min-width: 0; }
 .compare-step-note, .compare-saved-title { margin: 8px 0; }
+.compare-step-position { margin: 8px 0 0; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
 .compare-saved-title { font-size: 14px; }
 .compare-version { min-width: 0; overflow-wrap: anywhere; }
 .compare-prompt--current .compare-version { font-weight: 600; }

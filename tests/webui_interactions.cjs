@@ -850,6 +850,74 @@ test('a cost row without a usage label is not called unused', async () => {
   } finally { ui.dom.window.close(); }
 });
 
+test('the cost page names the price file and says when calls returned no usage', async () => {
+  const ui = await setup({'/api/cost': {prices_path: '/home/me/.tradingagents/cost-prices.json', prices_models: 0, runs: [{
+    id: 'c-usage', ticker: 'NVDA', date: '2026-11-13', usage_unknown: 2,
+    api_text: '不显示 API 合计：没有供应商合计。', match_text: '没有供应商合计，不把调用合计当成已核对。',
+    roles: [{role: 'Market Analyst', zh: '市场分析师', tier: 'quick', provider: 'deepseek', model: 'deepseek-chat', billing: 'api', usage_label: '用量未归集', cost_text: '价格未知'}],
+  }], note: ''}});
+  try {
+    await ui.click('[data-page=cost]');
+    for (let i = 0; i < 6; i++) await settle();
+    const prices = ui.doc.querySelector('#cost-prices');
+    assert.equal(prices.hidden, false);
+    assert.match(prices.textContent, /没有读到单价，金额显示「价格未知」。单价文件：\/home\/me\/\.tradingagents\/cost-prices\.json/);
+    assert.equal(ui.doc.querySelector('.cost-unknown').textContent, '有 2 次调用没有返回用量，合计不完整。');
+  } finally { ui.dom.window.close(); }
+  const priced = await setup({'/api/cost': {prices_path: '/p/cost-prices.json', prices_models: 3, runs: [], note: ''}});
+  try {
+    await priced.click('[data-page=cost]');
+    for (let i = 0; i < 6; i++) await settle();
+    assert.equal(priced.doc.querySelector('#cost-prices').textContent, '已读取 3 个模型的单价：/p/cost-prices.json');
+  } finally { priced.dom.window.close(); }
+  const none = await setup({'/api/cost': {runs: [], note: ''}});
+  try {
+    await none.click('[data-page=cost]');
+    for (let i = 0; i < 6; i++) await settle();
+    assert.equal(none.doc.querySelector('#cost-prices').hidden, true, 'an older backend without prices_path shows nothing');
+  } finally { none.dom.window.close(); }
+});
+
+test('the cost page opens with an unreadable price file and says so with its path', async () => {
+  const ui = await setup({'/api/cost': {prices_path: '/home/me/.tradingagents/cost-prices.json', prices_models: 0, prices_unreadable: true, runs: [{
+    id: 'c-broken', ticker: 'AAPL', date: '2026-11-12', prompt_count: 100, completion_count: 10,
+    api_text: '价格未知', match_text: '与供应商计数一致，容差 0。',
+    roles: [{role: 'Market Analyst', zh: '市场分析师', tier: 'quick', provider: 'deepseek', model: 'deepseek-chat', billing: 'api', prompt_count: 100, completion_count: 10, cost_text: '价格未知'}],
+  }], note: ''}});
+  try {
+    await ui.click('[data-page=cost]');
+    for (let i = 0; i < 6; i++) await settle();
+    const prices = ui.doc.querySelector('#cost-prices');
+    assert.equal(prices.hidden, false);
+    assert.equal(prices.textContent, '单价文件无法读取，金额显示「价格未知」。单价文件：/home/me/.tradingagents/cost-prices.json');
+    assert.equal(prices.querySelector('.cost-path').textContent, '/home/me/.tradingagents/cost-prices.json');
+    assert.equal(ui.doc.querySelector('#cost-error').hidden, true, 'the page opens normally');
+    assert.match(ui.doc.querySelector('.cost-card').textContent, /市场分析师提示 100 · 完成 10价格未知/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the cost page words the roles without a token row by why they have none', async () => {
+  const role = (en, zh, extra) => ({role: en, zh, tier: 'quick', provider: 'deepseek', model: 'deepseek-chat', billing: 'api', prompt_count: null, completion_count: null, ...extra});
+  const names = [['Market Analyst', '市场分析师'], ['Trader', '交易员'], ['Memory Log', '记忆日志']];
+  const ui = await setup({'/api/cost': {runs: [
+    {id: 'pending', ticker: 'NVDA', date: '2026-11-13', prompt_count: 300, completion_count: 30, api_text: '不显示 API 合计：没有供应商合计。', match_text: '没有供应商合计，不把调用合计当成已核对。',
+      roles: names.map(([en, zh]) => role(en, zh, {usage_label: '用量未归集', cost_text: '用量未归集'}))},
+    {id: 'none', ticker: 'AAPL', date: '2026-11-12', prompt_count: null, completion_count: null, api_text: '没有 API 用量', match_text: '没有供应商用量，不估算。',
+      roles: names.map(([en, zh]) => role(en, zh, {usage_label: '未调用', cost_text: '未调用'}))},
+    {id: 'one-idle', ticker: 'MSFT', date: '2026-11-11', prompt_count: 300, completion_count: 30, api_text: '0.0001 USD', match_text: '与供应商计数一致，容差 0。',
+      roles: [role('Market Analyst', '市场分析师', {prompt_count: 200, completion_count: 20, cost_text: '0.0001 USD'}), role('Trader', '交易员', {prompt_count: 100, completion_count: 10, cost_text: '0.0000 USD'}), role('Memory Log', '记忆日志', {usage_label: '未调用', cost_text: '未调用'})]},
+    {id: 'two-idle', ticker: 'TSLA', date: '2026-11-10', prompt_count: 200, completion_count: 20, api_text: '0.0001 USD', match_text: '与供应商计数一致，容差 0。',
+      roles: [role('Market Analyst', '市场分析师', {prompt_count: 200, completion_count: 20, cost_text: '0.0001 USD'}), role('Trader', '交易员', {usage_label: '未调用', cost_text: '未调用'}), role('Memory Log', '记忆日志', {usage_label: '未调用', cost_text: '未调用'})]},
+  ], note: ''}});
+  try {
+    await ui.click('[data-page=cost]');
+    for (let i = 0; i < 6; i++) await settle();
+    const rest = [...ui.doc.querySelectorAll('.cost-card')].map((card) => card.querySelector('.cost-rest').textContent);
+    assert.deepEqual(rest, ['分角色用量：核对供应商合计后再显示（共 3 个角色）', '这次运行没有用量记录', '记忆日志未调用', '其余 2 个角色未调用']);
+    assert.doesNotMatch(ui.doc.querySelector('#cost-list').textContent, /用量未归集/);
+  } finally { ui.dom.window.close(); }
+});
+
 test('a cost row without billing is not called API', async () => {
   const ui = await setup({
     '/api/cost': {runs: [{id: 'c1', ticker: 'AAPL', date: '2026-11-11', api_text: '计费方式未知，不把它当成 API 用量。', match_text: '没有供应商用量，不估算。', roles: [
@@ -6986,4 +7054,68 @@ test('K 线 period switch on the same chart fades it and names the coming period
     for (let i = 0; i < 8; i++) await settle();
     assert.ok(empty.calls.some((c) => c.path.startsWith('/api/kline?') && c.path.includes('tf=1D')), '改看日线 asks for daily bars');
   } finally { empty.dom.window.close(); }
+});
+
+// V2-INPROGRESS-2 (V2-REPORT-COMPARE): two finished runs written by the real result
+// payload (tests/v2_compare_fixtures.py, show off, no model call) render on the compare
+// page with ratings, evidence and report sections; the replay steps across server pages.
+test('compare shows two finished runs with sections and replays across pages', async () => {
+  const {mkdtempSync, rmSync} = require('node:fs');
+  const {tmpdir} = require('node:os');
+  const home = mkdtempSync(resolve(tmpdir(), 'ta-compare-'));
+  let data;
+  try {
+    data = JSON.parse(execFileSync(process.env.TRADINGAGENTS_TEST_PYTHON || 'python3',
+      ['-m', 'tests.v2_compare_fixtures', home],
+      {cwd: root, encoding: 'utf8', env: {...process.env, TRADINGAGENTS_WEBUI_HOME: home}}));
+  } finally { rmSync(home, {recursive: true, force: true}); }
+  const replayPaths = [];
+  const ui = await setup({
+    '/api/compare': (_options, path) => (path.includes('left=') ? data.pair : data.list),
+    '/api/compare/replay': (_options, path) => {
+      replayPaths.push(path);
+      const page = new URL(path, 'http://localhost').searchParams.get('page') || '1';
+      return data.replay[page] || {__status: 404, body: {error: '回放没有这一页。'}};
+    },
+  });
+  try {
+    const pass = async () => { for (let i = 0; i < 8; i++) await settle(); };
+    await ui.click('.nav-item[data-page=compare]');
+    await pass();
+    const cards = [...ui.doc.querySelectorAll('#compare-grid .compare-card')];
+    assert.equal(cards.length, 2);
+    const [left, right] = cards.map((card) => card.textContent);
+    assert.match(left, /评级 Buy/);
+    assert.match(left, /ATR 4\.2/);
+    assert.match(left, /一、分析师团队报告/);
+    assert.match(left, /NVDA 行情/);
+    assert.match(right, /评级 Hold/);
+    assert.match(right, /PE 位于五年中位/);
+    assert.match(right, /五、组合经理决定/);
+    assert.match(right, /600519 组合经理/);
+    assert.ok(cards.every((card) => card.querySelectorAll('.compare-section').length >= 3));
+
+    const total = data.replay['1'].total_steps;
+    const pages = data.replay['1'].pages;
+    assert.ok(pages >= 2 && total > 40);
+    const position = () => ui.doc.querySelector('#compare-position').textContent;
+    assert.equal(position(), `第 1 / ${total} 步 · 第 1 / ${pages} 页`);
+    assert.ok(ui.doc.querySelector('#compare-prev').disabled);
+    for (let i = 0; i < 40; i++) { ui.doc.querySelector('#compare-next').click(); await pass(); }
+    assert.equal(position(), `第 41 / ${total} 步 · 第 2 / ${pages} 页`);
+    assert.ok(replayPaths.some((path) => path.endsWith('&page=2')));
+    ui.doc.querySelector('#compare-prev').click();
+    await pass();
+    assert.equal(position(), `第 40 / ${total} 步 · 第 1 / ${pages} 页`);
+    for (let i = 0; i < total; i++) {
+      const next = ui.doc.querySelector('#compare-next');
+      if (next.disabled) break;
+      next.click();
+      await pass();
+    }
+    assert.equal(position(), `第 ${total} / ${total} 步 · 第 ${pages} / ${pages} 页`);
+    assert.ok(ui.doc.querySelector('#compare-next').disabled);
+    assert.match(ui.doc.querySelector('.compare-step').textContent, /组合经理/);
+    assert.ok(ui.doc.querySelectorAll('.compare-prompts li').length >= 12);
+  } finally { ui.dom.window.close(); }
 });

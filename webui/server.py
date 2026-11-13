@@ -307,7 +307,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/compare/replay":
             query = parse_qs(parsed.query)
-            self._call(lambda: compare.replay_run((query.get("id") or [""])[0]))
+            self._call(lambda: compare.replay_run((query.get("id") or [""])[0], page=(query.get("page") or ["1"])[0]))
             return
         if parsed.path == "/api/kline/search":
             # V2-UI-FIX-1: symbol suggestions (local CN names + Yahoo search); same token rule.

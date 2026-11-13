@@ -3223,24 +3223,34 @@ def default_runner(job: dict) -> int:
     from cli.stats_handler import StatsCallbackHandler
 
     handler = StatsCallbackHandler()
-    graph = TradingAgentsGraph(selections["analysts"], config=config, debug=False, callbacks=[handler])
-    state, decision = _stream_like_cli(graph, selections, portfolio, handler)
-    if seeded_from_ticker_db:
-        # The run finished from a copy of the per-ticker checkpoint; drop that thread
-        # too so a later run starts fresh, as it did before RUN-004.
-        from tradingagents.graph.checkpointer import clear_checkpoint
-        with contextlib.suppress(Exception):
-            clear_checkpoint(config["data_cache_dir"], selections["ticker"], selections["analysis_date"],
-                             graph._run_signature(selections.get("asset_type") or "stock", portfolio))
-    notice = save_report_notice(graph, state, selections)
-    result_path = Path(job["result_path"])
-    from cli.run import MESSAGE_TOOL_LOG_NAME, _run_directory
-    tool_log = _run_directory(config, selections["ticker"], selections["analysis_date"]) / MESSAGE_TOOL_LOG_NAME
-    payload = analysis_result_payload(state, decision, notice, selections, tool_log)
-    shown = payload.get("shown_report")
-    if shown:
-        print(shown["rule"], flush=True)
-    result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    # V2-COST-STATS: the provider's per-call usage is kept beside the result,
+    # also when the run fails part-way (the failed run spent those tokens too).
+    try:
+        graph = TradingAgentsGraph(selections["analysts"], config=config, debug=False, callbacks=[handler])
+        state, decision = _stream_like_cli(graph, selections, portfolio, handler)
+        if seeded_from_ticker_db:
+            # The run finished from a copy of the per-ticker checkpoint; drop that thread
+            # too so a later run starts fresh, as it did before RUN-004.
+            from tradingagents.graph.checkpointer import clear_checkpoint
+            with contextlib.suppress(Exception):
+                clear_checkpoint(config["data_cache_dir"], selections["ticker"], selections["analysis_date"],
+                                 graph._run_signature(selections.get("asset_type") or "stock", portfolio))
+        notice = save_report_notice(graph, state, selections)
+        result_path = Path(job["result_path"])
+        from cli.run import MESSAGE_TOOL_LOG_NAME, _run_directory
+        tool_log = _run_directory(config, selections["ticker"], selections["analysis_date"]) / MESSAGE_TOOL_LOG_NAME
+        payload = analysis_result_payload(state, decision, notice, selections, tool_log)
+        shown = payload.get("shown_report")
+        if shown:
+            print(shown["rule"], flush=True)
+        result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    finally:
+        # Only beside a real job's result (an absolute path in an existing folder).
+        target = Path(str(job.get("result_path") or ""))
+        if target.is_absolute() and target.parent.is_dir():
+            from webui.cost import write_usage
+            with contextlib.suppress(OSError, TypeError, ValueError):
+                write_usage(target, handler.get_stats())
     return 0
 
 
@@ -3275,8 +3285,20 @@ def analysis_result_payload(state, decision, notice: dict, selections: dict, too
         "save_lines": notice.get("save_lines") or [],
         "message_tool_log": str(tool_log) if tool_log.is_file() else None,
     }
-    if selections.get("show") and isinstance(state, dict):
-        payload["shown_report"] = shown_report(state)
+    if isinstance(state, dict):
+        # V2-REPORT-COMPARE: every new run keeps its report sections for 对比.
+        # ``shown_report`` stays the --show switch for the result page.
+        # A section that cannot be read never costs the finished result file.
+        try:
+            sections = shown_report(state)
+        except Exception:
+            if selections.get("show"):
+                raise
+            sections = None
+        if sections is not None:
+            payload["report_sections"] = sections
+        if selections.get("show"):
+            payload["shown_report"] = sections
     return payload
 
 

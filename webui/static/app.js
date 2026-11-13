@@ -5706,7 +5706,10 @@ function compareSummaryLine(item) {
 function compareCard(item, extra = "") {
   const quotes = (item.evidence || []).map((quote) => `<li>${punctBreakHtml(quote)}</li>`).join("");
   const evidence = quotes ? `<ul class="compare-quotes">${quotes}</ul>` : `<p class="form-hint">${punctBreakHtml(item.evidence_note || "没有结构化证据引用，不从正文猜测。")}</p>`;
-  const sections = (item.sections || []).map((section) => `<p><strong>${escapeHtml(section.heading || "")}</strong> ${punctBreakHtml(section.text || "")}</p>`).join("");
+  // Report headings use the same Chinese names as the result page's full report.
+  const headings = state.catalog?.report_sections || [];
+  const headingZh = (heading) => (headings.find((entry) => entry.cli === heading) || {}).zh || heading;
+  const sections = (item.sections || []).map((section) => `<p class="compare-section"><strong>${escapeHtml(headingZh(section.heading || ""))}</strong> ${punctBreakHtml(section.text || "")}</p>`).join("");
   const title = item.ticker || item.id || "";
   const meta = [item.date, item.ticker && item.id && item.id !== item.ticker ? item.id : ""].filter(Boolean).join(" · ");
   const summary = compareSummaryLine(item);
@@ -5753,10 +5756,7 @@ async function renderCompare() {
       }
       const cards = pair.same_run ? compareCard(pair.left, " compare-card--solo") : compareCard(pair.left) + compareCard(pair.right);
       document.querySelector("#compare-grid").innerHTML = cards;
-      const replay = await api(`/api/compare/replay?id=${encodeURIComponent(left)}`);
-      state.compareReplay = replay;
-      state.compareStep = 0;
-      paintReplay();
+      await loadReplayPage(left, 1, "first");
     };
     document.querySelector("#compare-form").addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -5776,6 +5776,24 @@ function promptTitle(item) {
 function shortVersion(item) {
   const hash = String(item.sha256 || "");
   return hash ? hash.slice(0, 12) : "无版本号";
+}
+
+// V2-REPORT-COMPARE: a long replay is paged by the server; stepping past a page edge loads the next page.
+async function loadReplayPage(id, page, at) {
+  const replay = await api(`/api/compare/replay?id=${encodeURIComponent(id)}&page=${encodeURIComponent(page)}`);
+  state.compareReplay = replay;
+  state.compareReplayId = id;
+  state.compareStep = at === "last" ? Math.max((replay.steps || []).length - 1, 0) : 0;
+  paintReplay();
+}
+
+function replayPosition(replay, index) {
+  const total = Number(replay.total_steps);
+  const first = Number(replay.first_step);
+  const pages = Number(replay.pages);
+  if (!Number.isFinite(total) || total <= 0 || !Number.isFinite(first) || first <= 0) return "";
+  const page = Number.isFinite(pages) && pages > 1 ? ` · 第 ${replay.page} / ${pages} 页` : "";
+  return `第 ${first + index} / ${total} 步${page}`;
 }
 
 function paintReplay() {
@@ -5803,9 +5821,24 @@ function paintReplay() {
     return `<li class="compare-prompt${current ? " compare-prompt--current" : ""}"><span class="compare-version">${escapeHtml(promptTitle(item))} · 版本 ${escapeHtml(shortVersion(item))}</span><span>${current ? "这一步使用。" : ""}${punctBreakHtml(stateText)}</span></li>`;
   }).join("");
   const stepText = step ? `${step.time || ""} ${step.zh || step.agent} ${step.status_zh || ""}`.trim() : "还没有可回放的步骤。";
-  box.innerHTML = `<h3>回放左侧运行</h3><p class="form-hint">${punctBreakHtml(replay.note || "")}</p><p class="compare-step">${escapeHtml(stepText)}</p><p class="compare-step-note">${stepNoteHtml}</p><p class="inline-actions"><button class="button button--secondary button--small" type="button" id="compare-prev">上一步</button><button class="button button--secondary button--small" type="button" id="compare-next">下一步</button></p><h3 class="compare-saved-title">已保存的提示词版本</h3><ul class="compare-prompts">${prompts || "<li>没有保存的提示词版本。</li>"}</ul>`;
-  document.querySelector("#compare-prev")?.addEventListener("click", () => { state.compareStep = Math.max(0, index - 1); paintReplay(); });
-  document.querySelector("#compare-next")?.addEventListener("click", () => { state.compareStep = Math.min(steps.length - 1, index + 1); paintReplay(); });
+  const position = replayPosition(replay, index);
+  const page = Number(replay.page) || 1;
+  const pages = Number(replay.pages) || 1;
+  const atStart = index <= 0 && page <= 1;
+  const atEnd = index >= steps.length - 1 && page >= pages;
+  box.innerHTML = `<h3>回放左侧运行</h3><p class="form-hint">${punctBreakHtml(replay.note || "")}</p><p class="compare-step-position" id="compare-position">${escapeHtml(position)}</p><p class="compare-step">${escapeHtml(stepText)}</p><p class="compare-step-note">${stepNoteHtml}</p><p class="inline-actions"><button class="button button--secondary button--small" type="button" id="compare-prev"${atStart ? " disabled" : ""}>上一步</button><button class="button button--secondary button--small" type="button" id="compare-next"${atEnd ? " disabled" : ""}>下一步</button></p><h3 class="compare-saved-title">已保存的提示词版本</h3><ul class="compare-prompts">${prompts || "<li>没有保存的提示词版本。</li>"}</ul>`;
+  const turnPage = async (target, at) => {
+    try { await loadReplayPage(state.compareReplayId || replay.id, target, at); } catch (err) {
+      const error = document.querySelector("#compare-error");
+      if (error) { error.hidden = false; error.textContent = err.message; }
+    }
+  };
+  document.querySelector("#compare-prev")?.addEventListener("click", () => {
+    if (index > 0) { state.compareStep = index - 1; paintReplay(); } else if (page > 1) turnPage(page - 1, "last");
+  });
+  document.querySelector("#compare-next")?.addEventListener("click", () => {
+    if (index < steps.length - 1) { state.compareStep = index + 1; paintReplay(); } else if (page < pages) turnPage(page + 1, "first");
+  });
 }
 
 function costBillingLabel(role) {
@@ -5858,11 +5891,39 @@ function costMissingLabel(roles) {
   return labels.length ? "未列入合计" : "未调用";
 }
 
+// V2-COST-STATS: where the price file is read from. A missing file is not a zero price.
+function costPricesLine(data) {
+  const path = data && typeof data.prices_path === "string" ? data.prices_path : "";
+  if (!path) return "";
+  const count = Number(data.prices_models);
+  const where = `<span class="cost-path">${escapeHtml(path)}</span>`;
+  if (data.prices_unreadable === true) return `单价文件无法读取，<br class="notice-break">金额显示「价格未知」。<br class="notice-break">单价文件：${where}`;
+  if (Number.isFinite(count) && count > 0) return `已读取 ${count} 个模型的单价：<br class="notice-break">${where}`;
+  return `没有读到单价，<br class="notice-break">金额显示「价格未知」。<br class="notice-break">单价文件：${where}`;
+}
+
+// The roles without a token row: one line, worded by why they have none.
+function costRestHtml(run, roles, missing) {
+  const label = costMissingLabel(roles);
+  if (run.prompt_count == null && missing === roles.length) {
+    return `<li class="cost-rest"><span class="cost-role">这次运行没有用量记录</span></li>`;
+  }
+  if (label === "用量未归集") {
+    return `<li class="cost-rest"><span class="cost-role">分角色用量：核对供应商合计后再显示（共 ${missing} 个角色）</span></li>`;
+  }
+  if (missing === 1) {
+    const role = roles.find((item) => item.prompt_count == null) || {};
+    return `<li class="cost-rest"><span class="cost-role">${escapeHtml(role.zh || role.role || "")}</span><span class="cost-tokens">${escapeHtml(label)}</span></li>`;
+  }
+  return `<li class="cost-rest"><span class="cost-role">其余 ${missing} 个角色</span><span class="cost-tokens">${escapeHtml(label)}</span></li>`;
+}
+
 async function renderCost() {
   pageEl.innerHTML = `${heading("", "费用", "按这次运行冻结的角色模型统计。<br class=\"notice-break\">订阅和 API 分开，<br class=\"notice-break\">没有单价不估算。", "", {html: true})}
     <section class="panel">
       <h2>运行费用</h2>
       <p class="form-hint" id="cost-rule"></p>
+      <p class="form-hint" id="cost-prices" hidden></p>
       <p class="error-banner" id="cost-error" hidden></p>
       <div id="cost-list"></div>
     </section>`;
@@ -5870,6 +5931,12 @@ async function renderCost() {
     state.cost = await api("/api/cost");
     const rule = document.querySelector("#cost-rule");
     if (rule) rule.innerHTML = "单价来自本机 cost-prices.json，<br class=\"notice-break\">不是供应商账单。<br class=\"notice-break\">429 记为限流，<br class=\"notice-break\">不是预算超限。<br class=\"notice-break\">没有结构化字段时记为未知。<br class=\"notice-break\">本机调用时限不是供应商预算。";
+    const prices = document.querySelector("#cost-prices");
+    if (prices) {
+      const text = costPricesLine(state.cost);
+      prices.hidden = !text;
+      prices.innerHTML = text;
+    }
     const box = document.querySelector("#cost-list");
     const cards = (state.cost.runs || []).map((run) => {
       const roles = run.roles || [];
@@ -5882,10 +5949,11 @@ async function renderCost() {
       }
       const tierHtml = tiers.map(costTierHtml).join("");
       const lines = counted.map((role) => `<li><span class="cost-role">${escapeHtml(role.zh || role.role)}</span><span class="cost-tokens">${escapeHtml(costTokens(role))}</span><span>${escapeHtml(role.cost_text || "")}</span></li>`).join("");
-      const rest = missing ? `<li><span class="cost-role">其余 ${missing} 个角色</span><span class="cost-tokens">${escapeHtml(costMissingLabel(roles))}</span></li>` : "";
+      const rest = missing ? costRestHtml(run, roles, missing) : "";
       const sub = run.subscription_text ? `<p class="form-hint">${escapeHtml(run.subscription_text)}</p>` : "";
       const health = run.health_text ? `<p class="cost-health">${punctBreakHtml(run.health_text)}</p>` : "";
-      return `<article class="cost-card"><header><strong>${escapeHtml(run.ticker || run.id || "未命名")}</strong><span>${escapeHtml(run.date || "")}</span></header><div class="cost-tiers">${tierHtml}</div><p class="cost-api">${escapeHtml(costApiLine(run.api_text))}</p>${health}${sub}<p class="form-hint">${punctBreakHtml(run.match_text || "")}</p><ul class="cost-roles">${lines}${rest}</ul></article>`;
+      const unknown = Number(run.usage_unknown) > 0 ? `<p class="form-hint cost-unknown">${punctBreakHtml(`有 ${Number(run.usage_unknown)} 次调用没有返回用量，合计不完整。`)}</p>` : "";
+      return `<article class="cost-card"><header><strong>${escapeHtml(run.ticker || run.id || "未命名")}</strong><span>${escapeHtml(run.date || "")}</span></header><div class="cost-tiers">${tierHtml}</div><p class="cost-api">${escapeHtml(costApiLine(run.api_text))}</p>${health}${sub}${unknown}<p class="form-hint">${punctBreakHtml(run.match_text || "")}</p><ul class="cost-roles">${lines}${rest}</ul></article>`;
     }).join("");
     box.innerHTML = cards || `<p class="form-hint">还没有分析记录。</p>`;
   } catch (error) {

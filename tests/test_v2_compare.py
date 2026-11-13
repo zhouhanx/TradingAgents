@@ -66,7 +66,8 @@ def test_start_saves_prompt_versions():
     assert "freeze_prompt_versions(record)" in service
     assert 'data-page="compare"' in html
     versions = compare.capture_prompt_versions()
-    assert {item["id"] for item in versions} == {"portfolio_manager", "research_manager"}
+    # V2-INPROGRESS-2: every role's prompt is frozen, not only the two managers.
+    assert {item["id"] for item in versions} == set(compare.PROMPT_LABELS)
     assert all(len(item["sha256"]) == 64 and item["text"] for item in versions)
 
 
@@ -266,3 +267,134 @@ def test_free_text_rating_is_not_called_a_structured_rating(tmp_path):
     assert "function compareRatingLine" in script
     assert "item.rating_label" in script
     assert "没有结构化要点" not in script
+
+
+# --- V2-INPROGRESS-2 -----------------------------------------------------------------
+
+def test_every_timeline_role_has_a_saved_prompt_version():
+    import inspect
+
+    from tradingagents.agents.managers.portfolio_manager import create_portfolio_manager
+    from webui.progress import TEAMS
+
+    versions = {item["id"]: item for item in compare.capture_prompt_versions()}
+    labelled = {compare.PROMPT_LABELS[name][0] for name in versions}
+    timeline = {agent for _team, _zh, agents in TEAMS for agent, _agent_zh, _analyst in agents}
+    assert timeline <= labelled
+    assert "You are a trading analyst reviewing your own past decision" in versions["memory_reflection"]["text"]
+    assert "_build_system_message" in versions["sentiment_analyst"]["text"]
+    # A run saved before every role was frozen still matches its manager hash.
+    import hashlib
+    old = hashlib.sha256(inspect.getsource(create_portfolio_manager).encode("utf-8")).hexdigest()
+    assert versions["portfolio_manager"]["sha256"] == old
+
+
+def _payload(show):
+    from webui import service
+
+    state = {"market_report": "行情正文", "final_trade_decision": "持有", "final_rating": "Hold"}
+    notice = {"report": None, "saved_to": None, "html": None, "save_error": None, "saved": False, "save_lines": []}
+    return service.analysis_result_payload(state, "Hold", notice, {"show": show}, Path("/tmp/missing.log"))
+
+
+def test_new_runs_save_report_sections_without_show():
+    hidden = _payload(False)
+    assert "shown_report" not in hidden
+    headings = [item["heading"] for item in hidden["report_sections"]["sections"]]
+    assert headings == ["I. Analyst Team Reports", "V. Portfolio Manager Decision"]
+    shown = _payload(True)
+    assert shown["shown_report"] == shown["report_sections"]
+
+
+def test_a_report_section_error_does_not_cost_the_result_without_show(monkeypatch):
+    from webui import service
+
+    def broken(_state):
+        raise ValueError("bad section")
+
+    monkeypatch.setattr(service, "shown_report", broken)
+    payload = _payload(False)
+    assert "report_sections" not in payload and payload["decision"] == "Hold"
+
+
+def _seed(tmp_path, run_id, payload, lines=None):
+    runs, logs = tmp_path / "runs", tmp_path / "logs"
+    runs.mkdir(exist_ok=True)
+    logs.mkdir(exist_ok=True)
+    result = logs / f"{run_id}.result.json"
+    result.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    record = {"id": run_id, "kind": "analysis", "ticker": "NVDA", "date": "2026-11-12", "result": str(result)}
+    if lines is not None:
+        log = logs / f"{run_id}.log"
+        log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        record["log"] = str(log)
+    (runs / f"{run_id}.json").write_text(json.dumps(record), encoding="utf-8")
+
+
+def test_compare_reads_new_report_sections_and_old_shown_report(tmp_path):
+    _seed(tmp_path, "new-run", {"report_sections": {"sections": [
+        {"heading": "I. Analyst Team Reports", "items": [{"agent": "Market Analyst", "text": "新运行段落"}]}]}})
+    _seed(tmp_path, "old-run", {"shown_report": {"sections": [
+        {"heading": "V. Portfolio Manager Decision", "items": [{"agent": "Portfolio Manager", "text": "旧运行段落"}]}]}})
+    _seed(tmp_path, "older-run", {"decision": "Hold"})
+    pair = compare.compare_pair("new-run", "old-run", tmp_path)
+    assert pair["left"]["sections"] == [{"heading": "I. Analyst Team Reports", "text": "新运行段落"}]
+    assert pair["right"]["sections"] == [{"heading": "V. Portfolio Manager Decision", "text": "旧运行段落"}]
+    assert compare.compare_pair("older-run", "older-run", tmp_path)["left"]["sections"] == []
+
+
+def test_replay_pages_a_long_run_without_dropping_steps(tmp_path):
+    from tests.v2_compare_fixtures import long_log
+
+    lines = long_log()
+    _seed(tmp_path, "long-run", {}, lines)
+    first = compare.replay_run("long-run", tmp_path, current=[])
+    assert first["total_steps"] == len(lines) > compare.REPLAY_PAGE_SIZE
+    assert first["pages"] == -(-len(lines) // compare.REPLAY_PAGE_SIZE)
+    steps = []
+    for page in range(1, first["pages"] + 1):
+        found = compare.replay_run("long-run", tmp_path, current=[], page=str(page))
+        assert found["first_step"] == (page - 1) * compare.REPLAY_PAGE_SIZE + 1
+        assert len(found["steps"]) <= compare.REPLAY_PAGE_SIZE
+        steps.extend(found["steps"])
+    # Oldest first, every status line once: the first and last steps are both kept.
+    assert [(step["agent"], step["time"]) for step in steps] == [
+        (line.split("\t")[1], line.split("\t")[3]) for line in lines]
+    for bad, status in (("0", 400), ("x", 400), (str(first["pages"] + 1), 404)):
+        try:
+            compare.replay_run("long-run", tmp_path, current=[], page=bad)
+        except compare.CompareError as exc:
+            assert exc.status == status
+        else:
+            raise AssertionError(bad)
+
+
+def test_replay_of_a_run_without_steps_is_one_empty_page(tmp_path):
+    _seed(tmp_path, "empty-run", {}, [])
+    found = compare.replay_run("empty-run", tmp_path, current=[])
+    assert (found["page"], found["pages"], found["total_steps"], found["first_step"], found["steps"]) == (1, 1, 0, 0, [])
+
+
+def test_prompt_bodies_are_stored_once_and_the_record_keeps_hashes(tmp_path):
+    versions = compare.capture_prompt_versions()
+    first = compare.freeze_prompt_versions({}, versions, root=tmp_path)
+    second = compare.freeze_prompt_versions({}, versions, root=tmp_path)
+    assert first == second
+    assert all(set(row) == {"id", "sha256"} for row in first["prompt_versions"])
+    stored = sorted((tmp_path / compare.PROMPT_STORE).glob("*.txt"))
+    assert len(stored) == len({item["sha256"] for item in versions})
+    _seed(tmp_path, "hashed-run", {}, ["STATUS\tTrader\tcompleted\t10:00:00"])
+    record_path = tmp_path / "runs" / "hashed-run.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["prompt_versions"] = first["prompt_versions"]
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    replay = compare.replay_run("hashed-run", tmp_path, current=versions)
+    trader = next(row for row in replay["prompts"] if row["id"] == "trader")
+    assert trader["saved"] is True and trader["changed"] is False
+    assert trader["text"] == next(item["text"] for item in versions if item["id"] == "trader")
+    # A stored body edited after the run no longer matches its hash: not a saved version.
+    target = tmp_path / compare.PROMPT_STORE / f"{trader['sha256']}.txt"
+    target.write_text("被改过的提示词", encoding="utf-8")
+    again = compare.replay_run("hashed-run", tmp_path, current=versions)
+    edited = next(row for row in again["prompts"] if row["id"] == "trader")
+    assert edited["saved"] is False and edited["text"] == "" and edited["changed"] is None
