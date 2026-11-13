@@ -210,6 +210,11 @@ def save_config(payload: dict) -> dict:
     return merged
 
 
+def save_config_result(payload: dict) -> dict:
+    """POST /api/config. The file stays the config; saved is only the response flag."""
+    return {"saved": True, "config": save_config(payload)}
+
+
 _TIER_KEYS = (
     "quick_think_provider", "deep_think_provider",
     "openai_reasoning_effort", "google_thinking_level", "anthropic_effort",
@@ -257,12 +262,63 @@ def _subscription_label(provider: str) -> str:
 _LAUNCHER_STATUS_PHASES = {"starting", "running", "stopping", "completed"}
 
 
+RESULT_WRITTEN_SENTENCE = "分析进程已退出，结果文件已写出。这只说明进程结束，不表示分析完成或评级已确认。"
+ANALYSIS_EXIT_WITHOUT_RESULT = "分析进程已退出，但没有写出结果。进程退出不等于分析完成。"
+BACKTEST_EXIT_WITHOUT_RESULT = "回测进程已退出，但没有写出结果。进程退出不等于回测完成。"
+UNKNOWN_EXIT_WITHOUT_RESULT = "进程已退出，但没有写出结果。不把它写成分析完成。"
+
+
+def exit_without_result_sentence(record: dict | None) -> str:
+    """A dead process with no result file. A backtest is not an analysis."""
+    kind = (record or {}).get("kind")
+    if kind == "backtest":
+        return BACKTEST_EXIT_WITHOUT_RESULT
+    if kind == "analysis":
+        return ANALYSIS_EXIT_WITHOUT_RESULT
+    return UNKNOWN_EXIT_WITHOUT_RESULT
+
+
+def result_written_sentence(record: dict | None) -> str:
+    """A dead process that already wrote its result file. A backtest is not an analysis."""
+    kind = (record or {}).get("kind")
+    if kind == "backtest":
+        return "回测进程已退出，结果文件已写出。这只说明进程结束，不表示回测完成。"
+    if kind == "analysis":
+        return RESULT_WRITTEN_SENTENCE
+    return "进程已退出，结果文件已写出。不把它写成分析完成。"
+
+
+def _result_file(record: dict) -> Path | None:
+    """The run's result file when the worker has already written it."""
+    raw = record.get("result")
+    if not isinstance(raw, str) or not raw:
+        return None
+    path = Path(raw)
+    try:
+        if path.is_file():
+            return path
+    except OSError:
+        return None
+    return None
+
+
+def _mark_result_finished(record: dict) -> None:
+    """The worker finished. Never signal the recorded pid: it may already belong to someone else."""
+    record["status"] = "finished"
+    record["detail"] = result_written_sentence(record)
+
+
 def refresh_run_process(record: dict | None) -> dict | None:
     """Notice when this console's analysis process has exited.
 
     A dead process is not an analysis completion. The launcher sentence
     ``TradingAgents: not running`` is not used here; that sentence belongs to
     the launcher supervisor, which this record is not.
+
+    A written result wins over a reused pid. macOS hands the exited worker's
+    pid to another program before the next poll; calling that a pid-reuse
+    failure leaves the run running forever from the queue's point of view.
+    The current pid is never signalled on this path.
     """
     if not record or record.get("status") != "running":
         return record
@@ -272,16 +328,16 @@ def refresh_run_process(record: dict | None) -> dict | None:
     state = _worker_state(record)
     if state in ("ours", "unknown"):  # W47: unverifiable is not proof it exited; keep the slot
         return record
-    result = Path(record["result"]) if record.get("result") else None
-    if state == "foreign":
-        _mark_pid_reused(record)
-    elif result is not None and result.is_file():
-        record["status"] = "finished"
-        record["detail"] = "分析进程已退出，结果文件已写出。这只说明进程结束，不表示分析完成或评级已确认。"
+    raw_result = record.get("result")
+    result = Path(raw_result) if isinstance(raw_result, str) and raw_result else None
+    if result is not None and result.is_file():
+        _mark_result_finished(record)
         generic = record["detail"]
+    elif state == "foreign":
+        _mark_pid_reused(record)
     else:
         record["status"] = "failed"
-        record["detail"] = "分析进程已退出，但没有写出结果。进程退出不等于分析完成。"
+        record["detail"] = exit_without_result_sentence(record)
         generic = record["detail"]
         try:
             failure = _read_run_failure(result)
@@ -1061,8 +1117,11 @@ def _validate_analysis(payload: dict) -> dict:
         "data_cache_dir": resolve_cache_dir(str(payload["data_cache_dir"])) if payload.get("data_cache_dir") else None,
         # V2-INFO-CRAWL (PM): items join the analysis only when 「带入分析」 is ticked.
         "info_crawl": _info_crawl_pick(payload),
+        "local_import": _local_import_from_payload(payload),
     }
     apply_env_skips(selections)
+    _validate_info_crawl_attachment(selections)
+    _require_local_import_news(selections)
     provider = selections["llm_provider"]
     quick_provider = selections.get("quick_think_provider") or provider
     deep_provider = selections.get("deep_think_provider") or provider
@@ -1091,11 +1150,13 @@ def _validate_analysis(payload: dict) -> dict:
         "ok": True,
         "selections": selections,
         "ignored": ignored,
+        "notices": [*_info_crawl_notices(selections), *_local_import_notices(selections)],
         "model_header": header_lines[1],
         "header_lines": header_lines,
         "confirmations": [
             *flag_confirmations(selections), *plan_lines, *depth_lines_for(selections),
-            *matching_environment_lines(selections),
+            *matching_environment_lines(selections), *_info_crawl_notices(selections),
+            *_local_import_notices(selections),
         ],
     }
 
@@ -1180,6 +1241,7 @@ def env_skipped_values() -> dict:
         ("TRADINGAGENTS_TEMPERATURE", "temperature"),
         ("TRADINGAGENTS_MAX_TOKENS", "max_tokens"),
         ("TRADINGAGENTS_LLM_MAX_RETRIES", "llm_max_retries"),
+        ("TRADINGAGENTS_LLM_CALL_BUDGET", "llm_call_budget"),
         ("TRADINGAGENTS_MAX_TOOL_ROUNDS", "max_tool_rounds"),
         ("TRADINGAGENTS_BENCHMARK_TICKER", "benchmark_ticker"),
         ("TRADINGAGENTS_RESULTS_DIR", "results_dir"),
@@ -1681,6 +1743,11 @@ def effective_results_dir() -> str:
 
 
 def effective_cache_dir() -> str:
+    # The CLI treats an explicit cache environment variable as authoritative;
+    # the crawler must make the same choice rather than letting an older saved
+    # WebUI setting split its store from the worker.
+    if os.environ.get("TRADINGAGENTS_CACHE_DIR"):
+        return DEFAULT_CONFIG["data_cache_dir"]
     saved = load_saved_config().get("data_cache_dir")
     if not saved:
         return DEFAULT_CONFIG["data_cache_dir"]
@@ -1690,20 +1757,53 @@ def effective_cache_dir() -> str:
         return DEFAULT_CONFIG["data_cache_dir"]
 
 
+
+def _stored_or_env_path(selections: dict, skipped: dict, key: str, resolver) -> str | None:
+    """Keep a stored path. The current environment fills only an omitted field.
+
+    A new launch copies the environment into selections before this runs, so
+    that copy still follows the environment. A restart's stored path is
+    different from the current environment and wins. Environment paths may sit
+    outside the console root; only a console-chosen path is resolved there.
+    """
+    explicit = _explicit_selection(selections, key)
+    env_value = skipped.get(key) if key in skipped else None
+    if explicit is not None and (env_value is None or str(explicit) != str(env_value)):
+        return resolver(str(explicit))
+    if env_value is not None:
+        return str(env_value)
+    if explicit is not None:
+        return resolver(str(explicit))
+    return None
+
+
+def _explicit_selection(selections: dict, key: str):
+    """A stored or caller-supplied value. None and "" mean the field was omitted."""
+    value = selections.get(key)
+    return None if value in (None, "") else value
+
+
 def build_run_config(selections: dict) -> dict:
+    """Build the worker config.
+
+    A new launch copies the environment into selections first
+    (``apply_env_skips``). A restart must not do that again: an explicit
+    selection wins over the current environment, and the environment fills
+    only fields the selection omitted.
+    """
     config = _build_run_config(selections, selections.get("checkpoint"))
     skipped = env_skipped_values()
     for key in ("temperature", "max_tokens", "llm_max_retries", "max_tool_rounds", "benchmark_ticker"):
-        if key in skipped:
-            config[key] = skipped[key]
-            continue
-        if selections.get(key) not in (None, ""):
-            value = selections[key]
+        explicit = _explicit_selection(selections, key)
+        if explicit is not None:
+            value = explicit
             if key == "temperature":
                 value = float(value)
             elif key != "benchmark_ticker":
                 value = int(value)
             config[key] = value
+        elif key in skipped:
+            config[key] = skipped[key]
     for tier in ("quick", "deep"):
         provider = selections.get(f"{tier}_think_provider")
         if provider:
@@ -1714,22 +1814,21 @@ def build_run_config(selections: dict) -> dict:
     vendors = selections.get("data_vendors")
     if vendors:
         config["data_vendors"] = {**(config.get("data_vendors") or {}), **vendors}
-    if "memory_log_path" in skipped:
-        config["memory_log_path"] = skipped["memory_log_path"]
-    elif selections.get("memory_log_path"):
-        config["memory_log_path"] = resolve_memory_path(str(selections["memory_log_path"]))
+    config["memory_log_path"] = _stored_or_env_path(
+        selections, skipped, "memory_log_path", resolve_memory_path)
     if selections.get("max_risk_discuss_rounds"):
         config["max_risk_discuss_rounds"] = int(selections["max_risk_discuss_rounds"])
-    if "data_cache_dir" in skipped:
-        config["data_cache_dir"] = skipped["data_cache_dir"]
-    elif selections.get("data_cache_dir"):
-        config["data_cache_dir"] = resolve_cache_dir(str(selections["data_cache_dir"]))
-    if "results_dir" in skipped:
-        config["results_dir"] = skipped["results_dir"]
-    elif selections.get("results_dir"):
-        config["results_dir"] = resolve_results_dir(str(selections["results_dir"]))
+    cache_dir = _stored_or_env_path(selections, skipped, "data_cache_dir", resolve_cache_dir)
+    if cache_dir is not None:
+        config["data_cache_dir"] = cache_dir
     else:
-        config["results_dir"] = console_default_results_dir()
+        # The WebUI settings drawer persists this value separately from the
+        # process-wide DEFAULT_CONFIG. Keep an analysis launched by a caller
+        # that omitted the field on the same cache tree as the information
+        # crawler (and as the form defaults).
+        config["data_cache_dir"] = effective_cache_dir()
+    results_dir = _stored_or_env_path(selections, skipped, "results_dir", resolve_results_dir)
+    config["results_dir"] = results_dir if results_dir is not None else console_default_results_dir()
     if selections.get("tool_vendors"):
         config["tool_vendors"] = {**(config.get("tool_vendors") or {}), **selections["tool_vendors"]}
     for key in limit_labels():
@@ -1738,15 +1837,71 @@ def build_run_config(selections: dict) -> dict:
     if selections.get("global_news_queries"):
         config["global_news_queries"] = list(selections["global_news_queries"])
     pick = selections.get("info_crawl")
-    if isinstance(pick, dict) and pick.get("job") and pick.get("items"):
+    if (_info_crawl_has_consumer(selections)
+            and isinstance(pick, dict) and pick.get("job") and pick.get("items")):
         config["info_crawl_job"] = pick["job"]
         config["info_crawl_items"] = list(pick["items"])
+    local_import = selections.get("local_import")
+    if isinstance(local_import, list) and local_import:
+        config["local_import_items"] = list(local_import)
     if selections.get("timeout") not in (None, ""):
         config["timeout"] = float(selections["timeout"])
     if selections.get("llm_call_budget") not in (None, ""):
         config["llm_call_budget"] = float(selections["llm_call_budget"])
     return config
 
+
+
+LOCAL_IMPORT_NO_NEWS = "未选新闻分析师，本地导入的资料不会被使用。请勾选新闻分析师，或清除导入。"
+
+
+def validate_local_import(payload: dict) -> dict:
+    """Check a CSV/JSON the browser already read. No network fetch."""
+    if not isinstance(payload, dict):
+        raise ConsoleError("请上传 CSV 或 JSON 文件。")
+    text = payload.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise ConsoleError("文件是空的。")
+    from tradingagents.dataflows.local_import import LocalImportError, parse_local_import
+    try:
+        items = parse_local_import(text, str(payload.get("filename") or ""))
+    except LocalImportError as exc:
+        raise ConsoleError(str(exc)) from None
+    return {
+        "ok": True,
+        "count": len(items),
+        "filename": items[0].get("filename") or "",
+        "items": items,
+        "preview": [{"title": item["title"], "published_at": item.get("published_at") or "未注明日期"} for item in items[:5]],
+    }
+
+
+def _local_import_from_payload(payload) -> list | None:
+    if not isinstance(payload, dict) or not payload.get("local_import"):
+        return None
+    raw = payload.get("local_import")
+    from tradingagents.dataflows.local_import import LocalImportError, parse_local_import
+    try:
+        if isinstance(raw, str):
+            return parse_local_import(raw, str(payload.get("local_import_name") or ""))
+        if isinstance(raw, list):
+            import json
+            return parse_local_import(json.dumps(raw, ensure_ascii=False), "import.json")
+    except LocalImportError as exc:
+        raise ConsoleError(str(exc)) from None
+    raise ConsoleError("本地导入的内容格式不正确。")
+
+
+def _local_import_notices(selections: dict | None) -> list[str]:
+    items = selections.get("local_import") if isinstance(selections, dict) else None
+    if items and not _info_crawl_has_consumer(selections):
+        return [LOCAL_IMPORT_NO_NEWS]
+    return []
+
+
+def _require_local_import_news(selections: dict) -> None:
+    if selections.get("local_import") and not _info_crawl_has_consumer(selections):
+        raise ConsoleError(LOCAL_IMPORT_NO_NEWS)
 
 def _info_crawl_pick(payload) -> dict | None:
     """The 信息抓取 rows to bring into the run: ``{"job", "items"}``, or ``None``.
@@ -1766,6 +1921,114 @@ def _info_crawl_pick(payload) -> dict | None:
     if not valid_job_id(job):
         raise ConsoleError("带入分析的信息抓取任务编号不合法")
     return {"job": job, "items": list(dict.fromkeys(raw))}
+
+
+INFO_CRAWL_ATTACHMENT_GONE = (
+    "带入分析的资讯附件已失效：当前缓存目录中找不到所选抓取任务或条目。"
+    "可能是切换了缓存目录、服务重启后任务中断，或资讯已超过 30 天被清理。"
+    "请返回「信息抓取」重新抓取并勾选。"
+)
+INFO_CRAWL_NO_NEWS_ANALYST = "未选新闻分析师，附件不会被使用。"
+
+
+def info_attach_run_line(config: dict) -> str | None:
+    """AUDIT-FIX-04: tell the run log how many attached rows the worker really found.
+
+    ``build_run_config`` only carries ``info_crawl_job``/``info_crawl_items`` when the
+    news analyst (their only consumer) is selected, so this line is about rows that
+    will be used. The rows are read from the run's own cache tree
+    (``<data_cache_dir>/info-crawl``), the same directory the console crawls into.
+    """
+    job, wanted = config.get("info_crawl_job"), list(dict.fromkeys(config.get("info_crawl_items") or []))
+    if not job or not wanted:
+        return None
+    from tradingagents.dataflows.info_crawl.store import JsonlItemStore, default_store
+
+    root = config.get("info_crawl_dir")
+    if not root and config.get("data_cache_dir"):
+        root = Path(config["data_cache_dir"]) / "info-crawl"
+    try:
+        target = JsonlItemStore(Path(root)) if root else default_store()
+        found = len({item.id for item in target.load_items(job)} & set(wanted))
+    except Exception:  # noqa: BLE001 - the notice must never stop a run
+        found = 0
+    if found == len(wanted):
+        return f"已带入 {found} 条信息抓取资讯（由新闻分析师使用）。"
+    return (f"注意：带入的 {len(wanted)} 条资讯中只找到 {found} 条（其余可能已过期清理，或数据缓存目录已更换），"
+            "本次分析只使用找到的条目。")
+
+
+def _effective_analysis_analysts(selections: dict | None) -> set[str]:
+    """Return the analyst keys after any environment overlay has won."""
+    selections = selections if isinstance(selections, dict) else {}
+    # ``apply_env_skips`` normally writes this into selections before this
+    # helper is reached.  Reading the overlay as well keeps direct worker/API
+    # callers on the same rule and lets environment-backed test/config layers
+    # override a stale page payload.
+    raw = selections.get("analysts")
+    if raw is None:
+        # A direct caller may omit the already-applied list. Normal WebUI
+        # validation writes the environment result into selections first.
+        raw = env_skipped_values().get("analysts")
+    if isinstance(raw, str):
+        raw = [part.strip() for part in raw.split(",") if part.strip()]
+    if not isinstance(raw, (list, tuple, set)):
+        return set()
+    return {
+        str(getattr(item, "value", item)).strip().lower()
+        for item in raw
+        if str(getattr(item, "value", item)).strip()
+    }
+
+
+def _info_crawl_has_consumer(selections: dict | None) -> bool:
+    """Only the news analyst consumes selected information-crawl rows."""
+    return "news" in _effective_analysis_analysts(selections)
+
+
+def _info_crawl_notices(selections: dict | None) -> list[str]:
+    pick = selections.get("info_crawl") if isinstance(selections, dict) else None
+    if isinstance(pick, dict) and pick.get("job") and pick.get("items") and not _info_crawl_has_consumer(selections):
+        return [INFO_CRAWL_NO_NEWS_ANALYST]
+    return []
+
+
+def _validate_info_crawl_attachment(selections: dict, config: dict | None = None) -> None:
+    """Refuse a run that would silently lose its selected crawl rows.
+
+    The browser carries only job/item ids.  Those ids are useful only in the
+    ``info-crawl`` directory belonging to this run's effective cache config;
+    checking that directory before launch makes a cache-dir switch, restart,
+    or retention purge actionable instead of producing a report without the
+    user's requested evidence.
+    """
+    pick = selections.get("info_crawl") if isinstance(selections, dict) else None
+    if not isinstance(pick, dict) or not pick.get("job") or not pick.get("items"):
+        return
+    if not _info_crawl_has_consumer(selections):
+        return
+    config = config or build_run_config(selections)
+    try:
+        from tradingagents.dataflows.info_crawl.store import JsonlItemStore
+
+        target = JsonlItemStore(Path(config["data_cache_dir"]) / "info-crawl")
+        # Retention is a property of the attachment, not only of the first
+        # API read after a restart. Purge here so a worker cannot accept a
+        # selected row merely because its directory was never opened by the
+        # console's normal store initializer.
+        target.purge()
+        job = target.load_job(pick["job"])
+        if job is None:
+            raise ConsoleError(INFO_CRAWL_ATTACHMENT_GONE, 409)
+        if job.get("status") not in {"done", "partial"}:
+            raise ConsoleError(INFO_CRAWL_ATTACHMENT_GONE, 409)
+        available = {item.id for item in target.load_items(pick["job"])}
+        if not set(pick["items"]).issubset(available):
+            raise ConsoleError(INFO_CRAWL_ATTACHMENT_GONE, 409)
+    except ConsoleError:
+        raise
+    except (OSError, TypeError, ValueError, KeyError):
+        raise ConsoleError(INFO_CRAWL_ATTACHMENT_GONE, 409) from None
 
 
 RUNS_DIRNAME = "runs"
@@ -2051,6 +2314,18 @@ def _reap(pid: int) -> bool:
     return child == pid
 
 
+def _is_zombie(pid: int) -> bool:
+    """Whether an already-exited, unreaped worker is only a zombie (macOS/Linux)."""
+    with contextlib.suppress(OSError, ValueError, IndexError):
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+        return raw[raw.rindex(")") + 2:].split()[0] == "Z"
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        out = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True,
+                             timeout=5, env={**os.environ, "LC_ALL": "C"})
+        return out.returncode == 0 and out.stdout.strip().startswith("Z")
+    return False
+
+
 def _alive(pid: int) -> bool:
     if _reap(pid):
         return False
@@ -2060,7 +2335,7 @@ def _alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
-    return True
+    return not _is_zombie(pid)
 
 
 def _process_start(pid: int) -> str | None:
@@ -2188,6 +2463,18 @@ PID_REUSED_SENTENCE = ("这个任务记录的进程号现在属于另一个程�
                        "原来的分析进程已经不在，没有写出结果。控制台没有向那个程序发送任何信号。")
 
 
+def pid_reused_sentence(record: dict | None) -> str:
+    """The recorded pid belongs to another program. A backtest is not an analysis."""
+    kind = (record or {}).get("kind")
+    if kind == "analysis":
+        return PID_REUSED_SENTENCE
+    if kind == "backtest":
+        return ("进程号现在属于另一个程序，启动时间对不上。"
+                "原来的回测进程已经不在，没有写出结果。没有向那个程序发送信号。")
+    return ("进程号现在属于另一个程序，启动时间对不上。"
+            "原来的进程已经不在，没有写出结果。不把它写成分析进程。没有向那个程序发送信号。")
+
+
 PROCESS_UNVERIFIED_SENTENCE = ("读不到这个任务进程的启动时间，无法确认它还是本任务的分析进程。"
                                "为安全起见没有发送任何信号；任务仍算运行中，继续占用名额。"
                                # W58: say what to do next instead of only refusing, on its own line.
@@ -2196,11 +2483,21 @@ PROCESS_UNVERIFIED_SENTENCE = ("读不到这个任务进程的启动时间，无
                                "也可以等它自行结束，名额会自动释放。")
 
 
+def process_unverified_sentence(record: dict | None) -> str:
+    """Cannot prove the pid is ours, so no signal. A backtest is not an analysis."""
+    kind = (record or {}).get("kind")
+    if kind == "analysis":
+        return PROCESS_UNVERIFIED_SENTENCE
+    if kind == "backtest":
+        return "读不到启动时间，无法确认这是回测进程。没有发送任何信号，任务仍算运行中。\n下一步：稍后点「刷新」再试。"
+    return "读不到启动时间，无法确认这是本任务的进程。不把它写成分析进程。没有发送任何信号，任务仍算运行中。\n下一步：稍后点「刷新」再试。"
+
+
 def _mark_pid_reused(record: dict) -> None:
     record["status"] = "failed"
     record["interrupted"] = True
     record["pid_reused"] = True
-    record["detail"] = record["zh"] = PID_REUSED_SENTENCE
+    record["detail"] = record["zh"] = pid_reused_sentence(record)
     _note_saved_checkpoint(record)
 
 
@@ -2219,10 +2516,21 @@ def _signal_owned_group(pid: int, sig: int) -> bool:
     return True
 
 
-def backtest_busy_sentence(limits: dict, running: int, queued: int) -> str:
+def backtest_busy_sentence(limits: dict, running: int, queued: int, *, starting: int = 0, stopping: int = 0) -> str:
     """Why a backtest did not start (W44): it needs a free run slot and an empty queue."""
     waiting = f"，另有 {queued} 个在排队" if queued else ""
-    return (f"运行名额已满或有任务在排队（正在运行 {running} 个，上限 {limits['max_running']} 个{waiting}），"
+    if starting or stopping:
+        bits = []
+        if running:
+            bits.append(f"正在运行 {running} 个")
+        if starting:
+            bits.append(f"启动中 {starting} 个")
+        if stopping:
+            bits.append(f"停止中 {stopping} 个")
+        detail = "，".join(bits)
+    else:
+        detail = f"正在运行 {running} 个"
+    return (f"运行名额已满或有任务在排队（{detail}，上限 {limits['max_running']} 个{waiting}），"
             f"回测没有启动。回测不排队：等有任务结束、队列清空后再启动。")
 
 
@@ -2236,6 +2544,17 @@ def _record(run_id: str | None = None) -> dict | None:
     if record is None:
         raise ConsoleError("没有这个任务。", 404)
     return record
+
+
+
+def stopped_sentence(record: dict) -> str:
+    """What a finished stop says. A backtest is not an analysis."""
+    kind = record.get("kind")
+    if kind == "backtest":
+        return "回测已停止，不是正常完成。不把它写成分析。"
+    if kind == "analysis":
+        return "任务已停止。不是正常完成。"
+    return "任务已停止，不是正常完成。不把它写成分析。"
 
 
 def stop_run(run_id: str | None = None) -> dict:
@@ -2254,8 +2573,8 @@ def _stop_record(record: dict | None) -> dict:
     if not record:
         return {
             "status": "idle",
-            "detail": "没有由控制台启动的分析。",
-            "zh": "没有由控制台启动的分析。",
+            "detail": "没有由控制台启动的任务。",
+            "zh": "没有由控制台启动的任务。不把它写成分析。",
             "cli": STOP_NOT_RUNNING,
             "note": "这句对应启动脚本在没有自己的进程时的说法。这里没有查询那个进程。",
         }
@@ -2269,6 +2588,12 @@ def _stop_record(record: dict | None) -> dict:
             "note": "这句对应启动脚本在子进程还没就绪时的说法。这里没有查询那个进程。",
         }
     state = _worker_state(record) if isinstance(pid, int) else "gone"
+    if state == "foreign" and _result_file(record) is not None:
+        # The worker already wrote its result; the live pid is a later reuse. Do not signal it.
+        _mark_result_finished(record)
+        record["finished_at"] = datetime.now().isoformat(timespec="seconds")
+        JOBS.write_run(record)
+        return record
     if state == "foreign":
         # The pid now belongs to another program: never signal it (W39).
         _mark_pid_reused(record)
@@ -2277,7 +2602,7 @@ def _stop_record(record: dict | None) -> dict:
         return record
     if state == "unknown":
         # W47: cannot prove the process is ours, so no signal; the run keeps running.
-        raise ConsoleError(PROCESS_UNVERIFIED_SENTENCE, 409)
+        raise ConsoleError(process_unverified_sentence(record), 409)
     if not isinstance(pid, int) or not _alive(pid):
         record["status"] = "idle" if not pid else record.get("status", "finished")
         record["detail"] = "没有仍在运行的控制台进程。"
@@ -2289,7 +2614,6 @@ def _stop_record(record: dict | None) -> dict:
     signaled = _signal_owned_group(pid, signal.SIGTERM)
     if not signaled:
         raise ConsoleError("这个进程不是控制台启动的进程组，已拒绝发送停止信号。", 409)
-    record["zh"] = "正在停止控制台分析。"
     record["cli"] = STOPPING
     deadline = time.time() + 15
     while time.time() < deadline and _alive(pid):
@@ -2298,6 +2622,8 @@ def _stop_record(record: dict | None) -> dict:
         record["cli"] = STOP_TIMEOUT_SENTENCE
         record["zh"] = "15 秒内没有停止。命令行会停在这里；控制台接着发送了 SIGKILL。"
         _signal_owned_group(pid, signal.SIGKILL)
+    else:
+        record["zh"] = stopped_sentence(record)
     record["status"] = "stopped"
     record["detail"] = record["zh"]
     record["finished_at"] = datetime.now().isoformat(timespec="seconds")
@@ -2334,6 +2660,11 @@ def restart_run(resume: bool = False, run_id: str | None = None) -> dict:
     database is copied instead), so the old run's database is never written to.
     """
     record = _record(run_id)
+    kind = (record or {}).get("kind")
+    if kind == "backtest":
+        raise ConsoleError("这是回测，不能按分析重新启动。没有启动。", 409)
+    if kind not in (None, "", "analysis"):
+        raise ConsoleError("任务类型未知，不把它写成分析重新启动。没有启动。", 409)
     if not record or not record.get("selections"):
         raise ConsoleError("没有可重新启动的分析参数。")
     selections, notices = restart_selections(record["selections"])
@@ -2594,6 +2925,39 @@ def _report_meta(markdown: Path) -> dict:
     return meta
 
 
+_DECISION_READ_LIMIT = 16384
+
+
+def _decision_paragraph(text: str) -> str:
+    """A portfolio-manager paragraph, using the report page's 20-character threshold.
+
+    A header rating is not this paragraph. Headings and a short label such as
+    ``持有`` do not count.
+    """
+    for block in re.split(r"\n\s*\n", text or ""):
+        cleaned = re.sub(r"^#+\s.*$", "", block, flags=re.MULTILINE)
+        cleaned = re.sub(r"[*_`>#|]", "", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if len(cleaned) > 20:
+            return cleaned
+    return ""
+
+
+def _portfolio_decision_text(report_dir: Path, base: Path) -> str:
+    """Decision body that stays inside the results tree. Outside links are empty."""
+    try:
+        file = (report_dir / "5_portfolio" / "decision.md").resolve()
+    except (OSError, RuntimeError):
+        return ""
+    if base not in file.parents or not file.is_file():
+        return ""
+    try:
+        with file.open(encoding="utf-8", errors="replace") as handle:
+            return handle.read(_DECISION_READ_LIMIT)
+    except OSError:
+        return ""
+
+
 def list_reports(limit: int = 40) -> list[dict]:
     try:
         return _list_reports(limit)
@@ -2640,6 +3004,7 @@ def _list_reports(limit: int) -> list[dict]:
             "deep_model": meta.get("deep_model"),
             "quick_model": meta.get("quick_model"),
             "debate_rounds": meta.get("debate_rounds"),
+            "has_decision": bool(_decision_paragraph(_portfolio_decision_text(real.parent, base))),
         })
     found.sort(key=lambda item: item["modified"], reverse=True)
     return found[:limit]
@@ -2840,6 +3205,11 @@ def default_runner(job: dict) -> int:
     config = build_run_config(selections)
     apply_console_call_bounds(config)
     config["checkpoint_enabled"] = console_checkpoint_enabled(selections)
+    # Re-check in the worker: the user can leave the page open while the
+    # retention job purges rows or while the cache directory is changed. A
+    # missing attachment must fail visibly, never become an analysis with less
+    # evidence than the user selected.
+    _validate_info_crawl_attachment(selections, config)
     if selections.get("clear_checkpoints"):
         cleared = clear_all_checkpoints(config["data_cache_dir"])
         print(checkpoint_clear_sentence(cleared), flush=True)
@@ -2897,6 +3267,7 @@ def analysis_result_payload(state, decision, notice: dict, selections: dict, too
         "decision": decision,
         "report": notice["report"],
         "rating": state.get("final_rating") if isinstance(state, dict) else None,
+        "decision_record": state.get("decision_record") if isinstance(state, dict) and isinstance(state.get("decision_record"), dict) else None,
         "saved_to": notice["saved_to"],
         "html": notice["html"],
         "save_error": notice["save_error"],
@@ -3154,6 +3525,9 @@ def _stream_like_cli(graph, selections: dict, portfolio, stats_handler=None):
         say_system(detected_asset_sentence(selections["asset_type"]))
     say_system(analysis_date_message(selections["analysis_date"]))
     say_system(selected_analysts_sentence(selections["analysts"]))
+    attach_line = info_attach_run_line(getattr(graph, "config", None) or {})
+    if attach_line:
+        say_system(attach_line)
     _emit_status(buffer, seen)
     init_state = graph.create_run_state(
         selections["ticker"], selections["analysis_date"], selections["asset_type"], portfolio,
@@ -3249,16 +3623,51 @@ def _record_for(run_id: str, selections: dict, log_path: Path, result_path: Path
     }
 
 
+def could_not_start_console_sentence(record: dict | None, exc: BaseException) -> str:
+    """The console could not spawn. The CLI sentence stays; the kind must not be guessed."""
+    from cli.launcher import could_not_start_sentence
+    kind = (record or {}).get("kind")
+    if kind == "backtest":
+        head = "控制台没能启动回测。"
+    elif kind == "analysis":
+        head = "控制台没能启动分析。"
+    else:
+        head = "控制台没能启动这个任务。不把它写成分析。"
+    return head + "对应命令行：" + could_not_start_sentence(exc)
+
+
 def background_start_sentence(log_path: Path | str) -> str:
     """The launcher sentence after a background start succeeds."""
     from cli.launcher import background_started_sentence
     return background_started_sentence(log_path)
 
 
+def background_failed_zh(record: dict | None) -> str:
+    """The worker exited before it was running. A backtest is not an analysis."""
+    kind = (record or {}).get("kind")
+    if kind == "backtest":
+        return "后台启动失败。进程启动不等于回测完成。"
+    if kind == "analysis":
+        return "后台启动失败。进程启动不等于分析完成。"
+    return "后台启动失败。进程启动不等于完成。不把它写成分析完成。"
+
+
+def background_started_zh(record: dict | None) -> str:
+    """A spawned process is running. That is not completion, and a backtest is not an analysis."""
+    kind = (record or {}).get("kind")
+    if kind == "backtest":
+        return "已在后台启动。进程启动不等于回测完成。"
+    if kind == "analysis":
+        return "已在后台启动。进程启动不等于分析完成。"
+    return "已在后台启动。进程启动不等于完成。不把它写成分析完成。"
+
+
 def _mark_background_start(record: dict, log_path: Path) -> dict:
     record["log"] = str(log_path)
     record["cli"] = background_start_sentence(log_path)
-    record["zh"] = "已在后台启动。进程启动不等于分析完成。"
+    base = background_started_zh(record)
+    notices = _info_crawl_notices(record.get("selections") or {})
+    record["zh"] = " ".join([*notices, base]) if notices else base
     return record
 
 
@@ -3278,10 +3687,7 @@ def _spawn(job: dict, record: dict, log_path: Path) -> dict:
             record["status"] = "failed"
             record["error"] = str(exc)
             JOBS.write_run(record)
-            from cli.launcher import could_not_start_sentence
-            raise ConsoleError(
-                "控制台没能启动分析。对应命令行：" + could_not_start_sentence(exc)
-            ) from exc
+            raise ConsoleError(could_not_start_console_sentence(record, exc)) from exc
     finally:
         log.close()
     record["pid"] = process.pid
@@ -3292,7 +3698,7 @@ def _spawn(job: dict, record: dict, log_path: Path) -> dict:
         record["returncode"] = process.returncode
         from cli.launcher import background_failed_sentence
         record["cli"] = background_failed_sentence(log_path)
-        record["zh"] = "后台启动失败。进程启动不等于分析完成。"
+        record["zh"] = background_failed_zh(record)
         JOBS.write_run(record)
         raise ConsoleError(
             "后台启动失败。对应命令行：" + background_failed_sentence(log_path)
@@ -3306,10 +3712,35 @@ def _spawn(job: dict, record: dict, log_path: Path) -> dict:
 RUN_LOCK = threading.RLock()
 
 
-def queue_full_sentence(limits: dict, running: int | None = None, queued: int | None = None) -> str:
+def _status_counts(records: list[dict]) -> dict[str, int]:
+    counts = {"running": 0, "starting": 0, "stopping": 0}
+    for record in records:
+        status = record.get("status")
+        if status in counts:
+            counts[status] += 1
+    return counts
+
+
+def _occupied_phrase(running: int, starting: int = 0, stopping: int = 0) -> str:
+    """Say which live tasks occupy slots. Stopping is not running."""
+    parts = []
+    if running:
+        parts.append(f"{running} 个任务运行中")
+    if starting:
+        parts.append(f"{starting} 个启动中")
+    if stopping:
+        parts.append(f"{stopping} 个停止中")
+    if not parts:
+        parts.append(f"{running} 个任务运行中")
+    return "，".join(parts)
+
+
+def queue_full_sentence(limits: dict, running: int | None = None, queued: int | None = None, *,
+                        starting: int = 0, stopping: int = 0) -> str:
     running = limits["max_running"] if running is None else running
     queued = limits["max_queued"] if queued is None else queued
-    return (f"队列已满：{running} 个任务运行中，{queued} 个在排队"
+    occupied = _occupied_phrase(running, starting, stopping)
+    return (f"队列已满：{occupied}，{queued} 个在排队"
             f"（最多同时运行 {limits['max_running']} 个，最多排队 {limits['max_queued']} 个）。"
             "等排队的任务开始后再启动，也可以在查看状态里取消一个排队的任务。")
 
@@ -3340,6 +3771,14 @@ def start_validated_run(selections: dict, *, background: bool = True, resume_fro
     start in arrival order when a run ends. When ``max_queued`` already wait,
     the start is refused with :func:`queue_full_sentence`.
     """
+    # Callers normally pass the already validated selections. Do not reapply
+    # the full environment overlay here: restart/direct callers may carry an
+    # explicit, validated cache/results path that must remain part of the run.
+    selections = dict(selections)
+    run_notices = list(notices or [])
+    for notice in _info_crawl_notices(selections):
+        if notice not in run_notices:
+            run_notices.append(notice)
     with RUN_LOCK:
         limits = run_limits()
         dispatch_queue()  # a slot that just freed goes to the queue first, never to this start
@@ -3347,16 +3786,27 @@ def start_validated_run(selections: dict, *, background: bool = True, resume_fro
         queued = [r for r in records if r.get("status") == "queued"]
         busy = _slots_used(records, limits) >= limits["max_running"] or bool(queued)
         if busy and len(queued) >= limits["max_queued"]:
-            raise ConsoleError(queue_full_sentence(limits, len(_live_runs(records)), len(queued)), 409)
+            live = _status_counts(records)
+            raise ConsoleError(queue_full_sentence(
+                limits, live["running"], len(queued), starting=live["starting"], stopping=live["stopping"]
+            ), 409)
         if _resume_source_missing(selections, resume_from):
             raise ConsoleError(RESUME_SOURCE_GONE, 409)
+        _validate_info_crawl_attachment(selections)
         run_id = new_run_id()
         log_path, result_path, job_path = _job_paths(run_id)
         framework = launch_framework({"framework": framework})  # a caller cannot start an unregistered framework
         record = _record_for(run_id, selections, log_path, result_path, kind="analysis", framework=framework)
+        from webui.compare import freeze_prompt_versions
+        from webui.cost import freeze_role_models
+        freeze_role_models(record, selections)
+        freeze_prompt_versions(record)
         record["checkpoint"] = {"enabled": console_checkpoint_enabled(selections), "saved": None, "scope": run_id}
-        if notices:
-            record["notices"] = list(notices)
+        if run_notices:
+            record["notices"] = list(run_notices)
+            info_notices = _info_crawl_notices(selections)
+            if info_notices:
+                record["detail"] = " ".join(info_notices)
         job = {
             "id": run_id,
             "kind": "analysis",
@@ -3378,7 +3828,9 @@ def start_validated_run(selections: dict, *, background: bool = True, resume_fro
             record["queued_at"] = datetime.now().isoformat(timespec="seconds")
             record["queue_seq"] = time.time_ns()
             record["queue_ahead"] = len(queued)
-            record["detail"] = record["zh"] = f"已加入队列，前面还有 {len(queued)} 个。有任务结束后会自动开始。"
+            queue_sentence = f"已加入队列，前面还有 {len(queued)} 个。有任务结束后会自动开始。"
+            info_notices = _info_crawl_notices(selections)
+            record["detail"] = record["zh"] = " ".join([*info_notices, queue_sentence]) if info_notices else queue_sentence
             JOBS.write_run(record)
             answer = redact(record)
             answer["limits"] = limits
@@ -3462,18 +3914,19 @@ def recover_runs_on_start() -> dict:
             state = _worker_state(record) if isinstance(pid, int) else "gone"
             if state in ("ours", "unknown"):  # W47: keeps running and keeps its slot
                 continue
-            result = Path(record["result"]) if record.get("result") else None
+            raw_result = record.get("result")
+            result = Path(raw_result) if isinstance(raw_result, str) and raw_result else None
+            if result is not None and result.is_file():
+                # Completed before the pid was reused or the process disappeared. Not an interruption.
+                _mark_result_finished(record)
+                record["finished_at"] = datetime.now().isoformat(timespec="seconds")
+                JOBS.write_run(record)
+                continue
             if state == "foreign":
                 _mark_pid_reused(record)
                 record["finished_at"] = datetime.now().isoformat(timespec="seconds")
                 JOBS.write_run(record)
                 interrupted.append(record["id"])
-                continue
-            if result is not None and result.is_file():
-                record["status"] = "finished"
-                record["detail"] = "分析进程已退出，结果文件已写出。这只说明进程结束，不表示分析完成或评级已确认。"
-                record["finished_at"] = datetime.now().isoformat(timespec="seconds")
-                JOBS.write_run(record)
                 continue
             record["status"] = "failed"
             record["interrupted"] = True
@@ -3641,7 +4094,7 @@ def _progress_counts(record: dict) -> dict:
     selected = (record.get("selections") or {}).get("analysts")
     status = record.get("status")
     if status == "queued":
-        return {"done": 0, "total": len(progress_rows([], selected)), "team_zh": "等待开始"}
+        return {"done": 0, "total": len(progress_rows([], selected)), "team_zh": "等待开始", "blank": False}
     log = Path(record.get("log") or "")
     try:
         stat = log.stat()
@@ -3660,15 +4113,21 @@ def _progress_counts(record: dict) -> dict:
     working = next((row for row in rows if row["status"] == "in_progress"), None)
     if status == "failed":
         failed_row = next((row for row in rows if row["agent"] == failure.get("role")), None)
-        team = (failed_row or working or {}).get("team_zh") or "已停止"
+        team = (failed_row or working or {}).get("team_zh") or "没有定位到团队"
     elif status == "finished":
-        team = "全部完成"
+        team = "进程已结束"
     elif status in ("stopped", "cancelled"):
         team = "已停止" if status == "stopped" else "已取消"
+    elif status == "idle" or status not in {"starting", "running", "stopping", "completed"}:
+        team = "不写成准备中"
     else:
         team = (working or {}).get("team_zh") or ("准备中" if done == 0 else next(
             (row["team_zh"] for row in rows if row["status"] == "pending"), "收尾中"))
-    answer = {"done": done, "total": len(rows), "team_zh": team}
+    ended = status in {"finished", "failed", "stopped", "cancelled", "completed"}
+    recorded = any(row.get("status") not in (None, "", "pending") for row in rows)
+    known = {"starting", "running", "stopping", "completed", "finished", "failed", "stopped", "queued", "cancelled", "idle"}
+    blank = (status == "idle" or status not in known) and not recorded
+    answer = {"done": done, "total": len(rows), "team_zh": team, "unrecorded": ended and not recorded, "blank": blank}
     _SUMMARY_CACHE[str(record.get("id"))] = (key, answer)
     return answer
 
@@ -3735,7 +4194,9 @@ def _run_listing(records: list[dict]):
     every = [run_summary(r, positions.get(r.get("id"))) for r in records]
     counts = {
         "all": len(every),
-        "running": sum(1 for r in every if r["status"] in LIVE_STATUSES),
+        "running": sum(1 for r in every if r["status"] == "running"),
+        "starting": sum(1 for r in every if r["status"] == "starting"),
+        "stopping": sum(1 for r in every if r["status"] == "stopping"),
         "queued": sum(1 for r in every if r["status"] == "queued"),
         "failed": sum(1 for r in every if r["status"] == "failed"),
         "finished": sum(1 for r in every if r["status"] == "finished"),
@@ -3827,7 +4288,10 @@ def start_backtest(payload: dict) -> dict:
         records = _refresh_all()
         queued = [r for r in records if r.get("status") == "queued"]
         if _slots_used(records, limits) >= limits["max_running"] or queued:
-            raise ConsoleError(backtest_busy_sentence(limits, len(_live_runs(records)), len(queued)), 409)
+            live = _status_counts(records)
+            raise ConsoleError(backtest_busy_sentence(
+                limits, live["running"], len(queued), starting=live["starting"], stopping=live["stopping"]
+            ), 409)
         return _start_backtest_now(payload, grid)
 
 

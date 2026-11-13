@@ -145,3 +145,18 @@ def test_ui_shows_fixed_note():
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     assert "源数据不一致，已修正高低价" in js and "kline-ohlc--fixed" in js
     assert ".kline-ohlc--fixed" in (STATIC / "app.css").read_text(encoding="utf-8")
+
+
+def test_yahoo_stock_label_is_not_yahoo_pill():
+    """W201: Yahoo rows are not labeled 数据源：Yahoo on the K-line page."""
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "数据源：股票${period}" in js
+    assert "数据源：股票日线 ${" not in js
+    body = js.split("function klineSourceLabel", 1)[1].split("function klineTickLabel", 1)[0]
+    assert 'row.asset_type === "stock"' in body
+    assert "不把它写成股票" in body
+    assert "周期未知，不把它写成日线" in js
+    assert '|| [, "日线"]' not in js
+    assert 'if (row.asset_type === "stock") return `数据源：股票${period} ${symbol}`;' in body
+    assert "数据源：Yahoo" not in js
+    assert "Yahoo Finance" not in js.split("function klineSourceLabel")[1].split("function drawKline")[0]

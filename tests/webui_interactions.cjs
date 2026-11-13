@@ -72,6 +72,10 @@ async function setup(overrides = {}, {html = markup, url = WIZARD_URL} = {}) {
     '/api/updates': {}, '/api/auth/login': {status: 'idle', messages: []},
     '/api/runs': {run: null, progress: {}, result: null},
     '/api/reports': {reports: []}, '/api/backtests': {sweeps: []},
+    '/api/watchlist': {items: [], triggers: [], mode: 'observe', mode_label: '观察', rule_version: 'watch-1', note: ''},
+    '/api/schedule/tick': {schedules: [], reminders: [], triggers: [], checks: [], mode_label: '观察', rule_version: 'sched-1'},
+    '/api/cost': {runs: [], note: '', rule: ''},
+    '/api/compare': {runs: [], note: ''},
     '/api/frameworks': FRAMEWORKS,
         ...overrides,
   };
@@ -79,13 +83,13 @@ async function setup(overrides = {}, {html = markup, url = WIZARD_URL} = {}) {
     calls.push({path, ...options});
     let value = routes[path] ?? routes[path.split('?')[0]];
     if (path.startsWith('/api/models?')) value = {models: [{id: 'fixture-model', zh: 'Fixture Model'}]};
-    if (path.startsWith('/api/asset?')) value = {asset_type: 'stock', analysts: ['market', 'social', 'news', 'fundamentals']};
+    if (value === undefined && path.startsWith('/api/asset?')) value = {asset_type: 'stock', analysts: ['market', 'social', 'news', 'fundamentals']};
     if (typeof value === 'function') value = await value(options, path);
     if (value === undefined) throw new Error(`Unexpected fixture request: ${path}`);
     if (value && value.__status) return {ok: false, status: value.__status, json: async () => structuredClone(value.body)};
     return {ok: true, json: async () => structuredClone(value)};
   };
-  window.eval(`${script}\nwindow.uiTest = {state, showPage, openRunDetail, closeRunDetail, readForm, renderAnalyze, renderRuns, renderAccounts, renderReports, submitAnalysis, resultPanel, renderMarkdown, openSaveDrawer, markScrollableTables, paintHolding, paintReview};`);
+  window.eval(`${script}\nwindow.uiTest = {state, showPage, openRunDetail, closeRunDetail, readForm, renderAnalyze, renderRuns, renderAccounts, renderReports, submitAnalysis, resultPanel, renderMarkdown, openSaveDrawer, markScrollableTables, paintHolding, paintReview, nextStepPanel, restartRefusal, restartRefusalHtml, liveSectionTable, analystRequiredHtml, infoItemsHtml, customModelRow, infoAttachHtml, showToast, formNoteHtml, compareCard, infoStatusHtml, paintReplay, modelTable, renderModelChoices};`);
   for (let i = 0; i < 5; i++) await settle();
   const doc = window.document;
   const click = async (selector) => {
@@ -144,7 +148,7 @@ test('analysis guides through four stages, validates, retains input and submits 
 test('all pages use full-width surfaces while retaining fluid containers', async () => {
   const ui = await setup();
   try {
-    const pages = ['analyze', 'runs', 'reports', 'kline', 'backtest', 'accounts', 'models'];
+    const pages = ['analyze', 'runs', 'reports', 'kline', 'watchlist', 'schedule', 'cost', 'compare', 'backtest', 'accounts', 'models'];
     assert.deepEqual([...ui.doc.querySelectorAll('.nav-item[data-page]')].map((item) => item.dataset.page), pages);
     for (const gone of ['settings', 'memory', 'help']) assert.equal(ui.doc.querySelector(`[data-page=${gone}]`), null, `${gone} page is folded away`);
     for (const page of pages) {
@@ -433,6 +437,126 @@ test('provider dropdown changes both inherited model services, and model selecti
   } finally { ui.dom.window.close(); }
 });
 
+test('the review does not call an unrecognized depth shallow or an unrecognized asset a stock', async () => {
+  const ui = await setup();
+  try {
+    ui.ui.state.form.research_depth = 9;
+    ui.ui.state.form.asset_type = 'index';
+    ui.ui.state.form.output_language = 'Klingon';
+    ui.ui.state.form.ticker = 'AAA';
+    ui.ui.showPage('analyze', {framework: 'tradingagents'});
+    for (let i = 0; i < 4; i++) await settle();
+    ui.ui.paintReview();
+    const text = ui.doc.querySelector('#analysis-summary').textContent;
+    assert.match(text, /研究深度未知，不把它写成浅层/);
+    assert.match(text, /资产类型未知，不把它写成股票/);
+    assert.match(text, /报告语言未知，不把它写成中文/);
+    assert.doesNotMatch(text, /AAA · 股票|研究深度浅层|语言中文/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the review still names a known depth, asset and language', async () => {
+  const ui = await setup();
+  try {
+    ui.ui.state.form.research_depth = 1;
+    ui.ui.state.form.asset_type = 'stock';
+    ui.ui.state.form.output_language = 'Chinese';
+    ui.ui.state.form.ticker = 'AAPL';
+    ui.ui.showPage('analyze', {framework: 'tradingagents'});
+    for (let i = 0; i < 4; i++) await settle();
+    ui.ui.paintReview();
+    const text = ui.doc.querySelector('#analysis-summary').textContent;
+    assert.match(text, /AAPL · 股票/);
+    assert.match(text, /研究深度浅层/);
+    assert.match(text, /语言中文/);
+    assert.doesNotMatch(text, /不把它写成浅层|不把它写成股票|不把它写成中文/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unrecognized research depth is not called shallow', async () => {
+  const ui = await setup();
+  try {
+    ui.ui.state.form.research_depth = 9;
+    ui.ui.showPage('analyze', {framework: 'tradingagents'});
+    for (let i = 0; i < 4; i++) await settle();
+    assert.equal(ui.doc.querySelector('#depths .custom-select-value').textContent, '研究深度未知');
+    assert.match(ui.doc.querySelector('#depth-unknown').textContent, /不把它写成浅层/);
+    assert.equal(ui.doc.querySelector('#depth-unknown').hidden, false);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a known research depth is still called by its name', async () => {
+  const ui = await setup();
+  try {
+    ui.ui.state.form.research_depth = 1;
+    ui.ui.showPage('analyze', {framework: 'tradingagents'});
+    for (let i = 0; i < 4; i++) await settle();
+    assert.equal(ui.doc.querySelector('#depths .custom-select-value').textContent, '浅层');
+    assert.equal(ui.doc.querySelector('#depth-unknown').hidden, true);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unrecognized report language is not called the first language', async () => {
+  const ui = await setup();
+  try {
+    ui.ui.state.form.output_language = 'Klingon';
+    ui.ui.showPage('analyze', {framework: 'tradingagents'});
+    for (let i = 0; i < 4; i++) await settle();
+    assert.equal(ui.doc.querySelector('#languages .custom-select-value').textContent, '状态未知');
+    assert.notEqual(ui.doc.querySelector('#languages .custom-select-value').textContent, '中文');
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unrecognized backtest asset is not shown as stock', async () => {
+  const ui = await setup();
+  try {
+    ui.ui.state.backtest = {tickers: 'AAA', start: '2026-11-01', end: '2026-11-12', every: 7, asset_type: 'index', analysts: ['market', 'fundamentals'], run_id: '', portfolio: ''};
+    await ui.click('[data-page=backtest]');
+    const shown = ui.doc.querySelector('#bt-asset .custom-select-value').textContent;
+    const hint = ui.doc.querySelector('#bt-asset-hint').textContent;
+    const analystHint = ui.doc.querySelector('#bt-analyst-hint').textContent;
+    assert.equal(shown, '资产类型未知');
+    assert.match(hint, /不把它写成股票/);
+    assert.doesNotMatch(shown, /股票/);
+    assert.doesNotMatch(hint, /默认使用全部分析维度|当前不是 crypto/);
+    assert.match(analystHint, /不把它写成股票/);
+    assert.match(analystHint, /不提供基本面分析师/);
+    assert.doesNotMatch(analystHint, /默认使用全部分析维度/);
+    assert.equal(ui.ui.state.backtest.analysts.includes('fundamentals'), false);
+    await ui.click('#bt-analysts .custom-select-trigger');
+    const options = [...ui.doc.querySelectorAll('.custom-select-menu [role=option]')].map((el) => el.textContent);
+    assert.equal(options.some((text) => text.includes('基本面')), false);
+    assert.ok(options.some((text) => text.includes('市场分析师')));
+  } finally { ui.dom.window.close(); }
+});
+
+test('a stock backtest still shows stock', async () => {
+  const ui = await setup();
+  try {
+    await ui.click('[data-page=backtest]');
+    assert.equal(ui.doc.querySelector('#bt-asset .custom-select-value').textContent, '股票');
+    assert.equal(ui.doc.querySelector('#bt-asset-hint'), null);
+    assert.match(ui.doc.querySelector('#bt-analyst-hint').textContent, /默认使用全部分析维度/);
+    await ui.click('#bt-analysts .custom-select-trigger');
+    const options = [...ui.doc.querySelectorAll('.custom-select-menu [role=option]')].map((el) => el.textContent);
+    assert.equal(options.some((text) => text.includes('基本面分析师')), true);
+  } finally { ui.dom.window.close(); }
+});
+
+
+test('a crypto backtest still does not offer fundamentals', async () => {
+  const ui = await setup();
+  try {
+    ui.ui.state.backtest = {tickers: 'BTC-USD', start: '2026-11-01', end: '2026-11-12', every: 7, asset_type: 'crypto', analysts: ['market', 'fundamentals'], run_id: '', portfolio: ''};
+    await ui.click('[data-page=backtest]');
+    assert.equal(ui.ui.state.backtest.analysts.includes('fundamentals'), false);
+    assert.match(ui.doc.querySelector('#bt-analyst-hint').textContent, /加密资产不使用基本面分析/);
+    await ui.click('#bt-analysts .custom-select-trigger');
+    const options = [...ui.doc.querySelectorAll('.custom-select-menu [role=option]')].map((el) => el.textContent);
+    assert.equal(options.some((text) => text.includes('基本面')), false);
+  } finally { ui.dom.window.close(); }
+});
+
 test('backtest defaults are concise, optional settings collapsed, estimate never starts a job', async () => {
   const ui = await setup({'/api/backtests/validate': {cells: 4, analysts: ['market']}});
   try {
@@ -444,7 +568,9 @@ test('backtest defaults are concise, optional settings collapsed, estimate never
     assert.equal(ui.calls.filter((item) => item.path === '/api/backtests/validate').length, 0);
     ui.fill('#bt-tickers', 'NVDA'); ui.fill('#bt-start', '2026-10-01'); ui.fill('#bt-end', '2026-10-08');
     await ui.click('#check-backtest');
-    assert.match(ui.doc.querySelector('#backtest-result').textContent, /4 次分析/);
+    const estimate = ui.doc.querySelector('#backtest-result');
+    assert.match(estimate.textContent, /共 4 次分析。尚未启动；确认后点击「启动回测」。/);
+    assert.match(estimate.innerHTML, /共 4 次分析。<br class="notice-break">尚未启动；<br class="notice-break">确认后点击「启动回测」。/);
     assert.equal(ui.calls.filter((item) => item.path === '/api/backtests' && item.method === 'POST').length, 0);
   } finally { ui.dom.window.close(); }
 });
@@ -453,7 +579,7 @@ test('status empty state and task errors are understandable; technical details s
   const ui = await setup();
   try {
     await ui.click('[data-page=runs]');
-    assert.match(ui.visibleText(), /还没有分析任务/);
+    assert.match(ui.visibleText(), /还没有任务/);
     ui.routes['/api/runs'] = {run: {status: 'failed', kind: 'analysis', selections: {ticker: 'NVDA', date: '2026-10-01'}, error: '需要登录'}, progress: {}, result: {present: false}};
     await ui.ui.renderRuns();
     assert.equal(ui.doc.querySelector('#run-detail'), null, 'the list comes first');
@@ -495,6 +621,9 @@ test('a failed run names where it stopped and offers resume only when a checkpoi
     assert.ok(resume.classList.contains('button--primary'));
     assert.ok(ui.doc.querySelector('.team.bad[data-team="Research Team"]'));
     assert.match(ui.doc.querySelector('.team.bad').textContent, /停在这里/);
+    const stoppedHere = ui.doc.querySelector('.team.bad .now');
+    assert.equal(stoppedHere.textContent, '停在这里：TimeoutError: grok-4.7 300 秒未返回。已完成的角色已存进断点，可以从这里继续。');
+    assert.match(stoppedHere.innerHTML, /停在这里：<\/b><br>TimeoutError: grok-4\.7 300 秒未返回。<br>已完成的角色已存进断点，<br>可以从这里继续。/);
     assert.ok(ui.doc.querySelector('.team.dim[data-team="Trading Team"]'), 'waiting teams are dimmed');
     assert.equal(ui.doc.querySelector('#stop-run'), null, 'no stop button once the task ended');
     assert.equal(ui.doc.querySelector('#run-technical-details').open, false);
@@ -504,6 +633,28 @@ test('a failed run names where it stopped and offers resume only when a checkpoi
     await ui.click('#resume-run');
     const posted = ui.calls.find((item) => item.path === '/api/runs/restart');
     assert.deepEqual(JSON.parse(posted.body), {id: 'failed-fixture', resume: true}, 'resume names the run on screen even when no row was clicked');
+  } finally { ui.dom.window.close(); }
+});
+
+test('a failed unrecognized run is not called an unfinished analysis', async () => {
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'kind-fail', status: 'failed', kind: 'index', ticker: 'AAA', date: '2026-11-12', selections: {ticker: 'AAA', date: '2026-11-12'}, failure: {summary: '超时'}},
+    runs: [{id: 'kind-fail', status: 'failed', ticker: 'AAA', date: '2026-11-12'}],
+    progress: {agents: [{team: 'Research Team', team_zh: '研究团队', agent: 'Trader', zh: '交易员', status: 'error', status_zh: '错误'}]},
+    result: {present: false},
+    counts: {all: 1, running: 0, queued: 0, failed: 1, finished: 0},
+  }});
+  try {
+    await ui.click('[data-page=runs]');
+    await openRunFromList(ui, 'kind-fail');
+    const alert = ui.doc.querySelector('#run-failure').textContent;
+    assert.match(alert, /任务在研究团队这一步停止了，不把它写成分析/);
+    assert.doesNotMatch(alert, /分析在|分析没有完成/);
+    ui.routes['/api/runs'] = {run: {id: 'known-fail', status: 'failed', kind: 'analysis', ticker: 'AAA', date: '2026-11-12', selections: {ticker: 'AAA'}}, runs: [{id: 'known-fail', status: 'failed', ticker: 'AAA', date: '2026-11-12'}], progress: {agents: []}, result: {present: false}};
+    ui.ui.state.selectedRunId = 'known-fail';
+    await ui.ui.renderRuns();
+    assert.match(ui.doc.querySelector('#run-failure').textContent, /分析没有完成/);
+    assert.doesNotMatch(ui.doc.querySelector('#run-failure').textContent, /不把它写成分析/);
   } finally { ui.dom.window.close(); }
 });
 
@@ -549,6 +700,359 @@ test('without a saved checkpoint resume is disabled with a reason and 重新启�
   } finally { ui.dom.window.close(); }
 });
 
+test('a stopping run does not call an in-progress role still working', async () => {
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'stop', status: 'stopping', kind: 'analysis', selections: {ticker: 'AAPL', date: '2026-11-11'}, started_at: '2026-11-11T10:00:00'},
+    progress: {agents: [
+      {team: 'Analyst Team', team_zh: '分析师团队', agent: 'Market Analyst', zh: '市场分析师', status: 'in_progress', status_zh: '进行中', started: '10:01'},
+    ], timeline: []},
+    result: {present: false},
+  }});
+  try {
+    await openRunFromList(ui, 'stop');
+    const pipe = ui.doc.querySelector('#team-pipeline').textContent;
+    assert.match(pipe, /停止中/);
+    assert.match(pipe, /不把还在日志里的角色写成仍在工作/);
+    const note = ui.doc.querySelector('#team-pipeline .now');
+    assert.equal(note.textContent, '停止中：不把还在日志里的角色写成仍在工作。');
+    assert.match(note.innerHTML, /停止中：<\/b><br>不把还在日志里的角色<br>写成仍在工作。/);
+    assert.doesNotMatch(pipe, /正在工作|正在做|进行中/);
+    assert.equal(ui.doc.querySelector('#team-pipeline .pill').textContent, '停止中');
+  } finally { ui.dom.window.close(); }
+});
+
+test('a running team card waiting for the next role does not split 角色', async () => {
+  const done = {team: 'Analyst Team', team_zh: '分析师团队', agent: 'Market Analyst', zh: '市场分析师', status: 'completed', status_zh: '完成'};
+  const pending = {team: 'Analyst Team', team_zh: '分析师团队', agent: 'News Analyst', zh: '新闻分析师', status: 'pending', status_zh: '等待'};
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'an-next', status: 'running', kind: 'analysis', ticker: 'NVDA', date: '2026-11-12', selections: {ticker: 'NVDA', analysts: ['market', 'news']}},
+    runs: [{id: 'an-next', status: 'running', kind: 'analysis', ticker: 'NVDA'}],
+    progress: {agents: [done, pending], timeline: []},
+    result: {present: false},
+  }});
+  try {
+    await openRunFromList(ui, 'an-next');
+    const note = ui.doc.querySelector('#team-pipeline .now');
+    assert.equal(note.textContent, '正在做：等待本组下一个角色开始。');
+    assert.match(note.innerHTML, /正在做：<\/b><br>等待本组下一个角色开始。/);
+    assert.doesNotMatch(note.textContent, /正在工作|仍在工作/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a finished run does not call a leftover in-progress role still working', async () => {
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'done', status: 'finished', kind: 'analysis', selections: {ticker: 'AAPL', date: '2026-11-11'}, started_at: '2026-11-11T10:00:00'},
+    progress: {agents: [
+      {team: 'Analyst Team', team_zh: '分析师团队', agent: 'Market Analyst', zh: '市场分析师', status: 'in_progress', status_zh: '进行中'},
+    ], timeline: []},
+    result: {present: false},
+  }});
+  try {
+    await openRunFromList(ui, 'done');
+    const pipe = ui.doc.querySelector('#team-pipeline').textContent;
+    assert.match(pipe, /未写完/);
+    assert.match(pipe, /不把这个角色写成正在工作/);
+    const note = ui.doc.querySelector('#team-pipeline .now');
+    assert.equal(note.textContent, '未写完：进程已经不在运行，不把这个角色写成正在工作。');
+    assert.match(note.innerHTML, /未写完：<\/b><br>进程已经不在运行，<br>不把这个角色写成正在工作。/);
+    assert.doesNotMatch(pipe, /正在做|进行中/);
+    assert.equal(ui.doc.querySelector('#team-pipeline .pill').textContent, '未完成');
+  } finally { ui.dom.window.close(); }
+});
+
+test('an ended run without a finish time is not timed until now', async () => {
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'ended', status: 'failed', kind: 'analysis', selections: {ticker: '600519', date: '2026-11-11'}, started_at: '2026-11-10T10:00:00'},
+    progress: {agents: [], timeline: []},
+    result: {present: false},
+  }});
+  try {
+    await openRunFromList(ui, 'ended');
+    assert.equal(ui.doc.querySelector('#run-elapsed').textContent, '—');
+    assert.match(ui.doc.querySelector('#missing-end').textContent, /没有结束时间，不按当前时间计算已用时间/);
+    assert.match(ui.doc.querySelector('#page').textContent, /失败/);
+    assert.doesNotMatch(ui.doc.querySelector('#page').textContent, /小时|分 \d+ 秒/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a running task still counts elapsed time', async () => {
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'live', status: 'running', kind: 'analysis', selections: {ticker: '600519', date: '2026-11-11'}, started_at: '2026-11-11T10:00:00'},
+    progress: {agents: [], timeline: []},
+    result: {present: false},
+  }});
+  try {
+    await openRunFromList(ui, 'live');
+    assert.match(ui.doc.querySelector('#run-elapsed').textContent, /小时|分/);
+    assert.equal(ui.doc.querySelector('#missing-end'), null);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unknown role status is not called in progress or complete', async () => {
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'role-unknown', status: 'running', kind: 'analysis', selections: {ticker: '600519', date: '2026-11-11'}, started_at: '2026-11-11T10:00:00'},
+    progress: {agents: [
+      {team: 'Analyst Team', team_zh: '分析师团队', agent: 'Market Analyst', zh: '市场分析师', status: 'retrying', status_zh: '进行中'},
+    ], timeline: [{time: '10:02', zh: '市场分析师', status: 'retrying', status_zh: '进行中'}]},
+    result: {present: false},
+  }});
+  try {
+    await openRunFromList(ui, 'role-unknown');
+    const pipe = ui.doc.querySelector('#team-pipeline').textContent;
+    assert.match(pipe, /状态未知/);
+    assert.doesNotMatch(pipe, /retrying|进行中|完成/);
+    assert.equal(ui.doc.querySelector('#team-pipeline .pill').textContent, '状态未知');
+    assert.match(ui.doc.querySelector('#unknown-role-status').textContent, /不把它写成进行中或已完成/);
+    assert.match(ui.doc.querySelector('#run-feed').textContent, /状态未知/);
+    assert.doesNotMatch(ui.doc.querySelector('#run-feed').textContent, /retrying|进行中|开始工作/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a cost role without an effort field is not called effortless', async () => {
+  const ui = await setup({'/api/cost': {runs: [{
+    id: 'c-effort', ticker: '600519', date: '2026-11-11',
+    api_text: '没有 API 用量', match_text: '没有供应商用量，不估算。',
+    roles: [
+      {role: 'Market Analyst', zh: '市场分析师', tier: 'quick', provider: 'openai', model: 'gpt-4.1-mini', billing: 'api'},
+      {role: 'Trader', zh: '交易员', tier: 'deep', provider: 'grok', model: 'grok-4', billing: 'subscription', effort_label: '无独立强度'},
+    ],
+  }], note: ''}});
+  try {
+    await ui.click('[data-page=cost]');
+    for (let i = 0; i < 6; i++) await settle();
+    const tiers = ui.doc.querySelector('.cost-tiers').textContent;
+    assert.match(tiers, /强度未知，不写成无独立强度/);
+    assert.match(tiers, /无独立强度/);
+    assert.doesNotMatch(tiers, /gpt-4\.1-mini · 无独立强度/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a cost row without a usage label is not called unused', async () => {
+  const ui = await setup({'/api/cost': {runs: [{
+    id: 'c-unknown', ticker: '600519', date: '2026-11-11',
+    api_text: '没有供应商用量，不估算。', match_text: '没有供应商用量，不估算。',
+    roles: [
+      {role: 'Market Analyst', zh: '市场分析师', tier: 'quick', provider: 'openai', model: 'gpt-4.1-mini', billing: 'api', prompt_count: 10, completion_count: null},
+      {role: 'Trader', zh: '交易员', tier: 'deep', provider: 'openai', model: 'gpt-4.1', billing: 'api', usage_label: '未调用', cost_text: '未调用'},
+    ],
+  }], note: ''}});
+  try {
+    await ui.click('[data-page=cost]');
+    for (let i = 0; i < 6; i++) await settle();
+    const card = ui.doc.querySelector('.cost-card').textContent;
+    assert.match(card, /用量未知，不写成未调用/);
+    assert.match(card, /未调用/);
+    assert.doesNotMatch(ui.doc.querySelector('.cost-roles li').textContent, /^市场分析师未调用/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a cost row without billing is not called API', async () => {
+  const ui = await setup({
+    '/api/cost': {runs: [{id: 'c1', ticker: 'AAPL', date: '2026-11-11', api_text: '计费方式未知，不把它当成 API 用量。', match_text: '没有供应商用量，不估算。', roles: [
+      {role: 'Market Analyst', zh: '市场分析师', tier: 'quick', provider: 'openai', model: 'gpt-4.1-mini', billing: null, prompt_count: 20, completion_count: 4, cost_text: '计费方式未知'},
+    ]}], note: ''},
+  });
+  try {
+    await ui.click('[data-page=cost]');
+    for (let i = 0; i < 4; i++) await settle();
+    const card = ui.doc.querySelector('.cost-card').textContent;
+    assert.match(card, /计费方式未知/);
+    assert.doesNotMatch(card, /API gpt| · API/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unrecognized cost tier is not called the quick model', async () => {
+  const ui = await setup({'/api/cost': {runs: [{
+    id: 'c-tier', ticker: 'AAA', date: '2026-11-12',
+    api_text: '没有 API 用量', match_text: '没有供应商用量，不估算。',
+    roles: [
+      {role: 'Market Analyst', zh: '市场分析师', tier: 'index', provider: 'openai', model: 'unknown-model', billing: 'api'},
+      {role: 'Research Manager', zh: '研究经理', tier: 'quick', provider: 'openai', model: 'quick-model', billing: 'subscription'},
+      {role: 'Trader', zh: '交易员', tier: 'deep', provider: 'openai', model: 'deep-model', billing: 'api', effort_label: '无独立强度'},
+      {role: 'News Analyst', zh: '新闻分析师', provider: 'openai', model: 'missing-model', billing: 'api'},
+    ],
+  }], note: ''}});
+  try {
+    await ui.click('[data-page=cost]');
+    for (let i = 0; i < 6; i++) await settle();
+    const part = (model) => [...ui.doc.querySelectorAll('.cost-tier')].map((el) => el.textContent).find((item) => item.includes(model)) || "";
+    assert.match(part("unknown-model"), /^模型层级未知，不把它写成快模型 openai \/ unknown-model/);
+    assert.match(part("missing-model"), /^模型层级未知，不把它写成快模型 openai \/ missing-model/);
+    assert.match(part("quick-model"), /^快模型 openai \/ quick-model/);
+    assert.match(part("deep-model"), /^深模型 openai \/ deep-model/);
+    assert.doesNotMatch(part("unknown-model"), /^快模型 /);
+    assert.doesNotMatch(part("missing-model"), /^快模型 /);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unrecognized launch status is not called submitted', async () => {
+  const ui = await setup({'/api/runs': (options) => options.method
+    ? {id: 'run-retry', status: 'retrying', ticker: 'AAPL', date: '2026-11-11', selections: {asset_type: 'stock'}, ignored: []}
+    : {run: null, progress: {}}});
+  try {
+    await fillToReview(ui);
+    await ui.click('#run-analysis');
+    await settleMany();
+    const dialog = ui.doc.querySelector('#launch-dialog');
+    assert.equal(ui.doc.querySelector('#launch-title').textContent, '状态未知');
+    assert.match(ui.doc.querySelector('#launch-lead').textContent, /不把它写成已提交或已启动/);
+    assert.doesNotMatch(dialog.textContent, /已提交任务|任务已提交|已启动分析|已加入队列/);
+    assert.equal(dialog.classList.contains('launch-dialog--unknown'), true);
+    assert.equal(dialog.classList.contains('launch-dialog--ok'), false);
+    assert.doesNotMatch(dialog.querySelector('.launch-mark').textContent, /✓|!/);
+    assert.match(ui.doc.querySelector('#launch-run-info').textContent, /run-retry/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a starting launch is not called already running', async () => {
+  const ui = await setup({'/api/runs': (options) => options.method ? {id: 'start-1', status: 'starting', ticker: 'AAPL'} : {run: null, progress: {}}});
+  try {
+    await ui.click('[data-page=analyze]');
+    await ui.click('.fw[data-framework=tradingagents]');
+    ui.fill('#ticker', 'AAPL');
+    ui.fill('#date', '2026-11-11');
+    await ui.click('#step-next');
+    ui.ui.state.form.analysts = ['market'];
+    await ui.click('#step-next');
+    ui.fill('#quick-model', 'fixture-model');
+    ui.fill('#deep-model', 'fixture-model');
+    await ui.click('#step-next');
+    await ui.click('#run-analysis');
+    for (let i = 0; i < 6; i++) await settle();
+    assert.equal(ui.doc.querySelector('#launch-title').textContent, '正在启动');
+    assert.equal(ui.doc.querySelector('#launch-lead').textContent, '任务正在启动，还没有进入运行。可以继续准备下一个。');
+    assert.equal(ui.doc.querySelector('#launch-lead').innerHTML, '任务正在启动，<br class="notice-break">还没有进入运行。<br class="notice-break">可以继续准备下一个。');
+    assert.doesNotMatch(ui.doc.querySelector('#launch-dialog').textContent, /已在后台运行|已启动分析/);
+    assert.equal(ui.doc.querySelector('#launch-dialog').classList.contains('launch-dialog--wait'), true);
+    assert.doesNotMatch(ui.doc.querySelector('.launch-mark').textContent, /✓/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a REVIEW result is not shown as a tradeable rating', async () => {
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'rev', status: 'finished', kind: 'analysis', selections: {ticker: 'AAPL', date: '2026-11-11'}},
+    progress: {agents: []},
+    result: {present: true, rating: 'REVIEW', review: 'needs review', decision: '决定原文没有可交易评级。'},
+  }});
+  try {
+    await openRunFromList(ui, 'rev');
+    const panel = ui.doc.querySelector('#run-result');
+    assert.equal(panel.querySelectorAll('.metric-label')[1].textContent, '复核');
+    assert.equal(panel.querySelectorAll('.metric-card strong')[0].textContent, '需复核');
+    assert.match(panel.textContent, /未能从最终决定读出可交易评级/);
+    assert.equal(panel.textContent.includes('REVIEW'), false);
+    assert.doesNotMatch(panel.querySelectorAll('.metric-card')[1].textContent, /评级/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a stopping backtest progress row is not called in progress', async () => {
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'bt-live', status: 'stopping', kind: 'backtest', ticker: 'AAPL', date: '2026-11-11', selections: {ticker: 'AAPL'}},
+    progress: {agents: [
+      {team: 'Analyst Team', team_zh: '分析师团队', agent: 'Market Analyst', zh: '市场分析师', status: 'in_progress', status_zh: '进行中'},
+    ]},
+    result: {present: false},
+  }});
+  try {
+    await openRunFromList(ui, 'bt-live');
+    const table = ui.doc.querySelector('#run-detail table');
+    assert.match(table.textContent, /停止中/);
+    assert.doesNotMatch(table.textContent, /进行中/);
+    assert.match(ui.doc.querySelector('#current-task').textContent, /停止中/);
+    assert.doesNotMatch(ui.doc.querySelector('#current-task').textContent, /进行中/);
+    assert.equal(ui.doc.querySelector('#restart-run'), null);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a stopping backtest is not called still running, and a queued backtest is not finished', async () => {
+  const stopping = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'bt-stop', status: 'stopping', kind: 'backtest', ticker: 'AAPL', date: '2026-11-11', selections: {ticker: 'AAPL'}},
+    progress: {}, result: {present: false},
+  }});
+  try {
+    await openRunFromList(stopping, 'bt-stop');
+    const next = stopping.doc.querySelector('#next-step').textContent;
+    assert.match(next, /任务正在停止，不把它写成运行中，也还不是已结束。稍后刷新状态。/);
+    assert.match(stopping.doc.querySelector('#next-step .notice').innerHTML, /任务正在停止，<br class="notice-break">不把它写成运行中，<br class="notice-break">也还不是已结束。<br class="notice-break">稍后刷新状态。/);
+    assert.doesNotMatch(next, /仍在运行/);
+    assert.equal(stopping.doc.querySelector('#restart-run'), null, 'a stopping backtest is not offered as a restart');
+    assert.ok(stopping.doc.querySelector('#stop-run'));
+    assert.match(stopping.doc.querySelector('#run-result').textContent, /还没有结果/);
+    assert.doesNotMatch(stopping.doc.querySelector('#run-result').textContent, /完成后显示/);
+  } finally { stopping.dom.window.close(); }
+  const queued = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'bt-queue', status: 'queued', kind: 'backtest', ticker: 'AAPL', date: '2026-11-11', position: 1},
+    progress: {}, result: {present: false},
+  }});
+  try {
+    await openRunFromList(queued, 'bt-queue');
+    const next = queued.doc.querySelector('#next-step').textContent;
+    assert.match(next, /任务还在排队，没有开始运行，也不是已结束。/);
+    assert.match(queued.doc.querySelector('#next-step .notice').innerHTML, /任务还在排队，<br class="notice-break">没有开始运行，<br class="notice-break">也不是已结束。/);
+    assert.doesNotMatch(next, /仍在运行|分析/);
+    assert.equal(queued.doc.querySelector('#restart-run'), null);
+    assert.ok(queued.doc.querySelector('#cancel-queued'));
+  } finally { queued.dom.window.close(); }
+});
+
+test('the kline page description does not split 实际K线 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    await ui.click('.nav-item[data-page=kline]');
+    const desc = ui.doc.querySelector('.page-description');
+    assert.equal(desc.textContent, '日线请求近 1 年，短周期更短，图上区间以实际K线为准。股票与贵金属沿用分析数据源；加密货币优先 OKX，其次 Coinbase。北交所仅新浪。');
+    assert.match(desc.innerHTML, /日线请求近 1 年，<br class="notice-break">短周期更短，<br class="notice-break">图上区间以实际K线为准。<br class="notice-break">股票与贵金属沿用分析数据源；<br class="notice-break">加密货币优先 OKX，<br class="notice-break">其次 Coinbase。<br class="notice-break">北交所仅新浪。/);
+    assert.doesNotMatch(desc.textContent, /Yahoo|实时行情/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the compare page description does not split 卡片 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    await ui.click('.nav-item[data-page=compare]');
+    const desc = ui.doc.querySelector('.page-description');
+    assert.equal(desc.textContent, '并排看运行的评级和证据。左右是同一次时只显示一张卡片。回放只用左侧保存的提示词版本。');
+    assert.match(desc.innerHTML, /并排看运行的评级和证据。<br class="notice-break">左右是同一次时只显示一张卡片。<br class="notice-break">回放只用左侧保存的提示词版本。/);
+    assert.doesNotMatch(desc.textContent, /当前提示词|两次不同结果/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the model page description does not split 思考强度 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    await ui.click('.nav-item[data-page=models]');
+    const desc = ui.doc.querySelector('.page-description');
+    assert.equal(desc.textContent, '两层可以分别选择已登录的订阅。快模型不是数据源，Grok 不会代替 yfinance 或 SEC。Grok 没有独立思考强度。');
+    assert.match(desc.innerHTML, /已登录的订阅。<br class="notice-break">快模型不是数据源，<br class="notice-break">Grok 不会代替 yfinance 或 SEC。<br class="notice-break">Grok 没有独立思考强度。/);
+    assert.doesNotMatch(desc.textContent, /快模型负责取数|Grok 搜索/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the model source note does not split 订阅 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    await ui.click('.nav-item[data-page=models]');
+    const note = ui.doc.querySelector('#model-source-note');
+    assert.equal(note.textContent, '这里列出命令行供应商表里的全部供应商，不只订阅。下面的思考强度写入同一次分析，和启动分析「模型选择」一步是同一组字段。');
+    assert.match(note.innerHTML, /全部供应商，<br class="notice-break">不只订阅。<br class="notice-break">下面的思考强度写入同一次分析，<br class="notice-break">和启动分析「模型选择」一步是同一组字段。/);
+    assert.doesNotMatch(note.textContent, /不只订 阅|快模型负责取数/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the cost rule does not split 账单 on a narrow screen', async () => {
+  const ui = await setup({'/api/cost': {runs: []}});
+  try {
+    await ui.click('[data-page=cost]');
+    const rule = ui.doc.querySelector('#cost-rule');
+    assert.equal(rule.textContent, '单价来自本机 cost-prices.json，不是供应商账单。429 记为限流，不是预算超限。没有结构化字段时记为未知。本机调用时限不是供应商预算。');
+    assert.match(rule.innerHTML, /cost-prices\.json，<br class="notice-break">不是供应商账单。<br class="notice-break">429 记为限流，<br class="notice-break">不是预算超限。<br class="notice-break">没有结构化字段时记为未知。<br class="notice-break">本机调用时限不是供应商预算。/);
+    assert.doesNotMatch(rule.textContent, /供应商账单已核对|预算超限。本机/);
+    const desc = ui.doc.querySelector('.page-description');
+    assert.equal(desc.textContent, '按这次运行冻结的角色模型统计。订阅和 API 分开，没有单价不估算。');
+    assert.match(desc.innerHTML, /角色模型统计。<br class="notice-break">订阅和 API 分开，<br class="notice-break">没有单价不估算。/);
+  } finally { ui.dom.window.close(); }
+});
+
 test('a running task shows the team pipeline, the current team, the feed and a stop button', async () => {
   const ui = await setup({'/api/logs': {lines: []}});
   try {
@@ -568,6 +1072,9 @@ test('a running task shows the team pipeline, the current team, the feed and a s
     const current = ui.doc.querySelector('.team.cur');
     assert.equal(current.dataset.team, 'Research Team');
     assert.match(current.textContent, /正在做：多头研究员（21:03 开始）正在工作/);
+    const working = current.querySelector('.now');
+    assert.equal(working.textContent, '正在做：多头研究员（21:03 开始）正在工作。');
+    assert.match(working.innerHTML, /正在做：<\/b><br>多头研究员<br>（21:03 开始）<br>正在工作。/);
     assert.ok(ui.doc.querySelector('.team.dim[data-team="Trading Team"]'));
     const feed = [...ui.doc.querySelectorAll('#run-feed .ev')].map((ev) => ev.textContent);
     assert.equal(feed.length, 2);
@@ -593,7 +1100,7 @@ const settleMany = async (count = 8) => { for (let i = 0; i < count; i++) await 
 
 test('a successful launch shows the real run id, resets the wizard to step 1 and offers 查看状态 / 再启动一个 (WEBUI-006)', async () => {
   const ui = await setup({'/api/runs': (options) => options.method
-    ? {id: '20261031_141327_59ee0ec2', ticker: 'BTC-USD', date: '2026-10-30', started_at: '2026-10-31T14:13:27', selections: {asset_type: 'crypto'}, ignored: []}
+    ? {id: '20261031_141327_59ee0ec2', status: 'running', ticker: 'BTC-USD', date: '2026-10-30', started_at: '2026-10-31T14:13:27', selections: {asset_type: 'crypto'}, ignored: []}
     : {run: null, progress: {}}});
   try {
     const {doc} = ui;
@@ -607,6 +1114,8 @@ test('a successful launch shows the real run id, resets the wizard to step 1 and
     assert.ok(dialog, 'the result dialog opens');
     assert.equal(dialog.getAttribute('aria-modal'), 'true');
     assert.match(doc.querySelector('#launch-title').textContent, /已启动分析/);
+    assert.equal(dialog.classList.contains('launch-dialog--ok'), true);
+    assert.equal(dialog.querySelector('.launch-mark').textContent, '✓');
     const info = doc.querySelector('#launch-run-info').textContent;
     assert.match(info, /20261031_141327_59ee0ec2/, 'the run id is the one the API returned');
     assert.match(info, /BTC-USD · 加密货币/);
@@ -657,6 +1166,8 @@ test('a refused launch says why in a dialog and keeps every field as filled (WEB
     assert.equal(doc.querySelector('#launch-error').textContent, reason);
     assert.match(doc.querySelector('#launch-fail-info').textContent, /BTC-USD · 2026-10-30/);
     assert.match(dialog.textContent, /设置都保留着/);
+    assert.equal(doc.querySelector('.launch-hint').textContent, '你填写的设置都保留着，修改后可以直接再次启动。');
+    assert.equal(doc.querySelector('.launch-hint').innerHTML, '你填写的设置都保留着，<br class="notice-break">修改后可以直接再次启动。');
     assert.ok(doc.querySelector('#launch-open-accounts'), 'a key or sign-in problem offers 去账户页');
     assert.equal(ui.ui.state.step, 4, 'a failure does not reset the wizard');
     assert.equal(doc.querySelector('[data-step-panel="4"]').hidden, false);
@@ -741,7 +1252,7 @@ test('status API failure has a visible error and a working retry', async () => {
     assert.match(ui.doc.querySelector('[role=alert]').textContent, /服务暂时不可用/);
     ui.routes['/api/runs'] = {run: null, progress: {}};
     await ui.click('#refresh-run');
-    assert.match(ui.visibleText(), /还没有分析任务/);
+    assert.match(ui.visibleText(), /还没有任务/);
   } finally { ui.dom.window.close(); }
 });
 
@@ -792,9 +1303,9 @@ for (const [page, path] of [['accounts', '/api/auth/status'], ['backtest', '/api
 const REPORT_DIR = '/tmp/results/reports';
 const reportRows = [
   {name: 'NVDA_20261029_211200', html: `${REPORT_DIR}/NVDA_20261029_211200/complete_report.html`, markdown: `${REPORT_DIR}/NVDA_20261029_211200/complete_report.md`,
-   ticker: 'NVDA', date: '2026-10-29', rating: 'Overweight', generated: '2026-10-29 21:12:00', deep_model: 'gpt-6-sol', quick_model: 'grok-4.7', debate_rounds: 3},
+   ticker: 'NVDA', date: '2026-10-29', rating: 'Overweight', has_decision: true, generated: '2026-10-29 21:12:00', deep_model: 'gpt-6-sol', quick_model: 'grok-4.7', debate_rounds: 3},
   {name: 'AAPL_20261028_100000', html: `${REPORT_DIR}/AAPL_20261028_100000/complete_report.html`, markdown: null,
-   ticker: 'AAPL', date: '2026-10-28', rating: 'Sell', generated: '2026-10-28 10:00:00', debate_rounds: 1},
+   ticker: 'AAPL', date: '2026-10-28', rating: 'Sell', has_decision: true, generated: '2026-10-28 10:00:00', debate_rounds: 1},
 ];
 function outlineFor(path) {
   const ticker = path.includes('AAPL') ? 'AAPL' : 'NVDA';
@@ -821,6 +1332,113 @@ async function openReports(overrides = {}) {
   for (let i = 0; i < 6; i++) await settle();
   return ui;
 }
+
+test('a report list row without a decision flag is not shown as a rating', async () => {
+  const ui = await setup({'/api/reports': {reports: [
+    {name: 'NVDA_known', html: '/tmp/results/reports/NVDA_known/complete_report.html', ticker: 'NVDA', date: '2026-10-29', rating: 'Overweight', has_decision: true},
+    {name: '600519_unknown', html: '/tmp/results/reports/600519_unknown/complete_report.html', ticker: '600519', date: '2026-11-11', rating: 'Hold'},
+  ], live: []}, '/api/reports/outline': {name: 'NVDA', rating: 'Overweight', header: [], sections: [
+    {heading: 'V. Portfolio Manager Decision', folder: '5_portfolio', items: [{text: '**Rating: Overweight**\n\n保持增持。'}]},
+  ]}});
+  try {
+    await ui.click('[data-page=reports]');
+    for (let i = 0; i < 8; i++) await settle();
+    const rows = [...ui.doc.querySelectorAll('#report-list .ri')];
+    assert.equal(rows[1].querySelector('.pill').textContent, '不写成评级');
+    assert.equal(rows[1].querySelector('.pill.hold, .pill.buy, .pill.sell'), null);
+    assert.doesNotMatch(rows[1].textContent, /持有|Hold/);
+    assert.match(rows[1].querySelector('.pill').title, /没有决定标记，不把它写成评级/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a report header rating without a portfolio section is not called the manager conclusion', async () => {
+  const ui = await openReports({
+    '/api/reports/outline': () => ({name: 'AAPL', rating: 'Hold', header: ['- Rating: Hold'], sections: [
+      {heading: 'I. Analyst Team Reports', folder: '1_analysts', items: [
+        {agent: 'Market Analyst', zh: '市场分析师', file: 'market.md', text: '只有市场分析，没有组合经理段落。'},
+      ]},
+    ]}),
+  });
+  try {
+    const decision = ui.doc.querySelector('.decision');
+    assert.equal(decision.querySelector('.k').textContent, '没有组合经理结论');
+    assert.match(decision.textContent, /报告头写着 Hold，不把它当成组合经理结论/);
+    assert.match(decision.querySelector('.decision-text').innerHTML, /结论段落。<br class="notice-break">报告头写着 Hold，<br class="notice-break">不把它当成组合经理结论。/);
+    assert.equal(decision.querySelector('.big').textContent, '—');
+    assert.doesNotMatch(ui.doc.querySelector('.rc').textContent, /未能从最终决定/);
+    const selected = ui.doc.querySelector('#report-list .ri.on');
+    assert.equal(selected.querySelector('.pill').textContent, '无结论');
+    assert.equal(selected.querySelector('.pill.hold, .pill.buy, .pill.sell'), null);
+    assert.doesNotMatch(selected.textContent, /持有|增持/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a REVIEW header without a portfolio section is not a failed final decision', async () => {
+  const ui = await openReports({
+    '/api/reports/outline': () => ({name: 'AAPL', rating: 'REVIEW', header: ['- Rating: REVIEW'], sections: [
+      {heading: 'I. Analyst Team Reports', folder: '1_analysts', items: [
+        {agent: 'Market Analyst', zh: '市场分析师', file: 'market.md', text: '只有市场分析，没有组合经理段落。'},
+      ]},
+    ]}),
+  });
+  try {
+    assert.match(ui.doc.querySelector('.decision').textContent, /没有报告头评级|报告头写着 REVIEW/);
+    assert.match(ui.doc.querySelector('.decision').textContent, /没有组合经理结论/);
+    assert.doesNotMatch(ui.doc.querySelector('.rc').textContent, /未能从最终决定/);
+    assert.equal(ui.doc.querySelector('#report-list .ri.on .pill').textContent, '无结论');
+  } finally { ui.dom.window.close(); }
+});
+
+test('a saved outline without a portfolio section does not call the header rating a decision', async () => {
+  const ui = await setup({
+    '/api/runs': {run: {id: 'done', status: 'completed', kind: 'analysis', selections: {ticker: 'AAPL', date: '2026-11-11'}}, progress: {agents: []},
+      result: {present: true, rating: 'Hold', decision: '—', html: '/tmp/results/reports/AAPL/complete_report.html'}},
+    '/api/reports/outline': {name: 'AAPL', rating: 'Hold', header: ['- Rating: Hold'], sections: [
+      {heading: 'I. Analyst Team Reports', zh: '分析师', folder: '1_analysts', items: [
+        {agent: 'Market Analyst', zh: '市场分析师', file: 'market.md', text: '只有市场分析，没有组合经理段落。'},
+      ]},
+    ]},
+  });
+  try {
+    await openRunFromList(ui, 'done');
+    await ui.click('#show-saved-outline');
+    for (let i = 0; i < 6; i++) await settle();
+    const host = ui.doc.querySelector('#run-outline');
+    assert.match(host.textContent, /报告头 Hold，没有组合经理结论/);
+    assert.doesNotMatch(host.textContent, /未能从最终决定/);
+    assert.doesNotMatch(host.querySelector('.notice').textContent, /评级 Hold/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a schedule reminder does not call a header rating the conclusion', async () => {
+  const ui = await setup({
+    '/api/schedule/tick': {schedules: [{id: 's1', symbol: 'AAPL', asset_label: '股票', at: '09:30', status: 'active', status_label: '启用', due_note: '还没有到点触发。'}],
+      reminders: [{body: 'AAPL 的分析已完成，报告头写着 Hold，没有组合经理结论。', status_label: '已记录'}],
+      mode: 'observe', mode_label: '观察', rule_version: 'sched-1'},
+  });
+  try {
+    await ui.click('[data-page=schedule]');
+    for (let i = 0; i < 6; i++) await settle();
+    const text = ui.doc.querySelector('#sched-reminders').textContent;
+    assert.match(text, /报告头写着 Hold，没有组合经理结论/);
+    assert.doesNotMatch(text, /评级 Hold/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a watch row without a saved decision does not say 决定', async () => {
+  const ui = await setup({
+    '/api/watchlist': {items: [{symbol: 'AAPL', asset_label: '股票', asset_type: 'stock', enabled: true, last_price: 190.5}],
+      triggers: [], mode: 'observe', mode_label: '观察', rule_version: 'watch-1'},
+  });
+  try {
+    await ui.click('[data-page=watchlist]');
+    for (let i = 0; i < 6; i++) await settle();
+    const text = ui.doc.querySelector('#watch-table').textContent;
+    assert.match(text, /AAPL/);
+    assert.match(text, /190\.50/);
+    assert.doesNotMatch(text, /决定|持有/);
+  } finally { ui.dom.window.close(); }
+});
 
 test('reports list every saved report with a rating pill, date and depth, and open the newest', async () => {
   const ui = await openReports();
@@ -928,6 +1546,794 @@ test('a local account read error is shown as an error rather than a signed-out s
     assert.match(ui.visibleText(), /状态读取失败/);
     assert.match(ui.visibleText(), /刷新状态或重新登录/);
     assert.doesNotMatch(ui.visibleText(), /FixtureReadError/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unrecognized account sign-in is not called signed out', async () => {
+  const ui = await setup({'/api/auth/status': {accounts: [
+    {provider: 'chatgpt', signed_in: null, account: null},
+    {provider: 'grok', signed_in: false},
+  ]}});
+  try {
+    await ui.click('[data-page=accounts]');
+    const cards = [...ui.doc.querySelectorAll('.account-provider-card')];
+    const chatgpt = cards.find((card) => card.textContent.includes('ChatGPT') || card.querySelector('[data-login=chatgpt]'));
+    const grok = cards.find((card) => card.querySelector('[data-login=grok]'));
+    assert.ok(chatgpt, 'chatgpt card');
+    assert.match(chatgpt.textContent, /登录状态未知，不把它写成未登录/);
+    assert.doesNotMatch(chatgpt.querySelector('.status-badge').textContent, /未登录|已登录/);
+    assert.equal(chatgpt.querySelector('[data-logout=chatgpt]').disabled, true);
+    assert.match(ui.doc.querySelector('#identity-name').textContent, /登录状态未知/);
+    assert.doesNotMatch(ui.doc.querySelector('#identity-name').textContent, /未登录/);
+    assert.equal(grok.querySelector('.status-badge').textContent, '未登录');
+    assert.doesNotMatch(grok.textContent, /不把它写成未登录/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a known signed-in account is still called signed in', async () => {
+  const ui = await setup({'/api/auth/status': {accounts: [
+    {provider: 'chatgpt', signed_in: true, account: 'fixture-user'},
+  ]}});
+  try {
+    await ui.click('[data-page=accounts]');
+    const card = ui.doc.querySelector('.account-provider-card');
+    assert.equal(card.querySelector('.status-badge').textContent, '已登录');
+    assert.match(card.textContent, /fixture-user/);
+    assert.equal(card.querySelector('[data-logout=chatgpt]').disabled, false);
+    assert.doesNotMatch(card.textContent, /不把它写成未登录/);
+    assert.match(ui.doc.querySelector('#identity-name').textContent, /模型服务/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the plan note does not split 缺少 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    await ui.click('[data-page=accounts]');
+    const note = ui.doc.querySelector('#plan-note');
+    assert.equal(note.textContent, '没传 plan 时，login 和 logout 各自打印缺少 plan 的句子。auth-status 省略 plan 时显示全部订阅，不打印缺少参数。空字符串是非法值，不是缺少参数。非法值会带上当时的原文，区分大小写。下面的 nope 只对 nope，不套用到别的值。auth-status nope 和 login nope 不是同一句。');
+    assert.match(note.innerHTML, /没传 plan 时，<br class="notice-break">login 和 logout 各自打印缺少 plan 的<br class="notice-break">句子。<br class="notice-break">/);
+    assert.match(note.innerHTML, /带上当时的原文，<br class="notice-break">/);
+    assert.match(note.innerHTML, /不是<br class="notice-break">同一句。/);
+    assert.doesNotMatch(note.innerHTML, /缺<br|当<br/);
+    assert.doesNotMatch(note.textContent, /已经打印|参数已改/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the account diagnostic note does not split 材料 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    await ui.click('[data-page=accounts]');
+    const note = ui.doc.querySelector('#auth-invocation');
+    assert.equal(note.textContent, '当前筛选：auth-status。状态只读取本机登录材料，页面打开时不会联网校验。');
+    assert.match(note.innerHTML, /auth-status。<br class="notice-break">状态只读取本机登录材料，<br class="notice-break">页面打开时不会联网校验。/);
+    assert.doesNotMatch(note.innerHTML, /材<br/);
+    assert.doesNotMatch(note.textContent, /已经联网|校验已完成/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the already-running socket note does not split 文件锁 on a narrow screen', async () => {
+  const run = {id: 'probe-idle', status: 'finished', kind: 'analysis', ticker: 'NVDA', date: '2026-11-12', selections: {ticker: 'NVDA', date: '2026-11-12'}};
+  const ui = await setup({'/api/runs': {run, runs: [run], progress: {agents: []}, result: {present: false}}});
+  try {
+    await openRunFromList(ui, 'probe-idle');
+    const note = ui.doc.querySelector('#already-socket-note');
+    assert.equal(note.textContent, '控制套接字仍在监听。只有前台 start 或 restart 已经拿到文件锁，但控制套接字仍能连上时，才把这句打印到标准错误，退出码 1。句尾没有句号。拿不到文件锁时不套用这句。');
+    assert.match(note.innerHTML, /控制套接字仍在监听。<br class="notice-break">只有前台 start 或 restart <br class="notice-break">已经拿到文件锁，<br class="notice-break">但控制套接字仍能连上时，<br class="notice-break">才把这句打印到标准错误，<br class="notice-break">退出码 1。<br class="notice-break">句尾没有句号。<br>拿不到文件锁时不套用这句。/);
+    assert.doesNotMatch(note.innerHTML, /文<br|件<br/);
+    assert.doesNotMatch(note.textContent, /已经释放|套接字已关闭/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the already-running lock note does not split 这句 on a narrow screen', async () => {
+  const run = {id: 'probe-idle', status: 'finished', kind: 'analysis', ticker: 'NVDA', date: '2026-11-12', selections: {ticker: 'NVDA', date: '2026-11-12'}};
+  const ui = await setup({'/api/runs': {run, runs: [run], progress: {agents: []}, result: {present: false}}});
+  try {
+    await openRunFromList(ui, 'probe-idle');
+    const note = ui.doc.querySelector('#already-lock-note');
+    assert.equal(note.textContent, '文件锁已被占用。只有 start 或 restart 拿不到本机文件锁时才把这句打印到标准错误，退出码 1。句尾有句号。控制台已有进程时拒绝第二次启动，用的也是这句。套接字仍在监听时不套用这句。');
+    assert.match(note.innerHTML, /文件锁已被占用。<br class="notice-break">只有 start 或 restart 拿不到本机文件锁时才把<br class="notice-break">这句打印到标准错误，<br class="notice-break">退出码 1。<br class="notice-break">句尾有句号。<br class="notice-break">控制台已有进程时拒绝第二次<br class="notice-break">启动，<br class="notice-break">用的也是这句。<br class="notice-break">套接字仍在监听时不套用这句。/);
+    assert.doesNotMatch(note.innerHTML, /这<br/);
+    assert.doesNotMatch(note.textContent, /已经启动|锁已释放/);
+    const other = ui.doc.querySelector('#already-socket-note');
+    assert.match(other.textContent, /控制套接字仍在监听/);
+    assert.match(other.innerHTML, /拿到<br class="notice-break">文件锁/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the logs usage note does not split 错误 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    await ui.click('[data-page=reports]');
+    const note = ui.doc.querySelector('#logs-usage-note');
+    assert.equal(note.textContent, '日志多余参数或负数行数。没有 --help 或 -h 时，logs 还有无法识别的剩余参数，或 --lines 是负数，才把这句打印到标准错误，退出码 2。非整数不是这句。');
+    assert.match(note.innerHTML, /日志多余参数或负数行数。<br class="notice-break">没有 --help 或 -h 时，<br class="notice-break">logs 还有无法识别的剩余参数，<br class="notice-break">或 --lines 是负数，<br class="notice-break">才把这句打印到标准错误，<br class="notice-break">退出码 2。<br class="notice-break">非整数不是这句。/);
+    assert.doesNotMatch(note.innerHTML, /错<br/);
+    assert.doesNotMatch(note.textContent, /已经打印|行数已改/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the logs integer note does not split 打印 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    await ui.click('[data-page=reports]');
+    const note = ui.doc.querySelector('#logs-integer-note');
+    assert.equal(note.textContent, '日志行数不是整数。只有 logs --lines 后面缺少值，或那个值不是整数时，才把这句打印到标准错误，退出码 2。这句不带上当时的值。负数不是这句。带 --help 或 -h 时不打印这句。');
+    assert.match(note.innerHTML, /才把这句打印到标准错误，<br class="notice-break">/);
+    assert.doesNotMatch(note.innerHTML, /打<br/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the logs help note does not split 打印 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    await ui.click('[data-page=reports]');
+    const note = ui.doc.querySelector('#logs-help-note');
+    assert.equal(note.textContent, '日志帮助。argv 里出现 --help 或 -h 就打印到标准输出，退出码 0，即使同时还有别的参数。没有这两个标志时，错误参数不打印这句。');
+    assert.match(note.innerHTML, /日志帮助。<br class="notice-break">argv 里出现 --help 或 -h 就<br class="notice-break">打印到标准输出，<br class="notice-break">退出码 0，<br class="notice-break">即使同时还有别的参数。<br class="notice-break">没有这两个标志时，<br class="notice-break">错误参数不打印这句。/);
+    assert.doesNotMatch(note.textContent, /已经打印|帮助已显示/);
+    const other = ui.doc.querySelector('#logs-integer-note');
+    assert.equal(other.textContent, '日志行数不是整数。只有 logs --lines 后面缺少值，或那个值不是整数时，才把这句打印到标准错误，退出码 2。这句不带上当时的值。负数不是这句。带 --help 或 -h 时不打印这句。');
+    assert.match(other.innerHTML, /日志行数不是整数。<br class="notice-break">只有 logs --lines 后面缺少值，<br class="notice-break">或那个值不是整数时，<br class="notice-break">才把这句打印到标准错误，<br class="notice-break">退出码 2。<br class="notice-break">这句不带上当时的值。<br class="notice-break">负数不是这句。<br class="notice-break">带 --help 或 -h 时不打印这句。/);
+    assert.doesNotMatch(other.textContent, /已经打印|行数已改/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the log waiting note does not split 打印 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    await ui.click('[data-page=reports]');
+    const note = ui.doc.querySelector('#report-log-path');
+    assert.equal(note.textContent, '正在读取。读到路径后显示命令行 logs 打印的路径句，不预写。');
+    assert.match(note.innerHTML, /正在读取。<br class="notice-break">读到路径后显示命令行 logs <br class="notice-break">打印的路径句，不预写。/);
+    assert.doesNotMatch(note.textContent, /已预写|日志路径是/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the key details note does not split 供应商 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    await ui.click('[data-page=accounts]');
+    const details = ui.doc.querySelector('#key-details');
+    details.open = true;
+    const note = ui.doc.querySelector('#key-secret-note');
+    assert.equal(note.textContent, '页面不会展示密钥内容。以下仅用于确认供应商与保存项。');
+    assert.match(note.innerHTML, /密钥内容。<br class="notice-break">以下仅用于确认供应商与保存项。/);
+    assert.doesNotMatch(note.textContent, /密钥已展示|sk-/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the data source note does not split 来源 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    await ui.click('[data-page=accounts]');
+    const note = ui.doc.querySelector('#data-source-note');
+    assert.equal(note.textContent, '行情、新闻和基本面从哪里取。留空沿用默认来源，保存在本机控制台配置里。');
+    assert.match(note.innerHTML, /从哪里取。<br class="notice-break">留空沿用默认来源，<br class="notice-break">保存在本机控制台配置里。/);
+    assert.doesNotMatch(note.textContent, /已更换来源|供应商账单/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the credential summary does not split 填写 on a narrow screen', async () => {
+  const ui = await setup({'/api/config': {saved: {}, keys: [{provider: 'openai', configured: false, env_var: 'OPENAI_API_KEY'}], data_env: [{env: 'FRED_API_KEY', configured: true}], cloud_env: []}});
+  try {
+    await ui.click('[data-page=accounts]');
+    const note = ui.doc.querySelector('#credential-summary');
+    assert.equal(note.textContent, '可选凭据已配置 1 项。默认数据来源无需在此填写。');
+    assert.match(note.innerHTML, /已配置 1 项。<br class="notice-break">默认数据来源无需在此填写。/);
+    assert.doesNotMatch(note.textContent, /不把它写成未配置|已在此填写/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the local data credential note does not split 回显 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    await ui.click('[data-page=accounts]');
+    const details = ui.doc.querySelector('#data-env-details');
+    details.open = true;
+    const note = ui.doc.querySelector('#data-env-local-note');
+    assert.equal(note.textContent, '这些可选凭据只写入本机配置，内容不会回显。');
+    assert.match(note.innerHTML, /本机配置，<br class="notice-break">内容不会回显。/);
+    assert.doesNotMatch(note.innerHTML, /回<br/);
+    assert.doesNotMatch(note.textContent, /已经回显|密钥已展示/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the SEC contact note does not split 留空 or 项目', async () => {
+  const ui = await setup();
+  try {
+    await ui.click('[data-page=accounts]');
+    ui.doc.querySelector('#data-env-details').open = true;
+    const label = ui.doc.querySelector('label[for="env-SEC_EDGAR_USER_AGENT"]');
+    assert.equal(label.textContent, 'SEC 联系标识 SEC_EDGAR_USER_AGENT。读取财报时发给 SEC 的姓名和联系地址。不是密钥。留空则使用项目占位地址。 配置状态未知，不把它写成未配置。');
+    assert.match(label.innerHTML, /不是密钥。<br>留空则使用项目占位地址。/);
+    assert.doesNotMatch(label.innerHTML, /留<br|项<br/);
+    assert.doesNotMatch(label.textContent, /已经留空|地址已改/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the Azure endpoint note does not split 地址 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    await ui.click('[data-page=accounts]');
+    ui.doc.querySelector('#data-env-details').open = true;
+    const label = ui.doc.querySelector('label[for="env-AZURE_OPENAI_ENDPOINT"]');
+    assert.match(label.textContent, /例如 https:\/\/资源名.openai.azure.com\/。页面的推理地址也会传给 Azure。/);
+    assert.match(label.innerHTML, /azure\.com\/。<br class="notice-break">页面的推理地址也会传给 Azure。/);
+    assert.doesNotMatch(label.innerHTML, /地<br|址<br/);
+    assert.doesNotMatch(label.textContent, /地址已改|已经传给/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the Azure API version note does not split 配置 on a narrow screen', async () => {
+  const ui = await setup({'/api/config': {saved: {}, keys: [], data_env: [], cloud_env: [{env: 'OPENAI_API_VERSION', configured: false}]}});
+  try {
+    await ui.click('[data-page=accounts]');
+    ui.doc.querySelector('#data-env-details').open = true;
+    const label = ui.doc.querySelector('label[for="env-OPENAI_API_VERSION"]');
+    assert.equal(label.textContent, 'Azure 接口版本 OPENAI_API_VERSION。Azure OpenAI 需要，例如 2025-03-01-preview。 未配置。');
+    assert.match(label.innerHTML, /preview。 <br class="notice-break">未配置。/);
+    assert.doesNotMatch(label.innerHTML, /配<br|未<br/);
+    assert.doesNotMatch(label.textContent, /已经配置|版本已改/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the Bedrock region note does not split 客户端 or 未配置', async () => {
+  const ui = await setup({'/api/config': {saved: {}, keys: [], data_env: [], cloud_env: [{env: 'AWS_REGION', configured: false}]}});
+  try {
+    await ui.click('[data-page=accounts]');
+    ui.doc.querySelector('#data-env-details').open = true;
+    const label = ui.doc.querySelector('label[for="env-AWS_REGION"]');
+    assert.equal(label.textContent, 'Bedrock 优先区域 AWS_REGION。Bedrock 客户端先读这个变量。设置后会覆盖 AWS_DEFAULT_REGION。 未配置。');
+    assert.match(label.innerHTML, /Bedrock <br class="notice-break">客户端先读这个变量。/);
+    assert.match(label.innerHTML, /AWS_DEFAULT_REGION。 <br>未配置。/);
+    assert.doesNotMatch(label.innerHTML, /客<br|端<br|未<br|配<br/);
+    assert.doesNotMatch(label.textContent, /已经配置|区域已改/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the Bedrock default region note does not split 配置 on a narrow screen', async () => {
+  const ui = await setup({'/api/config': {saved: {}, keys: [], data_env: [], cloud_env: [{env: 'AWS_DEFAULT_REGION', configured: false}]}});
+  try {
+    await ui.click('[data-page=accounts]');
+    ui.doc.querySelector('#data-env-details').open = true;
+    const label = ui.doc.querySelector('label[for="env-AWS_DEFAULT_REGION"]');
+    assert.equal(label.textContent, 'Bedrock 区域 AWS_DEFAULT_REGION。客户端先读 AWS_REGION，没有时才读这个变量。 未配置。');
+    assert.match(label.innerHTML, /这个变量。 <br class="notice-break">未配置。/);
+    assert.doesNotMatch(label.innerHTML, /配<br|未<br/);
+    assert.doesNotMatch(label.textContent, /已经配置|区域已改/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the Bedrock token note does not split 未配置 on a wide screen', async () => {
+  const ui = await setup({'/api/config': {saved: {}, keys: [], data_env: [], cloud_env: [{env: 'AWS_BEARER_TOKEN_BEDROCK', configured: false}]}});
+  try {
+    await ui.click('[data-page=accounts]');
+    ui.doc.querySelector('#data-env-details').open = true;
+    const label = ui.doc.querySelector('label[for="env-AWS_BEARER_TOKEN_BEDROCK"]');
+    assert.equal(label.textContent, 'Bedrock 令牌 AWS_BEARER_TOKEN_BEDROCK。Bedrock API 密钥。不回显。没有它时使用 AWS 凭证链。 未配置。');
+    assert.match(label.innerHTML, /凭证链。 <br>未配置。/);
+    assert.doesNotMatch(label.innerHTML, /未<br|配<br/);
+    assert.doesNotMatch(label.textContent, /已经配置|令牌已改/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a tool vendor note does not split 留空 or 沿用 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    await ui.click('[data-page=accounts]');
+    const label = ui.doc.querySelector('label[for="tool-get_stock_data"]');
+    assert.ok(label, 'stock data tool label');
+    assert.match(label.textContent, /tool_vendors.get_stock_data。留空沿用类别链。/);
+    assert.match(label.innerHTML, /get_stock_data。<br class="notice-break">留空沿用类别链。/);
+    assert.doesNotMatch(label.innerHTML, /留<br|沿<br/);
+    assert.doesNotMatch(label.textContent, /已经沿用|类别已改/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unrecognized key configuration is not called unconfigured', async () => {
+  const ui = await setup({'/api/config': {saved: {}, keys: [
+    {provider: 'openai', configured: null, env_var: 'OPENAI_API_KEY'},
+    {provider: 'anthropic', configured: false, env_var: 'ANTHROPIC_API_KEY'},
+  ], data_env: [{env: 'FRED_API_KEY', configured: null}], cloud_env: []}});
+  try {
+    await ui.click('[data-page=accounts]');
+    const status = ui.doc.querySelector('#key-status').textContent;
+    assert.match(status, /配置状态未知，不把它写成未配置/);
+    assert.doesNotMatch(status, /尚未配置 API Key/);
+    const shown = ui.doc.querySelector('#key-providers .custom-select-value').textContent;
+    assert.match(shown, /配置状态未知/);
+    assert.doesNotMatch(shown, /未配置/);
+    ui.doc.querySelector('#key-details').open = true;
+    const row = [...ui.doc.querySelectorAll('#key-details li')].find((item) => item.textContent.includes('OPENAI_API_KEY'));
+    assert.match(row.textContent, /配置状态未知/);
+    assert.doesNotMatch(row.textContent, /未配置/);
+    const known = [...ui.doc.querySelectorAll('#key-details li')].find((item) => item.textContent.includes('ANTHROPIC_API_KEY'));
+    assert.match(known.textContent, /未配置/);
+    assert.doesNotMatch(known.textContent, /不把它写成未配置/);
+    ui.doc.querySelector('#data-env-details').open = true;
+    const field = ui.doc.querySelector('#data-env-form label');
+    if (field) {
+      assert.match(field.textContent, /配置状态未知，不把它写成未配置/);
+    }
+    assert.match(ui.doc.querySelector('#credential-summary').textContent, /不把它写成未配置/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a data credential save without a saved flag is not called saved', async () => {
+  const ui = await setup({'/api/data-env': {env_var: 'FRED_API_KEY', zh: '已保存'}});
+  try {
+    await ui.click('[data-page=accounts]');
+    ui.doc.querySelector('#data-env-details').open = true;
+    ui.fill('#env-FRED_API_KEY', 'fred-fixture-not-real');
+    await ui.click('#data-env-form button[type=submit]');
+    await settleMany();
+    const note = ui.doc.querySelector('#data-env-note');
+    assert.ok(note);
+    assert.match(note.textContent, /不把它写成已保存/);
+    assert.doesNotMatch(note.textContent, /^已保存/);
+    assert.doesNotMatch(ui.doc.body.textContent, /fred-fixture-not-real|undefined/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a data credential save marked saved still says it was saved', async () => {
+  const ui = await setup({'/api/data-env': {saved: true, env_var: 'FRED_API_KEY'}});
+  try {
+    await ui.click('[data-page=accounts]');
+    ui.doc.querySelector('#data-env-details').open = true;
+    ui.fill('#env-FRED_API_KEY', 'fred-fixture-not-real');
+    await ui.click('#data-env-form button[type=submit]');
+    await settleMany();
+    assert.match(ui.doc.querySelector('#data-env-note').textContent, /^已保存 1 项/);
+    assert.doesNotMatch(ui.doc.body.textContent, /fred-fixture-not-real|undefined/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a watch trigger without a status is not called unchecked', async () => {
+  const trigger = {id: 't1', symbol: '600519', kind: 'price', created_at: '2026-11-12T01:00:00Z', old_price: 9, new_price: 10};
+  const ui = await setup({'/api/watchlist': {mode: 'observe', mode_label: '观察', rule_version: 'watch-1', note: '', items: [
+    {symbol: '600519', asset_label: '股票', asset_type: 'stock', enabled: true, last_price: 10},
+  ], triggers: [trigger], visible_triggers: [trigger]}});
+  try {
+    await ui.click('[data-page=watchlist]');
+    for (let i = 0; i < 6; i++) await settle();
+    const note = ui.doc.querySelector('#watch-trigger-note');
+    const badge = ui.doc.querySelector('.watch-triggers .status-badge');
+    assert.ok(note);
+    assert.match(note.textContent, /不把它写成未检查/);
+    assert.doesNotMatch(note.textContent, /^未检查/);
+    assert.equal(badge.textContent, '状态未知');
+    assert.doesNotMatch(ui.doc.querySelector('.watch-triggers').textContent, /未检查/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unrecognized watch trigger label is not called unchecked', async () => {
+  const unchecked = {id: 't1', symbol: '600519', kind: 'price', status_label: 'retrying', checked: false, created_at: '2026-11-12T01:00:00Z', old_price: 9, new_price: 10};
+  const checked = {id: 't2', symbol: 'AAPL', kind: 'price', status_label: 'later', checked: true, started: true, run_id: 'run-1', created_at: '2026-11-12T02:00:00Z', old_price: 1, new_price: 2};
+  const ui = await setup({'/api/watchlist': {mode: 'observe', mode_label: '观察', rule_version: 'watch-1', note: '', items: [], triggers: [unchecked, checked], visible_triggers: [unchecked, checked]}});
+  try {
+    await ui.click('[data-page=watchlist]');
+    for (let i = 0; i < 6; i++) await settle();
+    const badges = [...ui.doc.querySelectorAll('.watch-triggers .status-badge')].map((node) => node.textContent);
+    const list = ui.doc.querySelector('.watch-triggers').textContent;
+    assert.deepEqual(badges, ['状态未知', '状态未知']);
+    assert.match(ui.doc.querySelector('#watch-trigger-note').textContent, /不把它写成未检查/);
+    assert.doesNotMatch(list, /未检查|已检查|retrying|later|已启动/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a watch trigger marked unchecked still says unchecked', async () => {
+  const trigger = {id: 't1', symbol: '600519', kind: 'price', status_label: '未检查', checked: false, created_at: '2026-11-12T01:00:00Z'};
+  const ui = await setup({'/api/watchlist': {mode: 'observe', mode_label: '观察', rule_version: 'watch-1', note: '', items: [], triggers: [trigger], visible_triggers: [trigger]}});
+  try {
+    await ui.click('[data-page=watchlist]');
+    for (let i = 0; i < 6; i++) await settle();
+    assert.equal(ui.doc.querySelector('.watch-triggers .status-badge').textContent, '未检查');
+    assert.equal(ui.doc.querySelector('#watch-trigger-note'), null);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a watchlist without a mode is not called observe', async () => {
+  const ui = await setup({'/api/watchlist': {mode_label: '观察', rule_version: 'watch-1', note: '', items: [
+    {symbol: '600519', asset_label: '股票', asset_type: 'stock', enabled: true, last_price: 10},
+  ], triggers: [], visible_triggers: []}});
+  try {
+    await ui.click('[data-page=watchlist]');
+    for (let i = 0; i < 6; i++) await settle();
+    const rule = ui.doc.querySelector('#watch-rule').textContent;
+    const note = ui.doc.querySelector('#watch-mode-note').textContent;
+    assert.match(rule, /不把它写成观察模式/);
+    assert.match(note, /不把它写成观察模式/);
+    assert.doesNotMatch(rule, /观察模式不会自动启动/);
+    assert.doesNotMatch(note, /观察模式不会自动启动/);
+    assert.match(rule, /状态未知/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an observe watchlist still says observe', async () => {
+  const ui = await setup({'/api/watchlist': {mode: 'observe', mode_label: '观察', rule_version: 'watch-1', note: '', items: [], triggers: [], visible_triggers: []}});
+  try {
+    await ui.click('[data-page=watchlist]');
+    for (let i = 0; i < 6; i++) await settle();
+    assert.match(ui.doc.querySelector('#watch-rule').textContent, /未检查表示还没有规则检查/);
+    assert.match(ui.doc.querySelector('#watch-mode-note').textContent, /观察模式不会自动启动分析/);
+    assert.doesNotMatch(ui.doc.querySelector('#watch-rule').textContent, /不把它写成观察模式/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unknown watch mode is not called observe', async () => {
+  const ui = await setup({'/api/watchlist': {mode: 'later', mode_label: 'later', rule_version: 'watch-1', note: '', items: [
+    {symbol: '600519', asset_label: '股票', asset_type: 'stock', enabled: true, last_price: 10},
+  ], triggers: [
+    {id: 't1', symbol: '600519', kind: 'price', status_label: 'retrying', created_at: '2026-11-11T10:00:00Z', old_price: 9, new_price: 10},
+  ], visible_triggers: [
+    {id: 't1', symbol: '600519', kind: 'price', status_label: 'retrying', created_at: '2026-11-11T10:00:00Z', old_price: 9, new_price: 10},
+  ]}});
+  try {
+    await ui.click('[data-page=watchlist]');
+    for (let i = 0; i < 6; i++) await settle();
+    const page = ui.doc.querySelector('#page').textContent;
+    assert.match(page, /状态未知/);
+    assert.match(page, /不把它写成观察模式/);
+    assert.doesNotMatch(page, /later|retrying/);
+    assert.doesNotMatch(ui.doc.querySelector('#watch-rule').textContent, /观察模式不会自动启动/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a schedule without an asset label is not called a stock', async () => {
+  const ui = await setup({'/api/schedule/tick': {mode: 'observe', mode_label: '观察', rule_version: 'sched-1', note: '', schedules: [
+    {id: 'sch-1', symbol: 'EURUSD', at: '09:30', status: 'active', status_label: '观察中', due_note: '还没有到点触发。'},
+  ], reminders: []}});
+  try {
+    await ui.click('[data-page=schedule]');
+    for (let i = 0; i < 6; i++) await settle();
+    const meta = ui.doc.querySelector('.schedule-card .cell-secondary').textContent;
+    assert.match(meta, /^资产类型未知，不把它写成股票 · 每天 09:30/);
+    assert.doesNotMatch(meta, /^ ·|^股票/);
+    assert.match(ui.doc.querySelector('.schedule-card').textContent, /观察中/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a schedule with a stock label still says stock', async () => {
+  const ui = await setup({'/api/schedule/tick': {mode: 'observe', mode_label: '观察', rule_version: 'sched-1', note: '', schedules: [
+    {id: 'sch-1', symbol: '600519', at: '09:30', status: 'active', asset_label: '股票', status_label: '观察中', due_note: '还没有到点触发。'},
+  ], reminders: []}});
+  try {
+    await ui.click('[data-page=schedule]');
+    for (let i = 0; i < 6; i++) await settle();
+    const card = ui.doc.querySelector('.schedule-card').textContent;
+    assert.match(card, /股票 · 每天 09:30 · 观察中/);
+    assert.doesNotMatch(card, /不把它写成股票/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an active schedule without a status label is not called observing', async () => {
+  const ui = await setup({'/api/schedule/tick': {mode: '', rule_version: 'sched-1', note: '', schedules: [
+    {id: 'sch-1', symbol: '600519', at: '09:30', status: 'active', asset_label: '股票'},
+  ], reminders: []}});
+  try {
+    await ui.click('[data-page=schedule]');
+    for (let i = 0; i < 6; i++) await settle();
+    const card = ui.doc.querySelector('.schedule-card').textContent;
+    assert.match(card, /不把它写成观察中/);
+    assert.match(card, /· 状态未知/);
+    assert.doesNotMatch(card, /· 观察中/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a schedule without a mode is not called observe', async () => {
+  const ui = await setup({'/api/schedule/tick': {mode_label: '观察', rule_version: 'sched-1', note: '', schedules: [], reminders: []}});
+  try {
+    await ui.click('[data-page=schedule]');
+    for (let i = 0; i < 6; i++) await settle();
+    const rule = ui.doc.querySelector('#sched-rule').textContent;
+    const note = ui.doc.querySelector('#sched-mode-note').textContent;
+    assert.match(rule, /不把它写成观察模式或已启用/);
+    assert.match(note, /不把它写成观察模式或已启用/);
+    assert.doesNotMatch(rule, /观察模式不会自动启动/);
+    assert.doesNotMatch(note, /观察模式不会自动启动/);
+    assert.match(rule, /状态未知/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the schedule page description does not split 打开向导 on a narrow screen', async () => {
+  const ui = await setup({'/api/schedule/tick': {mode: 'observe', mode_label: '观察', rule_version: 'sched-1', note: '', schedules: [], reminders: []}});
+  try {
+    await ui.click('[data-page=schedule]');
+    for (let i = 0; i < 6; i++) await settle();
+    const note = ui.doc.querySelector('#sched-mode-note');
+    assert.equal(note.textContent, '到点只记录触发。观察模式不会自动启动分析。去分析只打开向导。提醒先写入，再显示在本页。');
+    assert.match(note.innerHTML, /到点只记录触发。<br class="notice-break">观察模式不会自动启动分析。<br class="notice-break">去分析只打开向导。<br class="notice-break">提醒先写入，<br class="notice-break">再显示在本页。/);
+    assert.doesNotMatch(note.textContent, /已启动分析|自动启动。去分析/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an observe schedule still says observe', async () => {
+  const ui = await setup({'/api/schedule/tick': {mode: 'observe', mode_label: '观察', rule_version: 'sched-1', note: '', schedules: [], reminders: []}});
+  try {
+    await ui.click('[data-page=schedule]');
+    for (let i = 0; i < 6; i++) await settle();
+    assert.match(ui.doc.querySelector('#sched-rule').textContent, /到点只记录触发，不会自动启动分析/);
+    assert.match(ui.doc.querySelector('#sched-mode-note').textContent, /观察模式不会自动启动分析/);
+    assert.doesNotMatch(ui.doc.querySelector('#sched-rule').textContent, /不把它写成观察模式/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unknown schedule mode is not called enabled or observe', async () => {
+  const ui = await setup({'/api/schedule/tick': {mode: 'later', mode_label: 'later', rule_version: 'sched-1', note: '', schedules: [
+    {id: 'sch-1', symbol: '600519', at: '09:30', status: 'active', asset_label: '股票', status_label: '状态未知', due_note: '还没有到点触发。'},
+  ], reminders: [
+    {id: 'r1', body: '600519 的提醒', status: 'retrying', status_label: 'retrying', system_problem: true},
+  ]}});
+  try {
+    await ui.click('[data-page=schedule]');
+    for (let i = 0; i < 6; i++) await settle();
+    const page = ui.doc.querySelector('#page').textContent;
+    assert.match(page, /状态未知/);
+    assert.match(page, /不把它写成观察模式或已启用/);
+    assert.doesNotMatch(page, /later|retrying|仍会重试/);
+    assert.doesNotMatch(ui.doc.querySelector('#sched-rule').textContent, /^已启用/);
+    assert.match(ui.doc.querySelector('#sched-rule').textContent, /状态未知/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unknown run status is not shown as its raw token', async () => {
+  const run = {id: 'run-1', kind: 'analysis', status: 'retrying', ticker: '600519', date: '2026-11-11', started_at: '2026-11-11T10:00:00', selections: {ticker: '600519', date: '2026-11-11'}};
+  const payload = {runs: [{...run, done: 1, total: 11, team_zh: ''}], run, progress: {agents: [], timeline: []}, result: {present: false}, counts: {all: 1, running: 0, queued: 0, failed: 0, finished: 0}, limits: {max_running: 2, max_queued: 5}};
+  const ui = await setup({'/api/runs': (options, path) => payload});
+  try {
+    await ui.click('[data-page=runs]');
+    for (let i = 0; i < 8; i++) await settle();
+    const row = ui.doc.querySelector('#run-list [data-run-id="run-1"]');
+    assert.match(row.textContent, /状态未知/);
+    assert.doesNotMatch(row.textContent, /retrying|运行中|已结束|已完成/);
+    await ui.click('#run-list [data-run-id="run-1"]');
+    for (let i = 0; i < 8; i++) await settle();
+    const page = ui.doc.querySelector('#page').textContent;
+    assert.match(page, /状态未知/);
+    assert.match(page, /不把它写成已结束，也不写成运行中/);
+    assert.equal(ui.doc.querySelector('#run-elapsed').textContent, '—');
+    assert.doesNotMatch(page, /retrying|小时/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a reminder without a decision flag is not shown as a structured rating', async () => {
+  const body = 'AAPL 的分析已完成，记录里有 Buy，但不把它当成结构化评级。';
+  const ui = await setup({'/api/schedule/tick': {mode: 'observe', mode_label: '观察', rule_version: 'sched-1', note: '', schedules: [], reminders: [
+    {id: 'r1', body, status: 'sent', status_label: '已发送'},
+  ]}});
+  try {
+    await ui.click('[data-page=schedule]');
+    for (let i = 0; i < 6; i++) await settle();
+    const row = ui.doc.querySelector('#sched-reminders').textContent;
+    assert.match(row, /记录里有 Buy，但不把它当成结构化评级/);
+    assert.doesNotMatch(row, /评级 Buy|仍会重试/);
+    assert.match(row, /已发送/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unknown schedule item status is not called observing', async () => {
+  const ui = await setup({'/api/schedule/tick': {mode: 'observe', mode_label: '观察', rule_version: 'sched-1', note: '', schedules: [
+    {id: 'sch-1', symbol: '600519', at: '09:30', status: 'mystery', asset_label: '股票', status_label: '观察中', due_note: '还没有到点触发。'},
+  ], reminders: []}});
+  try {
+    await ui.click('[data-page=schedule]');
+    for (let i = 0; i < 6; i++) await settle();
+    const card = ui.doc.querySelector('.schedule-card').textContent;
+    assert.match(card, /状态未知/);
+    assert.match(card, /定时状态未知，不把它写成观察中，也不写成可以暂停/);
+    const note = [...ui.doc.querySelectorAll('.schedule-card .cell-secondary')].find((el) => el.textContent.includes('不把它写成观察中'));
+    assert.match(note.innerHTML, /定时状态未知，<br class="notice-break">不把它写成观察中，<br class="notice-break">也不写成可以暂停。/);
+    assert.doesNotMatch(card, /mystery|· 观察中|还没有到点触发|暂停去分析|继续去分析/);
+    assert.equal(ui.doc.querySelector('[data-sched-pause]'), null);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unknown schedule check is not called not started', async () => {
+  const ui = await setup({'/api/schedule/tick': {mode: 'observe', mode_label: '观察', rule_version: 'sched-1', note: '', schedules: [
+    {id: 'sch-1', symbol: '600519', at: '09:30', status: 'active', asset_label: '股票', status_label: '观察中',
+      latest_due: {slot: '2026-11-12', at: '09:30'},
+      latest_check: {result: 'mystery', started: true, run_id: 'run-9'}},
+  ], reminders: []}});
+  try {
+    await ui.click('[data-page=schedule]');
+    for (let i = 0; i < 6; i++) await settle();
+    const card = ui.doc.querySelector('.schedule-card').textContent;
+    assert.match(card, /检查结果未知，不把它写成未启动或已启动。/);
+    assert.doesNotMatch(card, /mystery|09:30 未启动|09:30 已启动/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a login that is not waiting is not called already started', async () => {
+  const ui = await setup({'/api/auth/login': (options) => options.method
+    ? {provider: 'chatgpt', status: 'signed_in', account: 'fixture@example.com'}
+    : {status: 'idle', messages: []}});
+  try {
+    await ui.click('[data-page=accounts]');
+    await ui.click('[data-login=chatgpt]');
+    const card = ui.doc.querySelector('[data-auth-feedback="chatgpt"]').textContent;
+    assert.match(card, /登录返回已登录，不把它写成仍在启动/);
+    assert.doesNotMatch(card, /登录已启动|等待授权/);
+    assert.equal(ui.doc.querySelector('#paste-url').disabled, true);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a result without a saved flag is not called saved', async () => {
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'saved-run', status: 'finished', kind: 'analysis', ticker: 'AAPL', date: '2026-11-11', selections: {ticker: 'AAPL'}, started_at: '2026-11-11T09:00:00', finished_at: '2026-11-11T09:20:00'},
+    progress: {agents: []},
+    result: {present: true, decision: '持有', rating: 'Hold', saved_to: '/tmp/reports', report: '/tmp/reports/complete_report.md'},
+    runs: [{id: 'saved-run', status: 'finished', ticker: 'AAPL', date: '2026-11-11'}],
+  }});
+  try {
+    await ui.click('[data-page=runs]');
+    await openRunFromList(ui, 'saved-run');
+    const note = ui.doc.querySelector('#save-notice');
+    assert.ok(note);
+    assert.match(note.textContent, /保存结果未知，不把它写成已保存/);
+    assert.doesNotMatch(note.textContent, /^报告已保存/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a result marked saved still says the report was saved', async () => {
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'saved-run', status: 'finished', kind: 'analysis', ticker: 'AAPL', date: '2026-11-11', selections: {ticker: 'AAPL'}, started_at: '2026-11-11T09:00:00', finished_at: '2026-11-11T09:20:00'},
+    progress: {agents: []},
+    result: {present: true, decision: '持有', rating: 'Hold', saved: true, saved_to: '/tmp/reports'},
+    runs: [{id: 'saved-run', status: 'finished', ticker: 'AAPL', date: '2026-11-11'}],
+  }});
+  try {
+    await ui.click('[data-page=runs]');
+    await openRunFromList(ui, 'saved-run');
+    assert.match(ui.doc.querySelector('#save-notice').textContent, /^报告已保存/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the account page description does not split 密钥 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    await ui.click('.nav-item[data-page=accounts]');
+    const desc = ui.doc.querySelector('.page-description');
+    assert.equal(desc.textContent, '管理订阅登录和 API Key。本页显示本机配置状态，密钥不会回显。');
+    assert.match(desc.innerHTML, /管理订阅登录和 API Key。<br class="notice-break">本页显示本机配置状态，<br class="notice-break">密钥不会回显。/);
+    assert.doesNotMatch(desc.textContent, /密钥已回显|已保存密钥/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a key save without a saved flag is not called skipped', async () => {
+  const ui = await setup({'/api/keys': {zh: '已保存', cli: 'Saved OPENAI_API_KEY to /tmp/.env'}});
+  try {
+    await ui.click('[data-page=accounts]');
+    ui.fill('#key-value', 'sk-fixture-not-real');
+    await ui.click('#key-form button[type=submit]');
+    await settleMany();
+    const note = ui.doc.querySelector('#key-save-note');
+    assert.ok(note);
+    assert.match(note.textContent, /不把它写成已保存或已跳过/);
+    assert.doesNotMatch(note.textContent, /^已保存|^已跳过/);
+    assert.doesNotMatch(ui.doc.body.textContent, /sk-fixture-not-real|undefined/);
+    assert.equal(ui.calls.filter((item) => item.path === '/api/keys' && item.method === 'POST').length, 1);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a key save marked saved still says it was saved', async () => {
+  const ui = await setup({'/api/keys': {saved: true, cli: 'Saved OPENAI_API_KEY to /tmp/.env'}});
+  try {
+    await ui.click('[data-page=accounts]');
+    ui.fill('#key-value', 'sk-fixture-not-real');
+    await ui.click('#key-form button[type=submit]');
+    await settleMany();
+    const note = ui.doc.querySelector('#key-save-note');
+    assert.match(note.textContent, /^已保存/);
+    assert.match(note.textContent, /密钥不会回显/);
+    assert.doesNotMatch(note.textContent, /不把它写成已保存/);
+    assert.doesNotMatch(ui.doc.body.textContent, /sk-fixture-not-real/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a key save marked skipped still says nothing was written', async () => {
+  const ui = await setup({'/api/keys': {saved: false, zh: '已跳过。没有写入密钥。'}});
+  try {
+    await ui.click('[data-page=accounts]');
+    ui.fill('#key-value', 'sk-fixture-not-real');
+    await ui.click('#key-form button[type=submit]');
+    await settleMany();
+    assert.match(ui.doc.querySelector('#key-save-note').textContent, /^已跳过，没有写入/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a logout without an outcome is not called signed out', async () => {
+  const ui = await setup({
+    '/api/auth/status': {accounts: [{provider: 'chatgpt', signed_in: true, account: 'fixture@example.com'}, {provider: 'grok', signed_in: false}]},
+    '/api/auth/logout': {zh: '已退出'},
+  });
+  try {
+    await ui.click('[data-page=accounts]');
+    assert.equal(ui.doc.querySelector('[data-logout=chatgpt]').disabled, false);
+    await ui.click('[data-logout=chatgpt]');
+    await ui.click('#confirm-yes');
+    await settleMany();
+    const note = ui.doc.querySelector('#logout-note');
+    assert.ok(note);
+    assert.match(note.textContent, /不把它写成已退出/);
+    assert.doesNotMatch(note.textContent, /^已退出/);
+    assert.match(ui.doc.querySelector('[data-auth-feedback="chatgpt"]').textContent, /不把它写成已退出/);
+    assert.doesNotMatch(ui.doc.body.textContent, /undefined/);
+    assert.equal(ui.calls.filter((item) => item.path === '/api/auth/logout' && item.method === 'POST').length, 1);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a revoked logout can still say signed out', async () => {
+  const ui = await setup({
+    '/api/auth/status': {accounts: [{provider: 'chatgpt', signed_in: true, account: 'fixture@example.com'}, {provider: 'grok', signed_in: false}]},
+    '/api/auth/logout': {outcome: 'revoked', zh: '已退出 ChatGPT 订阅，并完成服务端撤销。', cli: 'Signed out of ChatGPT.'},
+  });
+  try {
+    await ui.click('[data-page=accounts]');
+    await ui.click('[data-logout=chatgpt]');
+    await ui.click('#confirm-yes');
+    await settleMany();
+    const note = ui.doc.querySelector('#logout-note');
+    assert.match(note.textContent, /^已退出/);
+    assert.doesNotMatch(note.textContent, /不把它写成已退出/);
+    const detail = ui.doc.querySelector('details.account-details');
+    assert.match(detail.textContent, /Signed out of ChatGPT/);
+    assert.doesNotMatch(detail.textContent, /undefined/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a not-signed-in logout keeps the server sentence', async () => {
+  const ui = await setup({
+    '/api/auth/status': {accounts: [{provider: 'chatgpt', signed_in: true, account: 'fixture@example.com'}]},
+    '/api/auth/logout': {outcome: null, zh: '本来就没有登录 ChatGPT 订阅。', cli: 'Not signed in to ChatGPT.'},
+  });
+  try {
+    await ui.click('[data-page=accounts]');
+    await ui.click('[data-logout=chatgpt]');
+    await ui.click('#confirm-yes');
+    await settleMany();
+    const note = ui.doc.querySelector('#logout-note');
+    assert.match(note.textContent, /本来就没有登录/);
+    assert.doesNotMatch(note.textContent, /不把它写成已退出|^已退出/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unrecognized login poll is not called finished', async () => {
+  let posts = 0;
+  const ui = await setup({'/api/auth/login': (options) => {
+    if (options.method) { posts += 1; return {provider: 'chatgpt', status: 'waiting'}; }
+    if (posts) return {status: 'retrying', zh: '登录已完成'};
+    return {status: 'idle', messages: []};
+  }});
+  try {
+    await ui.click('[data-page=accounts]');
+    await ui.click('[data-login=chatgpt]');
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    for (let i = 0; i < 6; i++) await settle();
+    const note = ui.doc.querySelector('#login-end-note');
+    assert.ok(note);
+    assert.match(note.textContent, /登录状态未知，不把它写成已结束或已完成/);
+    assert.doesNotMatch(note.textContent, /登录流程已结束|登录已完成/);
+    assert.match(ui.doc.querySelector('[data-auth-feedback="chatgpt"]').textContent, /不把它写成已结束或已完成/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a finished login without a signed-in sentence is not called complete', async () => {
+  let posts = 0;
+  const ui = await setup({'/api/auth/login': (options) => {
+    if (options.method) { posts += 1; return {provider: 'chatgpt', status: 'waiting'}; }
+    return {status: 'idle', cli: 'auth-status chatgpt', messages: []};
+  }});
+  try {
+    await ui.click('[data-page=accounts]');
+    await ui.click('[data-login=chatgpt]');
+    assert.match(ui.doc.querySelector('[data-auth-feedback="chatgpt"]').textContent, /登录已启动/);
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    for (let i = 0; i < 6; i++) await settle();
+    const note = ui.doc.querySelector('#login-end-note');
+    assert.ok(note, 'the ended login is explained');
+    assert.match(note.textContent, /登录流程已结束，不把它写成已完成/);
+    assert.doesNotMatch(ui.doc.body.textContent, /登录已完成/);
+    assert.equal(posts, 1);
   } finally { ui.dom.window.close(); }
 });
 
@@ -1095,6 +2501,18 @@ function multiSetup(extra = {}) {
   });
 }
 
+test('the run list limit note breaks before the cap, not inside the number', async () => {
+  const ui = await setup({'/api/runs': {run: null, runs: [], progress: {}, counts: {all: 0, running: 0, queued: 0, failed: 0, finished: 0}, limits: {max_running: 2, max_queued: 5}}});
+  try {
+    await ui.click('[data-page=runs]');
+    const description = ui.doc.querySelector('.page-description');
+    assert.equal(description.textContent, '0 个运行中 · 0 个排队中（最多同时运行 2 个，最多排队 5 个）');
+    const html = description.innerHTML;
+    assert.match(html, /排队中<br class="notice-break">（最多同时运行 2 个，<br class="notice-break">最多排队 5 个）/);
+    assert.doesNotMatch(html, /排队<br/);
+  } finally { ui.dom.window.close(); }
+});
+
 test('several runs show a filtered list with real counts and no detail until a row is clicked; the nav badge counts running (RUN-004, WEBUI-007)', async () => {
   const ui = await multiSetup();
   try {
@@ -1102,7 +2520,7 @@ test('several runs show a filtered list with real counts and no detail until a r
     await ui.click('.nav-item[data-page=runs]');
     await settleMany();
     assert.equal(doc.querySelector('.page-description').textContent, '2 个运行中 · 2 个排队中（最多同时运行 2 个，最多排队 5 个）');
-    assert.deepEqual([...doc.querySelectorAll('#run-filters .ftab')].map((tab) => tab.textContent), ['全部6', '运行中2', '排队中2', '失败1', '已完成1']);
+    assert.deepEqual([...doc.querySelectorAll('#run-filters .ftab')].map((tab) => tab.textContent), ['全部6', '运行中2', '排队中2', '失败1', '已结束1']);
     const rows = [...doc.querySelectorAll('#run-list .tr[data-run-id]')];
     assert.deepEqual(rows.map((row) => row.dataset.runId), ['run-btc', 'run-nvda', 'run-eth', 'run-sol', 'run-tsla', 'run-aapl']);
     assert.equal(rows.filter((row) => row.classList.contains('on')).length, 0, 'nothing is highlighted before a run was opened');
@@ -1111,7 +2529,9 @@ test('several runs show a filtered list with real counts and no detail until a r
     assert.match(rows[2].textContent, /14:08 提交/);
     assert.ok(rows[2].querySelector('.qx'), 'a queued row has the red 取消');
     assert.equal(rows[0].querySelector('.qx'), null);
-    assert.match(rows[5].textContent, /已完成/);
+    assert.match(rows[5].textContent, /已结束/);
+    assert.doesNotMatch(rows[5].textContent, /已完成/);
+    assert.equal(rows[5].querySelector('.pill').className.includes('ok'), false, 'a finished process is not a confirmed completion');
     assert.equal(doc.querySelector('#run-detail'), null, 'the list page shows no 任务详情 (WEBUI-007 item 1)');
     assert.equal(doc.querySelector('#run-detail-title'), null);
     assert.equal(doc.querySelector('#runs-back'), null);
@@ -1131,6 +2551,80 @@ test('several runs show a filtered list with real counts and no detail until a r
     await waitHistory();
     assert.deepEqual([...doc.querySelectorAll('#run-list .tr[data-run-id]')].map((row) => row.dataset.runId), ['run-tsla'], 'the filter is kept');
     assert.ok(doc.querySelector('#run-list [data-run-id="run-tsla"]').classList.contains('on'), 'the run just viewed stays highlighted');
+  } finally { ui.dom.window.close(); }
+});
+
+test('a stop response without a status is not called stopped', async () => {
+  const running = {id: 'run-live', status: 'running', kind: 'analysis', ticker: 'AAPL', date: '2026-11-11', selections: {ticker: 'AAPL'}, started_at: '2026-11-11T09:00:00'};
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {run: running, runs: [running], progress: {agents: []}, result: {present: false}, counts: {all: 1, running: 1, queued: 0, failed: 0, finished: 0}}, '/api/runs/stop': {id: 'run-live', zh: '任务已停止。'}});
+  try {
+    await ui.click('[data-page=runs]');
+    await openRunFromList(ui, 'run-live');
+    await ui.click('#stop-run');
+    await ui.click('#confirm-yes');
+    await settleMany();
+    const note = [...ui.doc.querySelectorAll('[data-kept-notice]')].map((item) => item.textContent).join('\n');
+    assert.match(note, /停止结果状态未知，不把它写成已停止/);
+    assert.doesNotMatch(note, /^任务已停止/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a stopped backtest is not called a stopped analysis', async () => {
+  const running = {id: 'bt-live', status: 'running', kind: 'backtest', ticker: 'NVDA', date: '2026-11-12', selections: {ticker: 'NVDA'}, started_at: '2026-11-12T09:00:00'};
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {run: running, runs: [running], progress: {agents: []}, result: {present: false}, counts: {all: 1, running: 1, queued: 0, failed: 0, finished: 0}}, '/api/runs/stop': {id: 'bt-live', status: 'stopped', kind: 'backtest', zh: '正在停止控制台分析。'}});
+  try {
+    await ui.click('[data-page=runs]');
+    await openRunFromList(ui, 'bt-live');
+    await ui.click('#stop-run');
+    assert.match(ui.doc.body.textContent, /停止当前回测/);
+    await ui.click('#confirm-yes');
+    await settleMany();
+    const note = [...ui.doc.querySelectorAll('[data-kept-notice]')].map((item) => item.textContent).join('\n');
+    assert.match(note, /回测已停止，不是正常完成。不把它写成分析/);
+    assert.doesNotMatch(note, /控制台分析|正在停止控制台/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a stopped response still says the task stopped', async () => {
+  const running = {id: 'run-live', status: 'running', kind: 'analysis', ticker: 'AAPL', date: '2026-11-11', selections: {ticker: 'AAPL'}, started_at: '2026-11-11T09:00:00'};
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {run: running, runs: [running], progress: {agents: []}, result: {present: false}, counts: {all: 1, running: 1, queued: 0, failed: 0, finished: 0}}, '/api/runs/stop': {id: 'run-live', status: 'stopped', zh: '任务已停止。不是正常完成。'}});
+  try {
+    await ui.click('[data-page=runs]');
+    await openRunFromList(ui, 'run-live');
+    await ui.click('#stop-run');
+    await ui.click('#confirm-yes');
+    await settleMany();
+    const note = [...ui.doc.querySelectorAll('[data-kept-notice]')].map((item) => item.textContent).join('\n');
+    assert.match(note, /^任务已停止/);
+    assert.doesNotMatch(note, /状态未知/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a cancel response without a status is not called cancelled', async () => {
+  const queued = {id: 'run-q', status: 'queued', kind: 'analysis', ticker: 'AAPL', date: '2026-11-11', selections: {ticker: 'AAPL'}, position: 1};
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {run: queued, runs: [queued], progress: {agents: []}, result: {present: false}, counts: {all: 1, running: 0, queued: 1, failed: 0, finished: 0}}, '/api/runs/cancel': {id: 'run-q', zh: '已取消排队。'}});
+  try {
+    await ui.click('[data-page=runs]');
+    await openRunFromList(ui, 'run-q');
+    await ui.click('#cancel-queued');
+    await settleMany();
+    const note = [...ui.doc.querySelectorAll('[data-kept-notice]')].map((item) => item.textContent).join('\n');
+    assert.match(note, /取消结果状态未知，不把它写成已取消排队/);
+    assert.doesNotMatch(note, /^已取消排队|这个任务没有启动/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a cancelled queue response still says it was cancelled', async () => {
+  const queued = {id: 'run-q', status: 'queued', kind: 'analysis', ticker: 'AAPL', date: '2026-11-11', selections: {ticker: 'AAPL'}, position: 1};
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {run: queued, runs: [queued], progress: {agents: []}, result: {present: false}, counts: {all: 1, running: 0, queued: 1, failed: 0, finished: 0}}, '/api/runs/cancel': {id: 'run-q', status: 'cancelled', zh: '已取消排队。这个任务没有启动。'}});
+  try {
+    await ui.click('[data-page=runs]');
+    await openRunFromList(ui, 'run-q');
+    await ui.click('#cancel-queued');
+    await settleMany();
+    const note = [...ui.doc.querySelectorAll('[data-kept-notice]')].map((item) => item.textContent).join('\n');
+    assert.match(note, /已取消排队/);
+    assert.doesNotMatch(note, /状态未知/);
   } finally { ui.dom.window.close(); }
 });
 
@@ -1249,7 +2743,9 @@ test('no runs shows the list frame with zero counts and an empty state that star
     assert.ok(doc.querySelector('#run-filters'), 'the filter tabs are there');
     assert.deepEqual([...doc.querySelectorAll('#run-filters .ftab b')].map((b) => b.textContent), ['0', '0', '0', '0', '0']);
     assert.ok(doc.querySelector('#run-list.tl .tr.th'), 'the table frame keeps its header');
-    assert.match(doc.querySelector('#runs-empty').textContent, /还没有分析任务/);
+    assert.match(doc.querySelector('#runs-empty').textContent, /还没有任务/);
+    assert.doesNotMatch(doc.querySelector('#runs-empty').textContent, /还没有分析任务/);
+    assert.match(doc.querySelector('#runs-empty').textContent, /启动分析或回测后/);
     assert.match(doc.querySelector('#runs-empty').textContent, /最多同时运行 2 个，其余自动排队/);
     assert.equal(doc.querySelector('#run-detail'), null, 'no 任务详情 without a run');
     assert.equal(doc.querySelector('.nav-item[data-page=runs] .nav-badge'), null);
@@ -1268,6 +2764,8 @@ test('a queued start says 已加入队列 with the real number ahead (RUN-004, m
     await settleMany();
     assert.equal(ui.doc.querySelector('#launch-title').textContent, '已加入队列');
     assert.equal(ui.doc.querySelector('#launch-lead').textContent, '前面还有 3 个任务在排队，轮到时自动开始。');
+    assert.equal(ui.doc.querySelector('#launch-dialog').classList.contains('launch-dialog--wait'), true);
+    assert.doesNotMatch(ui.doc.querySelector('.launch-mark').textContent, /✓/);
     assert.match(ui.doc.querySelector('#launch-run-info').textContent, /run-q/);
     assert.ok(ui.doc.querySelector('#launch-another'));
     assert.ok(ui.doc.querySelector('#launch-open-runs'));
@@ -1285,6 +2783,7 @@ test('a full queue says 队列已满 with 返回修改 / 查看状态 and keeps 
     await settleMany();
     assert.equal(doc.querySelector('#launch-title').textContent, '队列已满');
     assert.match(doc.querySelector('#launch-error').textContent, /^2 个任务运行中，5 个在排队/);
+    assert.match(doc.querySelector('#launch-error').innerHTML, /2 个任务运行中，<br class="notice-break">5 个在排队<br>（最多同时运行 2 个，<br class="notice-break">最多排队 5 个）。<br>等排队的任务开始后再启动。/);
     assert.match(doc.querySelector('#launch-dialog').textContent, /你填写的设置都保留着/);
     assert.deepEqual([...doc.querySelectorAll('#launch-dialog .button')].map((b) => b.textContent), ['返回修改', '查看状态']);
     assert.ok(doc.querySelector('#launch-open-runs').classList.contains('button--primary'));
@@ -1299,6 +2798,20 @@ test('a full queue says 队列已满 with 返回修改 / 查看状态 and keeps 
     await ui.click('#launch-open-runs');
     await settleMany();
     assert.equal(ui.ui.state.page, 'runs');
+  } finally { ui.dom.window.close(); }
+});
+
+test('a full queue keeps 最多, 可以 and 一个 together on narrow and wide breaks', async () => {
+  const reason = '队列已满：1 个任务运行中，1 个停止中，5 个在排队（最多同时运行 2 个，最多排队 5 个）。等排队的任务开始后再启动，也可以在查看状态里取消一个排队的任务。';
+  const ui = await setup({'/api/runs': (options) => options.method ? {__status: 409, body: {error: reason}} : {run: null, progress: {}}});
+  try {
+    await fillToReview(ui);
+    await ui.click('#run-analysis');
+    await settleMany();
+    const error = ui.doc.querySelector('#launch-error');
+    assert.equal(error.textContent, '1 个任务运行中，1 个停止中，5 个在排队（最多同时运行 2 个，最多排队 5 个）。等排队的任务开始后再启动，也可以在查看状态里取消一个排队的任务。');
+    assert.equal(error.innerHTML, '1 个任务运行中，<br class="notice-break">1 个停止中，<br class="notice-break">5 个在排队<br>（最多同时运行 2 个，<br class="notice-break">最多排队 5 个）。<br>等排队的任务开始后再启动，<br>也可以在查看状态里取消一个排队的任务。');
+    assert.doesNotMatch(error.innerHTML, /也可以<br|取消一<br|最多同<br|查<br>看/);
   } finally { ui.dom.window.close(); }
 });
 
@@ -2175,6 +3688,7 @@ test('W43: a capped run list says how many runs it leaves out; counts stay whole
   try {
     await ui.click('[data-page=runs]');
     assert.match(ui.doc.querySelector('#runs-cap').textContent, /只显示最近 30 个任务（共 43 个）/);
+    assert.match(ui.doc.querySelector('#runs-cap').innerHTML, /个）；<br class="notice-break">上方计数包含全部任务。/);
     assert.match(ui.doc.querySelector('#run-filters [data-filter=all]').textContent, /43/);
   } finally { ui.dom.window.close(); }
   const whole = await setup({'/api/runs': {...multiRuns(), listing: {shown: 6, total: 6, limit: 30, truncated: false}}});
@@ -2287,6 +3801,35 @@ test('W44: a refused backtest scrolls its alert into view', async () => {
     await ui.click('#start-backtest');
     assert.ok(scrolled.includes('backtest-result'), JSON.stringify(scrolled));
     assert.doesNotMatch(ui.doc.querySelector('#backtest-result').textContent, /already running/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a config save without a saved flag is not called saved', async () => {
+  const ui = await setup({'/api/config': (options) => options.method === 'POST'
+    ? {zh: '已保存'}
+    : {saved: {}, keys: [{provider: 'openai', configured: false, env_var: 'OPENAI_API_KEY'}], data_env: [], cloud_env: []}});
+  try {
+    await ui.click('[data-page=models]');
+    ui.doc.querySelector('#model-advanced').open = true;
+    await ui.click('#model-advanced-form button[type=submit]');
+    await settleMany();
+    const note = ui.doc.querySelector('#model-advanced-feedback');
+    assert.match(note.textContent, /不把它写成已保存/);
+    assert.doesNotMatch(note.textContent, /^已保存/);
+    assert.doesNotMatch(ui.doc.body.textContent, /undefined/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a config save marked saved still says it was saved', async () => {
+  const ui = await setup({'/api/config': (options) => options.method === 'POST'
+    ? {saved: true, config: {}}
+    : {saved: {}, keys: [{provider: 'openai', configured: false, env_var: 'OPENAI_API_KEY'}], data_env: [], cloud_env: []}});
+  try {
+    await ui.click('[data-page=models]');
+    ui.doc.querySelector('#model-advanced').open = true;
+    await ui.click('#model-advanced-form button[type=submit]');
+    await settleMany();
+    assert.match(ui.doc.querySelector('#model-advanced-feedback').textContent, /^已保存/);
   } finally { ui.dom.window.close(); }
 });
 
@@ -2414,6 +3957,22 @@ test('W83: a ticker made only of zero-width characters is empty in the wizard', 
   } finally { ui.dom.window.close(); }
 });
 
+test('W122: tag and musical format characters are invisible for ticker validation', async () => {
+  const ui = await setup({'/api/runs': (options) => options.method ? {id: 'fixture-run'} : {run: null, progress: {}}});
+  try {
+    const invisible = '\u{e0001}\u{1d173}';
+    ui.fill('#ticker', invisible); ui.fill('#date', '2026-10-01');
+    await ui.click('#step-next');
+    assert.equal(ui.ui.state.step, 1, 'only tag/format characters cannot advance');
+    assert.match(ui.doc.querySelector('#form-note').textContent, /标的代码/);
+    assert.equal(ui.calls.filter((item) => item.path === '/api/runs' && item.method === 'POST').length, 0);
+
+    ui.fill('#ticker', `N${'\u{e0001}'}V${'\u{1d173}'}DA`);
+    await ui.click('#step-next');
+    assert.equal(ui.ui.state.step, 2, 'visible NVDA remains valid when format characters are interleaved');
+  } finally { ui.dom.window.close(); }
+});
+
 // V2-KLINE-RT: the K 线行情 page polls the newest bar only while visible.
 async function klineSetup(asset, pollSeconds, klineRoute, extraRoutes = {}) {
   const bars = [{time: 1761955200, open: 10, high: 11, low: 9, close: 10.5, volume: 5}, {time: 1762041600, open: 10.5, high: 12, low: 10, close: 11, volume: 6}];
@@ -2424,7 +3983,8 @@ async function klineSetup(asset, pollSeconds, klineRoute, extraRoutes = {}) {
     ...extraRoutes,
   });
   const updates = [];
-  const series = {setData() {}, update: (p) => updates.push(p), priceScale: () => ({applyOptions() {}})};
+  const setDataCalls = [];
+  const series = {setData: (p) => setDataCalls.push(p), update: (p) => updates.push(p), priceScale: () => ({applyOptions() {}})};
   ui.window.LightweightCharts = {createChart: () => ({addCandlestickSeries: () => series, addHistogramSeries: () => series,
     timeScale: () => ({fitContent() {}, subscribeVisibleLogicalRangeChange() {}, setVisibleLogicalRange() {}}), subscribeCrosshairMove() {}, remove() {}})};
   let visibility = 'visible';
@@ -2437,7 +3997,7 @@ async function klineSetup(asset, pollSeconds, klineRoute, extraRoutes = {}) {
   const setVisible = async (value) => { visibility = value; ui.doc.dispatchEvent(new ui.window.Event('visibilitychange')); await flush(); };
   await ui.click('.nav-item[data-page=kline]'); await flush();
   const latestCalls = () => ui.calls.filter((c) => c.path.startsWith('/api/kline/latest')).length;
-  return {...ui, updates, timers, runTimers, setVisible, latestCalls};
+  return {...ui, updates, setDataCalls, timers, runTimers, setVisible, latestCalls};
 }
 
 test('K 线行情 stock/metal polls every 60 s as 知情 and pauses while the tab is hidden (V2-KLINE-RT)', async () => {
@@ -2451,6 +4011,8 @@ test('K 线行情 stock/metal polls every 60 s as 知情 and pauses while the ta
     assert.deepEqual([...ui.timers.values()].map((t) => t.ms), [60000]);
     assert.match(ui.doc.querySelector('#kline-live').textContent, /知情.*60 秒/);
     assert.match(ui.doc.querySelector('#kline-note').textContent, /知情.*延时行情.*不是逐笔/);
+    assert.doesNotMatch(ui.doc.querySelector('#kline-note').textContent, /可能未更新/);
+    assert.doesNotMatch(ui.doc.querySelector('#kline-live').textContent, /可能未更新/);
     await ui.setVisible('hidden');
     assert.equal(ui.timers.size, 0, 'hidden: no poll scheduled');
     assert.match(ui.doc.querySelector('#kline-live').textContent, /已暂停/);
@@ -2460,6 +4022,78 @@ test('K 线行情 stock/metal polls every 60 s as 知情 and pauses while the ta
     assert.deepEqual([...ui.timers.values()].map((t) => t.ms), [0], 'visible again: polls at once');
     await ui.runTimers();
     assert.equal(ui.latestCalls(), 2);
+  } finally { ui.dom.window.close(); }
+});
+
+test('K 线可能未更新写在页脚和实时标记上，没有这条说明时不编造', async () => {
+  const ui = await klineSetup('stock', 60, {
+    symbol: '600519', canonical: '600519.SS', asset_type: 'stock', tf: '1D', provider: 'yahoo',
+    provider_symbol: '600519.SS', freshness_note: '可能未更新', history_label: '近1年',
+    bars: [{time: 1761955200, open: 10, high: 11, low: 9, close: 10.5, volume: 5}, {time: 1762041600, open: 10.5, high: 12, low: 10, close: 11, volume: 6}],
+  }, {
+    '/api/kline/latest': {
+      asset_type: 'stock', poll_seconds: 60, delayed: true, freshness_note: '可能未更新',
+      market_state: 'open', provider: 'yahoo', provider_symbol: '600519.SS',
+      bar: {time: 1762041600, open: 10.5, high: 13, low: 10, close: 12.5, volume: 9},
+    },
+  });
+  try {
+    const note = ui.doc.querySelector('#kline-note').textContent;
+    const live = ui.doc.querySelector('#kline-live').textContent;
+    assert.match(note, /可能未更新/);
+    assert.match(live, /知情/);
+    assert.match(live, /询问/);
+    assert.match(live, /可能未更新/);
+    assert.doesNotMatch(live, /秒更新/);
+    assert.doesNotMatch(live, /实时/);
+    assert.doesNotMatch(ui.doc.querySelector('#page').textContent, /Yahoo|yahoo/);
+    await ui.runTimers();
+    assert.match(ui.doc.querySelector('#kline-live').textContent, /可能未更新/);
+    assert.doesNotMatch(ui.doc.querySelector('#kline-live').textContent, /Yahoo|yahoo/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('crypto Yahoo fallback is not called realtime', async () => {
+  const ui = await klineSetup('crypto', 5, {
+    symbol: 'BTC-USDT', canonical: 'BTC-USD', asset_type: 'crypto', tf: '1D', provider: 'yahoo',
+    provider_symbol: 'BTC-USD', delayed: true, history_label: '近1年',
+    bars: [{time: 1761955200, open: 10, high: 11, low: 9, close: 10.5, volume: 5}, {time: 1762041600, open: 10.5, high: 12, low: 10, close: 11, volume: 6}],
+  }, {
+    '/api/kline/latest': {
+      asset_type: 'crypto', poll_seconds: 5, delayed: true, provider: 'yahoo', provider_symbol: 'BTC-USD',
+      bar: {time: 1762041600, open: 10.5, high: 13, low: 10, close: 12.5, volume: 9},
+    },
+  });
+  try {
+    const live = ui.doc.querySelector('#kline-live').textContent;
+    assert.match(live, /备用行情，不是逐笔实时/);
+    assert.doesNotMatch(live, /实时 ·|约 5 秒更新/);
+    assert.doesNotMatch(ui.doc.querySelector('#page').textContent, /Yahoo|yahoo/);
+    assert.match(ui.doc.querySelector('#kline-note').textContent, /不是逐笔实时/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('crypto without a delayed field is not called realtime', async () => {
+  const ui = await klineSetup('crypto', 5, {
+    symbol: 'BTC-USDT', canonical: 'BTC-USD', asset_type: 'crypto', tf: '1D', provider: 'okx',
+    provider_symbol: 'BTC-USDT', history_label: '近1年',
+    bars: [{time: 1761955200, open: 10, high: 11, low: 9, close: 10.5, volume: 5}, {time: 1762041600, open: 10.5, high: 12, low: 10, close: 11, volume: 6}],
+  }, {
+    '/api/kline/latest': {
+      asset_type: 'crypto', poll_seconds: 5, provider: 'okx', provider_symbol: 'BTC-USDT',
+      bar: {time: 1762041600, open: 10.5, high: 13, low: 10, close: 12.5, volume: 9},
+    },
+  });
+  try {
+    const live = ui.doc.querySelector('#kline-live').textContent;
+    const note = ui.doc.querySelector('#kline-note').textContent;
+    assert.match(live, /延时未知，不写成实时/);
+    assert.match(note, /延时未知，不写成实时/);
+    assert.doesNotMatch(live, /实时 ·|约 5 秒更新/);
+    assert.doesNotMatch(note, /最后一根约每 5 秒刷新/);
+    await ui.runTimers();
+    assert.match(ui.doc.querySelector('#kline-live').textContent, /延时未知，不写成实时/);
+    assert.doesNotMatch(ui.doc.querySelector('#kline-live').textContent, /实时 ·/);
   } finally { ui.dom.window.close(); }
 });
 
@@ -2474,6 +4108,345 @@ test('K 线行情 crypto polls about every 5 s and stops when leaving the page (
     await ui.runTimers();
     assert.equal(ui.latestCalls(), 1, 'a timer firing after leaving the page does not poll');
     assert.equal(ui.timers.size, 0);
+  } finally { ui.dom.window.close(); }
+});
+
+test('启动分析第 2 步可以导入本地 CSV/JSON，清除后不再带入', async () => {
+  const ui = await setup({}, {url: WIZARD_URL});
+  try {
+    const doc = ui.doc;
+    assert.ok(doc.querySelector('#local-import-file'), 'the import control is in the wizard');
+    assert.match(doc.querySelector('#local-import-details').textContent, /不会联网抓取/);
+    ui.ui.state.localImport = {filename: 'notes.csv', count: 2, items: [{title: 'a'}, {title: 'b'}]};
+    ui.ui.state.form.analysts = ['market'];
+    ui.ui.state.step = 2;
+    assert.match(ui.window.analysisStepError(), /未选新闻分析师/);
+    ui.ui.state.form.analysts = ['news'];
+    assert.equal(ui.window.analysisStepError(), '');
+    assert.deepEqual(ui.window.readForm().local_import, [{title: 'a'}, {title: 'b'}]);
+    doc.querySelector('#local-import-clear').click();
+    assert.equal(ui.ui.state.localImport, null);
+    assert.equal(ui.window.readForm().local_import, undefined);
+  } finally { ui.dom.window.close(); }
+});
+
+test('顶栏模型状态按可用宽度显示，不再固定裁成 160px', async () => {
+  const ui = await setup();
+  try {
+    const rule = styleRules(ui.window).find((item) => selectorMatches(item, '.topbar-identity strong'));
+    assert.equal(normalizeCssValue(rule.style.maxWidth), '100%');
+    assert.equal(ui.window.klineErrorText('VendorUnavailableError: boom'), '行情源暂时连不上，请稍后再试。');
+    assert.equal(ui.window.klineErrorText('Failed to fetch'), '行情源暂时连不上，请稍后再试。');
+    assert.equal(ui.window.klineErrorText('行情源暂时连不上（BTC-USD），请稍后再试。'), '行情源暂时连不上（BTC-USD），请稍后再试。');
+  } finally { ui.dom.window.close(); }
+});
+
+test('K 线轮询失败不把异常类名写进页面', async () => {
+  const ui = await klineSetup('crypto', 5, null, {
+    '/api/kline/latest': {__status: 502, body: {error: 'VendorUnavailableError: boom'}},
+  });
+  try {
+    await ui.runTimers();
+    const live = ui.doc.querySelector('#kline-live').textContent;
+    assert.match(live, /更新失败/);
+    assert.match(live, /行情源暂时连不上/);
+    assert.doesNotMatch(live, /VendorUnavailableError|boom/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('K 线价格轴比成交量轴宽时，两边锁成同一宽度', async () => {
+  const bars = [{time: 1761955200, open: 70000, high: 76000, low: 69000, close: 73125.85, volume: 5}];
+  const ui = await setup({
+    '/api/kline': {symbol: 'BTC-USDT', canonical: 'BTC-USD', asset_type: 'crypto', tf: '1D', provider: 'coinbase', provider_symbol: 'BTC-USD', is_future: false, bars},
+    '/api/kline/latest': {asset_type: 'crypto', poll_seconds: 5, delayed: false, bar: bars[0]},
+  });
+  const applied = [];
+  const widths = [84, 72];
+  let n = 0;
+  ui.window.LightweightCharts = {createChart: () => {
+    const index = n++;
+    const scale = {
+      width: () => widths[index],
+      applyOptions(opts) { applied.push({index, minimumWidth: opts.minimumWidth}); if (opts.minimumWidth) widths[index] = opts.minimumWidth; },
+    };
+    return {
+      addCandlestickSeries: () => ({setData() {}, update() {}}),
+      addHistogramSeries: () => ({setData() {}, update() {}}),
+      timeScale: () => ({fitContent() {}, subscribeVisibleLogicalRangeChange() {}, setVisibleLogicalRange() {}, getVisibleLogicalRange: () => ({from: 0, to: 1})}),
+      subscribeCrosshairMove() {},
+      priceScale: () => scale,
+      remove() {},
+    };
+  }};
+  try {
+    await ui.click('.nav-item[data-page=kline]');
+    assert.deepEqual(applied.map((item) => item.minimumWidth), [84, 84]);
+    assert.equal(widths[0], 84);
+    assert.equal(widths[1], 84);
+    applied.length = 0;
+    ui.window.syncKlineScales();
+    assert.equal(applied.length, 0, 'already equal widths are not rewritten');
+  } finally { ui.dom.window.close(); }
+});
+
+test('K 线行情周线以完整日线重算成交量，重复轮询不累计 (AUDIT-FIX-05)', async () => {
+  const daily = [
+    {time: 1761955200, open: 10, high: 11, low: 9, close: 10.5, volume: 5},
+    {time: 1762041600, open: 10.5, high: 12, low: 10, close: 11, volume: 6},
+  ];
+  const week = {time: daily[0].time, open: 10, high: 12, low: 9, close: 11, volume: 11};
+  const replies = [
+    {time: daily[1].time, open: 10.5, high: 13, low: 10, close: 12.5, volume: 9},
+    {time: daily[1].time, open: 10.5, high: 13, low: 10, close: 12.5, volume: 9},
+  ];
+  const ui = await klineSetup('stock', 60, {
+    symbol: 'X', canonical: 'X', asset_type: 'stock', tf: '1W', provider: 'yahoo', provider_symbol: 'X',
+    is_future: false, bars: [week], daily_bars: daily,
+  }, {'/api/kline/latest': () => ({asset_type: 'stock', poll_seconds: 60, delayed: true, bar: replies.shift() || replies[0]})});
+  try {
+    await ui.runTimers();
+    const volumeUpdates = ui.updates.filter((item) => Object.prototype.hasOwnProperty.call(item, 'value'));
+    assert.equal(volumeUpdates.at(-1).value, 14, '5 + forming-day replacement 9');
+    await ui.runTimers();
+    const repeated = ui.updates.filter((item) => Object.prototype.hasOwnProperty.call(item, 'value'));
+    assert.equal(repeated.at(-1).value, 14, 'same forming bar is replaced, not added');
+  } finally { ui.dom.window.close(); }
+});
+
+test('K 线行情跨日恢复请求完整日线并补齐缺失 bar (AUDIT-FIX-05)', async () => {
+  const initial = [{time: 1761955200, open: 10, high: 11, low: 9, close: 10.5, volume: 5}];
+  const recovered = [
+    ...initial,
+    {time: 1762041600, open: 10.5, high: 12, low: 10, close: 11, volume: 6},
+    {time: 1762128000, open: 11, high: 13, low: 10.5, close: 12, volume: 7},
+    {time: 1762214400, open: 12, high: 14, low: 11, close: 13, volume: 8},
+  ];
+  let historyCalls = 0;
+  const ui = await klineSetup('stock', 60, async (_options, path) => {
+    if (path.includes('refresh=1')) {
+      historyCalls += 1;
+      return {symbol: 'X', canonical: 'X', asset_type: 'stock', tf: '1D', provider: 'yahoo', provider_symbol: 'X', is_future: false, bars: recovered, daily_bars: recovered};
+    }
+    return {symbol: 'X', canonical: 'X', asset_type: 'stock', tf: '1D', provider: 'yahoo', provider_symbol: 'X', is_future: false, bars: initial, daily_bars: initial};
+  }, {'/api/kline/latest': {asset_type: 'stock', poll_seconds: 60, delayed: true, bar: recovered.at(-1)}});
+  try {
+    await ui.runTimers();
+    assert.equal(historyCalls, 1, 'a multi-day gap refreshes complete history');
+    const latestVolumeData = ui.setDataCalls.filter((items) => items.length === recovered.length && items[0].value !== undefined).at(-1);
+    assert.deepEqual(Array.from(latestVolumeData, (item) => item.value), [5, 6, 7, 8]);
+  } finally { ui.dom.window.close(); }
+});
+
+test('K 线月线 OHLCV 等于完整日线重采样，重复轮询不累计 (NEXT-KLINE-VERIFY)', async () => {
+  const daily = [
+    {time: 1761955200, open: 10, high: 12, low: 9, close: 11, volume: 5},
+    {time: 1762041600, open: 11, high: 13, low: 10, close: 12, volume: 6},
+  ];
+  const month = {time: daily[0].time, open: 10, high: 13, low: 9, close: 12, volume: 11};
+  const forming = {time: daily[1].time, open: 11, high: 14, low: 10, close: 13, volume: 8};
+  const ui = await klineSetup('stock', 60, {
+    symbol: 'X', canonical: 'X', asset_type: 'stock', tf: '1M', provider: 'yahoo', provider_symbol: 'X',
+    is_future: false, bars: [month], daily_bars: daily,
+  }, {'/api/kline/latest': () => ({asset_type: 'stock', poll_seconds: 60, delayed: true, bar: forming})});
+  try {
+    await ui.runTimers();
+    await ui.runTimers();
+    const volume = ui.updates.filter((item) => Object.prototype.hasOwnProperty.call(item, 'value')).at(-1);
+    const candle = ui.updates.filter((item) => Object.prototype.hasOwnProperty.call(item, 'close')).at(-1);
+    assert.equal(volume.value, 13, '5 + replaced forming day 8, not 5+6+8');
+    assert.equal(candle.open, 10);
+    assert.equal(candle.high, 14);
+    assert.equal(candle.low, 9);
+    assert.equal(candle.close, 13);
+  } finally { ui.dom.window.close(); }
+});
+
+test('K 线暂停跨周后恢复会补齐，过时响应不回滚 (NEXT-KLINE-VERIFY)', async () => {
+  const initial = [{time: 1761955200, open: 10, high: 11, low: 9, close: 10.5, volume: 5}];
+  const recovered = [
+    ...initial,
+    {time: 1762214400, open: 12, high: 14, low: 11, close: 13, volume: 8},
+  ];
+  let historyCalls = 0;
+  let latest = {time: 1761868800, open: 9, high: 10, low: 8, close: 9.5, volume: 4};
+  const ui = await klineSetup('stock', 60, async (_options, path) => {
+    if (path.includes('refresh=1')) {
+      historyCalls += 1;
+      return {symbol: 'X', canonical: 'X', asset_type: 'stock', tf: '1W', provider: 'yahoo', provider_symbol: 'X', is_future: false, bars: recovered, daily_bars: recovered};
+    }
+    return {symbol: 'X', canonical: 'X', asset_type: 'stock', tf: '1W', provider: 'yahoo', provider_symbol: 'X', is_future: false, bars: initial, daily_bars: initial};
+  }, {'/api/kline/latest': () => ({asset_type: 'stock', poll_seconds: 60, delayed: true, bar: latest})});
+  try {
+    await ui.runTimers();
+    assert.equal(historyCalls, 0, 'an older bar is not a gap');
+    const before = ui.updates.filter((item) => Object.prototype.hasOwnProperty.call(item, 'value')).at(-1)?.value;
+    assert.equal(before, undefined, 'stale bar does not replace the drawn week');
+    latest = {time: 1762214400, open: 12, high: 14, low: 11, close: 13, volume: 8};
+    await ui.setVisible('hidden');
+    await ui.setVisible('visible');
+    await ui.runTimers();
+    assert.equal(historyCalls, 1, 'a paused cross-week gap refreshes complete history');
+    const volumes = ui.setDataCalls.filter((items) => items[0] && items[0].value !== undefined).at(-1);
+    assert.deepEqual(Array.from(volumes, (item) => item.value), [5, 8]);
+  } finally { ui.dom.window.close(); }
+});
+
+test('K 线新周期不并入上一周，断网后下一轮恢复 (NEXT-KLINE-VERIFY)', async () => {
+  const sunday = 1762041600;
+  const monday = sunday + 86400;
+  const daily = [{time: sunday, open: 10, high: 11, low: 9, close: 10.5, volume: 6}];
+  let fail = true;
+  const ui = await klineSetup('stock', 60, {
+    symbol: 'X', canonical: 'X', asset_type: 'stock', tf: '1W', provider: 'yahoo', provider_symbol: 'X',
+    is_future: false, bars: [{time: sunday, open: 10, high: 11, low: 9, close: 10.5, volume: 6}], daily_bars: daily,
+  }, {'/api/kline/latest': () => {
+    if (fail) { fail = false; throw new Error('网络中断'); }
+    return {asset_type: 'stock', poll_seconds: 60, delayed: true, bar: {time: monday, open: 11, high: 12, low: 10, close: 11.5, volume: 7}};
+  }});
+  try {
+    await ui.runTimers();
+    assert.match(ui.doc.querySelector('#kline-live').textContent, /更新失败/);
+    await ui.runTimers();
+    const candle = ui.updates.filter((item) => Object.prototype.hasOwnProperty.call(item, 'close')).at(-1);
+    const volume = ui.updates.filter((item) => Object.prototype.hasOwnProperty.call(item, 'value')).at(-1);
+    assert.equal(candle.time, monday);
+    assert.equal(candle.volume, undefined);
+    assert.equal(volume.value, 7, 'the new week is its own bar, not 6+7');
+    assert.match(ui.doc.querySelector('#kline-live').textContent, /知情/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the stop confirm does not split 保留 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    ui.window.confirmAction('停止当前分析？', '会停止当前任务，已产生的结果是否保留取决于任务进度。', () => {}, ui.doc.body);
+    const body = ui.doc.querySelector('#confirm-body');
+    assert.equal(body.textContent, '会停止当前任务，已产生的结果是否保留取决于任务进度。');
+    assert.match(body.innerHTML, /任务，<br class="notice-break">已产生的结果是否保留<br class="notice-break">取决于任务进度。/);
+    assert.doesNotMatch(body.innerHTML, /进<br/);
+    assert.doesNotMatch(body.innerHTML, /保<br/);
+    assert.match(body.innerHTML, /保留<br class="notice-break">取决于/);
+    assert.doesNotMatch(body.textContent, /已经停止|结果已保留/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the logout confirm does not split 授权 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    ui.window.confirmAction('退出这个订阅？', '本机凭据会被清除。是否撤销服务端授权，以接口返回为准。', () => {}, ui.doc.body);
+    const body = ui.doc.querySelector('#confirm-body');
+    assert.equal(body.textContent, '本机凭据会被清除。是否撤销服务端授权，以接口返回为准。');
+    assert.match(body.innerHTML, /清除。<br class="notice-break">是否撤销服务端授权，<br class="notice-break">以接口返回为准。/);
+    assert.doesNotMatch(body.innerHTML, /授<br|权<br/);
+    assert.doesNotMatch(body.textContent, /已经清除|授权已撤销/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the retry hint does not split 重试 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    ui.window.paintReview();
+    ui.doc.querySelector('#open-save-drawer').click();
+    const hint = ui.doc.querySelector('#retry-hint');
+    assert.equal(hint.textContent, '只在超时、断网和服务端出错时重试，不会因为登录失效反复重试。');
+    assert.match(hint.innerHTML, /重试，<br class="notice-break">不会因为登录失效反复重试。/);
+    assert.doesNotMatch(hint.innerHTML, /重<br|试<br/);
+    assert.doesNotMatch(hint.textContent, /已经重试|登录已失效/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the launch review does not split 展开 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    ui.window.paintReview();
+    const row = [...ui.doc.querySelectorAll('#analysis-summary .kv div, #analysis-summary dt')];
+    const report = [...ui.doc.querySelectorAll('#analysis-summary dd')].find((item) => item.textContent.includes('展开全文'));
+    assert.ok(report, 'report summary');
+    assert.equal(report.textContent, '保存 Markdown 和 HTML，完成后展开全文');
+    assert.match(report.innerHTML, /HTML，<br class="notice-break">完成后展开全文/);
+    assert.doesNotMatch(report.innerHTML, /展<br|开<br/);
+    assert.doesNotMatch(report.textContent, /已经展开|报告已改/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the progress source note does not split 状态 on a narrow screen', async () => {
+  const run = {id: 'probe-idle', status: 'finished', kind: 'analysis', ticker: 'NVDA', date: '2026-11-12', selections: {ticker: 'NVDA', date: '2026-11-12'}};
+  const ui = await setup({'/api/runs': {run, runs: [run], progress: {agents: [{role: 'market', zh: '市场分析师', status: 'completed', team_zh: '分析师'}]}, result: {present: false}}});
+  try {
+    await openRunFromList(ui, 'probe-idle');
+    const note = ui.doc.querySelector('#progress-source-note');
+    assert.match(note.textContent, /^详细列：/);
+    assert.match(note.textContent, /。状态：等待 pending、进行中 in_progress、完成 completed、错误 error。$/);
+    assert.match(note.innerHTML, /。<br class="notice-break">状态：等待 pending、进行中 in_progress、完成 completed、错误 error。/);
+    assert.doesNotMatch(note.innerHTML, /状<br/);
+    assert.doesNotMatch(note.textContent, /已经完成计时|状态已改/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the tier role note does not split 服务 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    const note = ui.doc.querySelector('#tier-role-note');
+    assert.equal(note.textContent, '快模型负责资料分析与辩论，深模型负责综合判断。可使用同一服务中的不同模型。');
+    assert.match(note.innerHTML, /辩论，<br class="notice-break">深模型负责综合判断。<br class="notice-break">可使用同一服务中的不同模型。/);
+    assert.doesNotMatch(note.innerHTML, /服<br|务<br/);
+    assert.doesNotMatch(note.textContent, /已经选择|模型已改/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the local import hint does not split 内容 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    const hint = ui.doc.querySelector('#local-import-hint');
+    assert.equal(hint.textContent, '只读取你自己导出的文件，不会联网抓取。新闻分析师会把内容当作证据，报告标明「本地导入」。');
+    assert.match(hint.innerHTML, /文件，<br class="notice-break">不会联网抓取。<br class="notice-break">新闻分析师会把内容当作证据，<br class="notice-break">/);
+    assert.doesNotMatch(hint.innerHTML, /内<br|容<br/);
+    assert.doesNotMatch(hint.textContent, /已经导入|已经联网/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the info crawl page note does not split 网站 on a narrow screen', async () => {
+  const ui = await setup({
+    '/api/frameworks': {...FRAMEWORKS, tools: [{id: 'info-crawl', name: '信息抓取', description: '官方来源', icon: '/icons/logo.svg', tags: ['公告'], tool: true}]},
+    '/api/info-crawl/sources': {inject_default: false, existing: [], sources: []},
+  }, {url: 'http://localhost/#start'});
+  try {
+    await ui.click('.fw[data-framework="info-crawl"]');
+    for (let i = 0; i < 6; i++) await settle();
+    const note = ui.doc.querySelector('#info-crawl-note');
+    assert.equal(note.textContent, '只读官方公开接口和新闻稿 RSS，不登录、不抓社交网站。结果仅供个人研究参考，抓取条目保留 30 天后自动清理。');
+    assert.match(note.innerHTML, /RSS，<br class="notice-break">不登录、不抓社交网站。<br class="notice-break">结果仅供个人研究参考，<br>抓取条目保留 30 天后自动清理。/);
+    assert.doesNotMatch(note.innerHTML, /清<br/);
+    assert.doesNotMatch(note.innerHTML, /网<br|站<br/);
+    assert.doesNotMatch(note.textContent, /已经清理|已经登录/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the model refusal note does not split 两项 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    await ui.click('[data-page=models]');
+    ui.doc.querySelector('#model-advanced').open = true;
+    const note = ui.doc.querySelector('#model-refusal-note');
+    assert.equal(note.textContent, '当前快模型和深模型都不是 ChatGPT 订阅，这两项会照常发送。');
+    assert.match(note.innerHTML, /订阅，<br class="notice-break">这两项会照常发送。/);
+    assert.doesNotMatch(note.innerHTML, /两<br|项<br/);
+    assert.doesNotMatch(note.textContent, /已经发送|订阅已改/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the info crawl card does not split 财政部 on a narrow screen', async () => {
+  const description = '从官方公开来源（SEC 公告、交易所公告、央行与财政部新闻稿、GDELT 新闻索引）汇总资讯，可勾选「带入分析」。';
+  const ui = await setup({
+    '/api/frameworks': {...FRAMEWORKS, tools: [{id: 'info-crawl', name: '信息抓取', description, icon: '/icons/logo.svg', tags: ['公告'], tool: true}]},
+  }, {url: 'http://localhost/#start'});
+  try {
+    const card = ui.doc.querySelector('.fw[data-framework="info-crawl"] .fw-d');
+    assert.equal(card.textContent, description);
+    assert.match(card.innerHTML, /公告、<br>交易所公告、<br>央行与财政部新闻稿、/);
+    assert.doesNotMatch(card.innerHTML, /notice-break/);
+    assert.doesNotMatch(card.innerHTML, /财<br|政<br/);
+    assert.doesNotMatch(card.textContent, /已经汇总|来源已改/);
   } finally { ui.dom.window.close(); }
 });
 
@@ -2534,6 +4507,1501 @@ test('信息抓取: card on 启动分析, gray unavailable source, 不可用 sta
     await click('#info-attach-clear');
     assert.deepEqual(JSON.parse(JSON.stringify(ui.window.withInfoAttach({ticker: 'NVDA'}))), {ticker: 'NVDA'});
     assert.equal(runBody, null);
+  } finally { ui.window.close(); }
+});
+
+test('AUDIT-CHECK-02 / W214: no-news hint sits on its own line and follows the final analyst list', async () => {
+  const ui = await setup();
+  try {
+    const {doc} = ui;
+    ui.ui.state.infoAttach = {job: 'ic-20261103-abcdef12', keyword: 'NVDA', items: ['aaaaaaaaaaaaaaaa']};
+    ui.ui.state.form.analysts = ['market'];
+    const host = doc.createElement('div');
+    doc.body.append(host);
+    host.innerHTML = ui.window.uiTest.infoAttachHtml();
+    const hint = () => doc.querySelector('#info-attach-nonews');
+    assert.equal(hint().hidden, false);
+    assert.equal(hint().textContent, '未选新闻分析师，附件不会被使用。', "Eric's wording with the period");
+    assert.equal(hint().parentElement.id, 'info-attach');
+    assert.match(doc.querySelector('#info-attach').innerHTML, /<br class="notice-break">报告会附来源引用。/, "Eric's notice-break kept");
+    assert.doesNotMatch(doc.querySelector('#info-attach').textContent, /本次未带入/, 'no extra unused-count clause');
+    ui.ui.state.form.analysts = ['market', 'news'];
+    ui.window.refreshInfoAttachHint();
+    assert.equal(hint().hidden, true);
+    assert.equal(hint().textContent, '');
+    ui.ui.state.envSkipped = {...(ui.ui.state.envSkipped || {}), analysts: ['market']};
+    ui.window.refreshInfoAttachHint();
+    assert.equal(hint().hidden, false, 'env override without news shows the hint');
+    ui.ui.state.form.analysts = ['market'];
+    ui.ui.state.envSkipped = {...ui.ui.state.envSkipped, analysts: ['news']};
+    ui.window.refreshInfoAttachHint();
+    assert.equal(hint().hidden, true, 'env override adding news hides it');
+    delete ui.ui.state.envSkipped.analysts;
+    // W218: the page never gates start on the hint; the attach still travels and the server decides.
+    ui.ui.state.form.analysts = ['market'];
+    assert.deepEqual(JSON.parse(JSON.stringify(ui.window.withInfoAttach({ticker: 'NVDA'}))).info_inject, ['aaaaaaaaaaaaaaaa']);
+    const css = readFileSync(resolve(root, 'webui/static/app.css'), 'utf8');
+    assert.match(css, /#info-attach-nonews \{ display: block; margin-top: 6px; \}/);
+    assert.match(css, /#info-attach-nonews\[hidden\] \{ display: none !important; \}/);
+  } finally { ui.window.close(); }
+});
+
+test('W218: 配置检查 sends attach like start; page never refuses for missing ticks', async () => {
+  // Setup page validate uses withInfoAttach (same payload as start). Existence of
+  // ticked rows is the server's job; without news the server must allow start.
+  let validateBody = null;
+  const ui = await setup({
+    '/api/runs/validate': (options) => { validateBody = JSON.parse(options.body); return {ok: true, ignored: []}; },
+  });
+  try {
+    const {doc, click} = ui;
+    ui.ui.state.infoAttach = {job: 'ic-20261103-abcdef12', keyword: 'NVDA', items: ['aaaaaaaaaaaaaaaa']};
+    ui.ui.state.form.analysts = ['market'];
+    ui.window.showStep(4);
+    for (let i = 0; i < 4; i++) await settle();
+    assert.equal(doc.querySelector('#check-analysis').hidden, false);
+    await click('#check-analysis');
+    for (let i = 0; i < 4; i++) await settle();
+    assert.ok(validateBody, 'validate was called');
+    assert.equal(validateBody.info_crawl_job, 'ic-20261103-abcdef12');
+    assert.deepEqual(validateBody.info_inject, ['aaaaaaaaaaaaaaaa']);
+    assert.ok(!/已找不到|附件已失效/.test(String(doc.querySelector('#form-note')?.textContent || '')),
+      'page does not invent a missing-items refusal');
+    validateBody = null;
+    ui.ui.state.envSkipped = {...(ui.ui.state.envSkipped || {}), analysts: ['market']};
+    ui.ui.state.form.analysts = ['market', 'news'];
+    assert.equal(ui.window.infoAttachUnused(), true);
+    await click('#check-analysis');
+    for (let i = 0; i < 4; i++) await settle();
+    assert.deepEqual(validateBody.info_inject, ['aaaaaaaaaaaaaaaa']);
+  } finally { ui.window.close(); }
+});
+
+test('K 线行情: Yahoo is never named in the source pill; period word follows the timeframe (W201, Eric rule)', async () => {
+  const bars = [{time: 1761955200, open: 10, high: 11, low: 9, close: 10.5, volume: 5}];
+  let resp = {symbol: 'NVDA', canonical: 'NVDA', asset_type: 'stock', tf: '1D', provider: 'yahoo', provider_symbol: 'NVDA', source_label: null, fallback: false, adjusted: true, bars, daily_bars: bars};
+  const ui = await klineSetup('stock', 60, async (options, path) => ({...resp, tf: (new URLSearchParams(path.split('?')[1] || '').get('tf') || resp.tf)}));
+  try {
+    const doc = ui.doc;
+    const flush = async () => { for (let i = 0; i < 8; i++) await settle(); };
+    await flush();
+    assert.equal(doc.querySelector('#kline-source').textContent, '数据源：股票日线 NVDA');
+    for (const [tf, word] of [['1W', '周线'], ['1M', '月线'], ['1D', '日线']]) {
+      doc.querySelector(`#kline-tf [data-tf="${tf}"]`).click(); await flush();
+      assert.equal(doc.querySelector('#kline-source').textContent, `数据源：股票${word} NVDA`, `pill follows ${tf}`);
+    }
+    // Even a stale server label must not put Yahoo on the pill.
+    resp = {...resp, source_label: 'Yahoo'};
+    doc.querySelector('#kline-tf [data-tf="1W"]').click(); await flush();
+    doc.querySelector('#kline-tf [data-tf="1D"]').click(); await flush();
+    assert.doesNotMatch(doc.querySelector('#kline-source').textContent, /Yahoo/);
+    const input = doc.querySelector('#kline-symbol');
+    resp = {...resp, symbol: 'XAUUSD', canonical: 'GC=F', asset_type: 'commodity', provider_symbol: 'GC=F', is_future: true, source_label: null};
+    input.value = 'XAUUSD';
+    doc.querySelector('#kline-form').dispatchEvent(new ui.window.Event('submit', {cancelable: true})); await flush();
+    assert.equal(doc.querySelector('#kline-source').textContent, '数据源：期货日线 GC=F');
+    assert.doesNotMatch(doc.querySelector('#kline-source').textContent, /Yahoo/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unrecognized info source is not called unavailable or required', async () => {
+  const sources = {inject_default: false, existing: [], sources: [
+    {id: 'mystery', name: '未知来源', kind: 'news', assets: ['stock'], terms_url: '', description: '不该显示成可用说明', optional: null, available: null, reason: '未配置 DEMO_KEY，该来源暂不可用'},
+    {id: 'keyed', name: '需密钥来源', kind: 'news', assets: ['stock'], terms_url: '', description: '', optional: false, available: false, reason: '未配置 DEMO_KEY，该来源暂不可用'},
+    {id: 'sec_edgar', name: 'SEC EDGAR 公告', kind: 'filing', assets: ['stock'], terms_url: '', description: '官方披露', optional: false, available: true, reason: ''},
+  ]};
+  const ui = await setup({
+    '/api/frameworks': {...FRAMEWORKS, tools: [{id: 'info-crawl', name: '信息抓取', description: '官方来源', icon: '/icons/logo.svg', tags: ['公告'], tool: true}]},
+    '/api/info-crawl/sources': sources,
+  }, {url: 'http://localhost/#start'});
+  try {
+    await ui.click('.fw[data-framework="info-crawl"]');
+    for (let i = 0; i < 6; i++) await settle();
+    const mystery = ui.doc.querySelector('[data-source="mystery"]');
+    const keyed = ui.doc.querySelector('[data-source="keyed"]');
+    const edgar = ui.doc.querySelector('[data-source="sec_edgar"]');
+    assert.match(mystery.textContent, /来源是否可用未知，不把它写成不可用/);
+    assert.match(mystery.textContent, /是否必选未知/);
+    assert.doesNotMatch(mystery.textContent, /首批必选|暂不可用|DEMO_KEY/);
+    assert.equal(mystery.querySelector('input').disabled, false);
+    assert.equal(mystery.classList.contains('ic-src--off'), false);
+    assert.match(ui.doc.querySelector('#ic-grp-unknown').textContent, /不把它写成首批必选/);
+    assert.equal(ui.doc.querySelector('#ic-grp-unknown').nextElementSibling.contains(mystery), true);
+    assert.equal(ui.doc.querySelector('#ic-grp-req').nextElementSibling.contains(mystery), false);
+    assert.equal(keyed.querySelector('input').disabled, true);
+    assert.match(keyed.textContent, /未配置 DEMO_KEY，该来源暂不可用/);
+    assert.match(keyed.textContent, /首批必选/);
+    assert.match(edgar.textContent, /官方披露/);
+    assert.match(edgar.textContent, /首批必选/);
+    assert.equal(edgar.querySelector('input').checked, true);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a finished info crawl does not call a leftover source still fetching', async () => {
+  const sources = {inject_default: false, existing: [], sources: [
+    {id: 'sec_edgar', name: 'SEC EDGAR 公告', kind: 'filing', assets: ['stock'], terms_url: 'https://www.sec.gov/os/accessing-edgar-data', description: '官方披露', optional: false, available: true, reason: ''},
+    {id: 'gdelt', name: 'GDELT 全球新闻索引', kind: 'news', assets: ['stock'], terms_url: 'https://www.gdeltproject.org/about.html', description: '新闻', optional: false, available: true, reason: ''},
+  ]};
+  const running = {id: 'ic-20261111-run00001', keyword: 'NVDA', asset_type: 'stock', hours: 72, status: 'running',
+    sources: {sec_edgar: {status: 'pending', count: 0, reason: ''}, gdelt: {status: 'pending', count: 0, reason: ''}}};
+  const interrupted = {id: 'ic-20261111-dead0001', keyword: 'NVDA', asset_type: 'stock', hours: 72, status: 'interrupted',
+    reason: '抓取没有完成（服务重启或写盘失败），请重新抓取。',
+    sources: {sec_edgar: {status: 'ok', count: 1, reason: ''}, gdelt: {status: 'pending', count: 0, reason: ''}}};
+  let releaseGet;
+  const ui = await setup({
+    '/api/frameworks': {...FRAMEWORKS, tools: [{id: 'info-crawl', name: '信息抓取', description: '官方来源', icon: '/icons/logo.svg', tags: ['公告'], tool: true}]},
+    '/api/info-crawl/sources': sources,
+    '/api/info-crawl/jobs': (options) => {
+      if (options.method === 'POST') return {job: running};
+      return new Promise((resolve) => { releaseGet = () => resolve({job: interrupted}); });
+    },
+    '/api/info-crawl/items': {job: interrupted, items: []},
+  }, {url: 'http://localhost/#start'});
+  try {
+    const {doc, click, fill} = ui;
+    await click('.fw[data-framework="info-crawl"]');
+    for (let i = 0; i < 6; i++) await settle();
+    ui.ui.state.infoPollMs = 0;
+    fill('#ic-keyword', 'NVDA');
+    doc.querySelector('#ic-form').dispatchEvent(new ui.window.Event('submit', {cancelable: true}));
+    await settle();
+    assert.match(doc.querySelector('[data-source-status="gdelt"]').textContent, /抓取中/);
+    assert.equal(doc.querySelector('#ic-start').textContent, '正在抓取…');
+    assert.equal(doc.querySelector('#ic-empty'), null);
+    for (let i = 0; i < 20 && typeof releaseGet !== 'function'; i++) {
+      await new Promise((r) => setTimeout(r, 15));
+      await settle();
+    }
+    assert.equal(typeof releaseGet, 'function');
+    releaseGet();
+    for (let i = 0; i < 3; i++) { await new Promise((r) => setTimeout(r, 15)); await settleMany(); }
+    const gdelt = doc.querySelector('[data-source-status="gdelt"]').textContent;
+    const edgar = doc.querySelector('[data-source-status="sec_edgar"]').textContent;
+    assert.match(gdelt, /没有结果，不把它写成仍在抓取/);
+    assert.match(edgar, /1 条/);
+    assert.doesNotMatch(doc.querySelector('#ic-status').textContent, /抓取中/);
+    assert.match(doc.querySelector('#ic-job-note').textContent, /抓取没有完成/);
+    assert.doesNotMatch(doc.querySelector('#ic-job-note').textContent, /抓取中|不可用的来源/);
+    assert.equal(doc.querySelector('#ic-empty'), null);
+    assert.equal(doc.querySelector('#ic-start').textContent, '开始抓取');
+    assert.equal(doc.querySelector('#ic-start').disabled, false);
+  } finally { ui.window.close(); }
+});
+
+test('a failed info crawl without a reason does not call a pending source unavailable', async () => {
+  const sources = {inject_default: false, existing: [], sources: [
+    {id: 'sec_edgar', name: 'SEC EDGAR 公告', kind: 'filing', assets: ['stock'], terms_url: 'https://www.sec.gov/os/accessing-edgar-data', description: '官方披露', optional: false, available: true, reason: ''},
+  ]};
+  const failed = {id: 'ic-20261111-fail0001', keyword: 'NVDA', asset_type: 'stock', hours: 72, status: 'failed',
+    sources: {sec_edgar: {status: 'pending', count: 0, reason: ''}}};
+  const ui = await setup({
+    '/api/frameworks': {...FRAMEWORKS, tools: [{id: 'info-crawl', name: '信息抓取', description: '官方来源', icon: '/icons/logo.svg', tags: ['公告'], tool: true}]},
+    '/api/info-crawl/sources': sources,
+    '/api/info-crawl/jobs': () => ({job: failed}),
+    '/api/info-crawl/items': {job: failed, items: []},
+  }, {url: 'http://localhost/#start'});
+  try {
+    const {doc, click, fill} = ui;
+    await click('.fw[data-framework="info-crawl"]');
+    for (let i = 0; i < 6; i++) await settle();
+    ui.ui.state.infoPollMs = 0;
+    fill('#ic-keyword', 'NVDA');
+    doc.querySelector('#ic-form').dispatchEvent(new ui.window.Event('submit', {cancelable: true}));
+    for (let i = 0; i < 3; i++) { await new Promise((r) => setTimeout(r, 15)); await settleMany(); }
+    assert.match(doc.querySelector('[data-source-status="sec_edgar"]').textContent, /没有结果，不把它写成仍在抓取/);
+    assert.doesNotMatch(doc.querySelector('#ic-status').textContent, /抓取中|不可用/);
+    assert.match(doc.querySelector('#ic-empty').textContent, /没有结果，不把它写成仍在抓取/);
+    assert.equal(doc.querySelector('#ic-job-note'), null);
+    assert.equal(doc.querySelector('#ic-start').textContent, '开始抓取');
+  } finally { ui.window.close(); }
+});
+
+test('a backtest that cannot start is not called a failed analysis', async () => {
+  const old = '控制台没能启动分析。对应命令行：TradingAgents could not start the CLI: spawn failed';
+  const ui = await setup({'/api/backtests': (options) => options.method === 'POST'
+    ? {__status: 400, body: {error: old}}
+    : {sweeps: []}});
+  try {
+    await ui.click('[data-page=backtest]');
+    ui.fill('#bt-tickers', 'NVDA');
+    ui.fill('#bt-start', '2026-10-01');
+    ui.fill('#bt-end', '2026-10-08');
+    await ui.click('#start-backtest');
+    await settleMany();
+    const out = ui.doc.querySelector('#backtest-result');
+    assert.equal(out.className, 'error-banner');
+    assert.match(out.textContent, /^控制台没能启动回测。对应命令行：TradingAgents could not start the CLI: spawn failed$/);
+    assert.doesNotMatch(out.textContent, /没能启动分析/);
+    assert.match(out.innerHTML, /控制台没能启动回测。<br class="notice-break">/);
+    assert.equal(ui.ui.state.page, 'backtest');
+  } finally { ui.dom.window.close(); }
+});
+
+test('a backtest response without a status is not called submitted', async () => {
+  const ui = await setup({'/api/backtests': (options) => options.method === 'POST'
+    ? {id: 'bt-unknown', zh: '回测已提交'}
+    : {sweeps: []}, '/api/runs': {run: null, runs: [], progress: {}, counts: {all: 0, running: 0, queued: 0, failed: 0, finished: 0}}});
+  try {
+    await ui.click('[data-page=backtest]');
+    ui.fill('#bt-tickers', 'NVDA');
+    ui.fill('#bt-start', '2026-10-01');
+    ui.fill('#bt-end', '2026-10-08');
+    await ui.click('#start-backtest');
+    await settleMany();
+    const note = [...ui.doc.querySelectorAll('[data-kept-notice]')].map((item) => item.textContent).join('\n');
+    assert.match(note, /不把它写成已提交或已启动/);
+    assert.doesNotMatch(note, /回测已提交|已在后台运行|已加入队列/);
+    assert.equal(ui.ui.state.page, 'runs');
+  } finally { ui.dom.window.close(); }
+});
+
+test('a stopped, cancelled, or stopping backtest is not called an unknown status', async () => {
+  const start = async (ui, status) => {
+    ui.routes['/api/backtests'] = (options) => options.method === 'POST' ? {id: 'bt-known', status} : {sweeps: []};
+    await ui.click('[data-page=backtest]');
+    ui.fill('#bt-tickers', 'NVDA');
+    ui.fill('#bt-start', '2026-10-01');
+    ui.fill('#bt-end', '2026-10-08');
+    await ui.click('#start-backtest');
+    await settleMany();
+    return ui.doc.querySelector('[data-kept-notice]')?.textContent || '';
+  };
+  const ui = await setup({'/api/backtests': {sweeps: []}, '/api/runs': {run: null, runs: [], progress: {}, counts: {all: 0, running: 0, queued: 0, failed: 0, finished: 0}}});
+  try {
+    const stopped = await start(ui, 'stopped');
+    assert.match(stopped, /回测已停止，不是仍在启动/);
+    assert.doesNotMatch(stopped, /状态未知|已在后台运行|回测已启动/);
+    const cancelled = await start(ui, 'cancelled');
+    assert.match(cancelled, /回测已取消，没有进入运行/);
+    assert.doesNotMatch(cancelled, /状态未知/);
+    const stopping = await start(ui, 'stopping');
+    assert.match(stopping, /回测正在停止，不把它写成仍在启动，也还不是已结束/);
+    assert.doesNotMatch(stopping, /状态未知|已在后台运行/);
+    const mystery = await start(ui, 'mystery');
+    assert.match(mystery, /回测状态未知，不把它写成已启动/);
+    assert.doesNotMatch(mystery, /回测已停止|回测已取消|正在停止/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a failed backtest is not told it can restart as an analysis', async () => {
+  const failed = {
+    run: {id: 'bt-fail', status: 'failed', kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08', selections: {ticker: 'NVDA'}, checkpoint: {saved: true}},
+    runs: [{id: 'bt-fail', status: 'failed', kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08'}],
+    progress: {agents: []},
+    result: {present: false},
+    counts: {all: 1, running: 0, queued: 0, failed: 1, finished: 0},
+  };
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': failed});
+  try {
+    await ui.click('[data-page=runs]');
+    await openRunFromList(ui, 'bt-fail');
+    const step = ui.doc.querySelector('#next-step').textContent;
+    assert.match(step, /回测没有生成结果/);
+    assert.match(step, /不能按分析重新启动/);
+    assert.doesNotMatch(step, /可以重新启动|从失败的角色继续|不再调用模型/);
+    assert.equal(ui.doc.querySelector('#restart-run'), null, 'a failed backtest header does not offer 重新启动');
+    assert.equal(ui.doc.querySelector('#resume-run'), null, 'a saved backtest checkpoint is not an analysis resume');
+    assert.doesNotMatch(ui.doc.querySelector('#run-detail-head').textContent, /重新启动/);
+    const analysis = ui.doc.createElement('div');
+    analysis.innerHTML = ui.window.uiTest.nextStepPanel({status: 'failed', kind: 'analysis', checkpoint: {saved: true}}, {present: false}, {});
+    assert.match(analysis.textContent, /从失败的角色继续/);
+    assert.equal(analysis.textContent.replace(/\s+/g, ""), "下一步任务没有生成结果，但已保存断点。点「重新启动」会从失败的角色继续，已完成的角色不再调用模型。");
+    assert.match(analysis.querySelector(".notice").innerHTML, /任务没有生成结果，<br class="notice-break">但已保存断点。<br class="notice-break">点「重新启动」会从失败的角色继续，<br class="notice-break">已完成的角色不再调用模型。/);
+    const other = ui.doc.createElement('div');
+    other.innerHTML = ui.window.uiTest.nextStepPanel({status: 'failed', kind: 'index'}, {present: false}, {});
+    assert.match(other.textContent, /不把它写成可以按分析重新启动/);
+    assert.doesNotMatch(other.textContent, /可以重新启动|从失败的角色继续/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('restarting a backtest is not called an analysis restart', async () => {
+  const finished = {
+    run: {id: 'bt-fin', status: 'finished', kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08', selections: {ticker: 'NVDA'}},
+    runs: [{id: 'bt-fin', status: 'finished', kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08'}],
+    progress: {agents: []},
+    result: {present: false},
+    counts: {all: 1, running: 0, queued: 0, failed: 0, finished: 1},
+  };
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': finished, '/api/runs/restart': {__status: 400, body: {error: '没有可重新启动的分析参数。'}}});
+  try {
+    await ui.click('[data-page=runs]');
+    await openRunFromList(ui, 'bt-fin');
+    assert.equal(ui.doc.querySelector('#restart-run'), null, 'a finished backtest header does not offer 重新启动');
+    assert.doesNotMatch(ui.doc.querySelector('#run-detail-head').textContent, /重新启动/);
+    assert.doesNotMatch(ui.doc.querySelector('#next-step').textContent, /可以重新启动|从失败的角色继续/);
+    const refused = ui.window.uiTest.restartRefusal({kind: 'backtest'}, '没有可重新启动的分析参数。');
+    assert.match(refused, /这是回测，不能按分析重新启动/);
+    assert.match(refused, /没有启动/);
+    assert.doesNotMatch(refused, /分析参数|不等于分析完成|已重新启动任务/);
+    assert.match(ui.window.uiTest.restartRefusalHtml(refused), /这是回测，<br class="notice-break">/);
+    const analysis = {
+      run: {id: 'an-fail', status: 'failed', kind: 'analysis', selections: {ticker: 'NVDA', date: '2026-10-01'}, checkpoint: {saved: true}},
+      runs: [{id: 'an-fail', status: 'failed', kind: 'analysis', ticker: 'NVDA'}],
+      progress: {agents: []},
+      result: {present: false},
+    };
+    ui.routes['/api/runs'] = analysis;
+    ui.ui.state.selectedRunId = 'an-fail';
+    await ui.ui.renderRuns();
+    assert.ok(ui.doc.querySelector('#resume-run'), 'a failed analysis still offers 从断点重新启动');
+    assert.match(ui.doc.querySelector('#resume-run').textContent, /从断点重新启动/);
+    ui.routes['/api/runs'] = {
+      run: {id: 'an-fin', status: 'finished', kind: 'analysis', selections: {ticker: 'NVDA', date: '2026-10-01'}},
+      runs: [{id: 'an-fin', status: 'finished', kind: 'analysis', ticker: 'NVDA'}],
+      progress: {agents: []},
+      result: {present: false},
+    };
+    ui.ui.state.selectedRunId = 'an-fin';
+    await ui.ui.renderRuns();
+    assert.ok(ui.doc.querySelector('#restart-run'), 'a finished analysis still offers 重新启动');
+    assert.equal(ui.doc.querySelector('#restart-run').textContent, '重新启动');
+  } finally { ui.dom.window.close(); }
+});
+
+test('a stopped, cancelled, or completed backtest is not offered an analysis restart', async () => {
+  const open = async (status) => {
+    const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+      run: {id: 'bt-end', status, kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08', selections: {ticker: 'NVDA'}},
+      runs: [{id: 'bt-end', status, kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08'}],
+      progress: {agents: []},
+      result: {present: false},
+    }});
+    await openRunFromList(ui, 'bt-end');
+    return ui;
+  };
+  for (const status of ['stopped', 'cancelled', 'completed']) {
+    const ui = await open(status);
+    try {
+      assert.equal(ui.doc.querySelector('#restart-run'), null, `${status} backtest header does not offer 重新启动`);
+      assert.equal(ui.doc.querySelector('#resume-run'), null);
+      assert.doesNotMatch(ui.doc.querySelector('#run-detail-head').textContent, /重新启动/);
+      assert.doesNotMatch(ui.doc.querySelector('#next-step').textContent, /可以重新启动|从失败的角色继续|按分析重新启动/);
+      if (status === 'stopped') {
+        const step = ui.doc.querySelector('#next-step');
+        assert.match(step.textContent, /任务已停止，不是正常完成。暂时没有可显示的结果。/);
+        assert.match(step.querySelector('.notice').innerHTML, /不是正常完成。<br class="notice-break">暂时没有可显示的结果。/);
+      }
+      if (status === 'completed') {
+        const step = ui.doc.querySelector('#next-step');
+        assert.match(step.textContent, /任务标记为已完成，但这里没有可显示的结果。/);
+        assert.match(step.querySelector('.notice').innerHTML, /任务标记为已完成，<br class="notice-break">但这里没有可显示的结果。/);
+        assert.doesNotMatch(step.textContent, /分析已完成|写成分析/);
+      }
+    } finally { ui.dom.window.close(); }
+  }
+  const analysis = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'an-stop', status: 'stopped', kind: 'analysis', ticker: 'NVDA', date: '2026-10-01', selections: {ticker: 'NVDA', date: '2026-10-01'}},
+    runs: [{id: 'an-stop', status: 'stopped', kind: 'analysis', ticker: 'NVDA'}],
+    progress: {agents: []},
+    result: {present: false},
+  }});
+  try {
+    await openRunFromList(analysis, 'an-stop');
+    assert.equal(analysis.doc.querySelector('#restart-run').textContent, '重新启动');
+    assert.equal(analysis.doc.querySelector('#next-step'), null, 'analysis detail does not use the backtest next-step panel');
+  } finally { analysis.dom.window.close(); }
+});
+
+test('a missing result note breaks at periods on a narrow screen without changing the words', async () => {
+  const note = '没有结果文件。进程结束并写出结果后才会出现。启动不等于完成。';
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'bt-empty', status: 'completed', kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08', selections: {ticker: 'NVDA'}},
+    runs: [{id: 'bt-empty', status: 'completed', kind: 'backtest', ticker: 'NVDA'}],
+    progress: {agents: []},
+    result: {present: false, note},
+  }});
+  try {
+    await openRunFromList(ui, 'bt-empty');
+    const panel = ui.doc.querySelector('#run-result .notice');
+    assert.equal(panel.textContent, note);
+    assert.match(panel.innerHTML, /没有结果文件。<br class="notice-break">进程结束并写出结果后才会出现。<br class="notice-break">启动不等于完成。/);
+    assert.doesNotMatch(panel.textContent, /分析完成|回测完成/);
+    ui.routes['/api/runs'] = {
+      run: {id: 'bt-other', status: 'completed', kind: 'backtest', ticker: 'NVDA', selections: {ticker: 'NVDA'}},
+      runs: [{id: 'bt-other', status: 'completed', kind: 'backtest', ticker: 'NVDA'}],
+      progress: {agents: []},
+      result: {present: false, note: '新闻分析师调用超时'},
+    };
+    ui.ui.state.selectedRunId = 'bt-other';
+    await ui.ui.renderRuns();
+    const other = ui.doc.querySelector('#run-result .notice');
+    assert.equal(other.textContent, '新闻分析师调用超时');
+    assert.equal(other.querySelector('br'), null);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unknown-status backtest is not offered an analysis restart', async () => {
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'bt-mystery', status: 'mystery', kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08', selections: {ticker: 'NVDA'}},
+    runs: [{id: 'bt-mystery', status: 'mystery', kind: 'backtest', ticker: 'NVDA'}],
+    progress: {agents: []},
+    result: {present: false},
+  }});
+  try {
+    await openRunFromList(ui, 'bt-mystery');
+    assert.equal(ui.doc.querySelector('#restart-run'), null);
+    assert.doesNotMatch(ui.doc.querySelector('#run-detail-head').textContent, /重新启动/);
+    const step = ui.doc.querySelector('#next-step');
+    assert.match(step.textContent, /任务状态未知，不把它写成已结束，也不写成运行中。/);
+    assert.match(step.querySelector('.notice').innerHTML, /任务状态未知，<br class="notice-break">不把它写成已结束，<br class="notice-break">也不写成运行中。/);
+    assert.doesNotMatch(step.textContent, /可以重新启动|按分析重新启动/);
+    const analysis = ui.doc.createElement('div');
+    analysis.innerHTML = ui.window.uiTest.nextStepPanel({status: 'mystery', kind: 'analysis'}, {present: false}, {});
+    assert.match(analysis.textContent, /任务状态未知，不把它写成已结束，也不写成运行中。/);
+    ui.routes['/api/runs'] = {
+      run: {id: 'an-mystery', status: 'mystery', kind: 'analysis', ticker: 'NVDA', date: '2026-10-01', selections: {ticker: 'NVDA', date: '2026-10-01'}},
+      runs: [{id: 'an-mystery', status: 'mystery', kind: 'analysis', ticker: 'NVDA'}],
+      progress: {agents: []},
+      result: {present: false},
+    };
+    ui.ui.state.selectedRunId = 'an-mystery';
+    await ui.ui.renderRuns();
+    assert.equal(ui.doc.querySelector('#restart-run').textContent, '重新启动');
+    assert.match(ui.doc.querySelector('#unknown-run-status').innerHTML, /任务状态未知，<br class="notice-break">不把它写成已结束，<br class="notice-break">也不写成运行中。/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a failed analysis next step does not split 日志 or 重新启动', async () => {
+  const ui = await setup();
+  try {
+    const saved = ui.doc.createElement("div");
+    saved.innerHTML = ui.window.uiTest.nextStepPanel({status: "failed", kind: "analysis", checkpoint: {saved: true}}, {present: false}, {});
+    assert.equal(saved.querySelector(".notice").textContent, "任务没有生成结果，但已保存断点。点「重新启动」会从失败的角色继续，已完成的角色不再调用模型。");
+    const plain = ui.doc.createElement("div");
+    plain.innerHTML = ui.window.uiTest.nextStepPanel({status: "failed", kind: "analysis"}, {present: false}, {});
+    assert.equal(plain.querySelector(".notice").textContent, "任务没有生成结果。展开技术详情查看日志，修正配置后可以重新启动。");
+    assert.match(plain.querySelector(".notice").innerHTML, /任务没有生成结果。<br class="notice-break">展开技术详情查看日志，<br class="notice-break">修正配置后可以重新启动。/);
+    const empty = ui.doc.createElement("div");
+    empty.innerHTML = ui.window.uiTest.nextStepPanel(null, {present: false}, {});
+    assert.equal(empty.querySelector(".notice").textContent, "启动分析后，这里会提供刷新、停止和查看结果的操作。");
+    assert.match(empty.querySelector(".notice").innerHTML, /启动分析后，<br class="notice-break">这里会提供刷新、停止和<br class="notice-break">查看结果的操作。/);
+    const done = ui.doc.createElement("div");
+    done.innerHTML = ui.window.uiTest.nextStepPanel({status: "finished", kind: "analysis"}, {present: true}, {});
+    assert.equal(done.querySelector(".notice").textContent, "结果已经写出。查看上方结果，或打开报告列表。");
+    assert.match(done.querySelector(".notice").innerHTML, /结果已经写出。<br class="notice-break">查看上方结果，或打开报告列表。/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('review, live files, and backtest intro do not split 评级, 文件, or 排队', async () => {
+  const ui = await setup();
+  try {
+    const review = ui.doc.createElement('div');
+    review.innerHTML = ui.window.uiTest.resultPanel({present: true, kind: 'analysis', rating: 'REVIEW', review: 'needs review', decision: '决定原文没有可交易评级。'});
+    const note = review.querySelector('#review-note');
+    assert.equal(note.textContent, '需要复核：未能从最终决定读出可交易评级。请查看决定内容后自行判断，或重新运行分析。');
+    assert.equal(note.innerHTML, '需要复核：<br class="notice-break">未能从最终决定读出可交易评级。<br class="notice-break">请查看决定内容后自行判断，<br class="notice-break">或重新运行分析。');
+    const live = ui.doc.createElement('div');
+    live.innerHTML = ui.window.uiTest.liveSectionTable([{ticker: 'NVDA', date: '2026-11-12', path: 'a.md', file: 'a.md', title: 'market'}]);
+    const fileNote = live.querySelector('#live-file-note');
+    assert.equal(fileNote.textContent, '这些文件可能在任务结束后仍留在磁盘上；有文件不等于分析正在进行。');
+    assert.equal(fileNote.innerHTML, '这些文件可能在任务结束后<br class="notice-break">仍留在磁盘上；<br class="notice-break">有文件不等于分析正在进行。');
+    await ui.click('[data-page=backtest]');
+    const intro = ui.doc.querySelector('#backtest-result');
+    assert.equal(intro.textContent, '先预估分析次数，再决定是否启动。回测不排队：运行名额已满或有任务排队时不会启动。');
+    assert.equal(intro.innerHTML, '先预估分析次数，<br class="notice-break">再决定是否启动。<br class="notice-break">回测不排队：<br class="notice-break">运行名额已满或有任务排队时不会启动。');
+  } finally { ui.dom.window.close(); }
+});
+
+test('provider, model, and login notes do not split 密钥, 沿用, or 提示', async () => {
+  const ui = await setup();
+  try {
+    await ui.click('[data-page=models]');
+    const model = ui.doc.querySelector('#model-advanced-hint');
+    assert.equal(model.textContent, '保存在本机控制台配置里，下一次分析生效。留空沿用默认。');
+    assert.equal(model.innerHTML, '保存在本机控制台配置里，<br class="notice-break">下一次分析生效。<br class="notice-break">留空沿用默认。');
+    await ui.click('[data-page=accounts]');
+    const login = ui.doc.querySelector('#login-help-note');
+    assert.equal(login.textContent, '如果登录窗口没有自动完成，可在这里查看提示并提交地址。');
+    assert.equal(login.innerHTML, '如果登录窗口没有自动完成，<br class="notice-break">可在这里查看提示并提交地址。');
+    await ui.click('[data-page=analyze]');
+    await ui.click('.fw[data-framework=tradingagents]');
+    const provider = ui.doc.querySelector('#provider-login-hint');
+    assert.equal(provider.textContent, '订阅服务需先在「账户」中登录；API 服务需先配置密钥。');
+    assert.equal(provider.innerHTML, '订阅服务需先在「账户」中登录；<br class="notice-break">API 服务需先配置密钥。');
+  } finally { ui.dom.window.close(); }
+});
+
+test('an idle backtest is not offered an analysis restart', async () => {
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'bt-idle', status: 'idle', kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08', selections: {ticker: 'NVDA'}},
+    runs: [{id: 'bt-idle', status: 'idle', kind: 'backtest', ticker: 'NVDA'}],
+    progress: {agents: []},
+    result: {present: false},
+  }});
+  try {
+    await openRunFromList(ui, 'bt-idle');
+    assert.equal(ui.doc.querySelector('#restart-run'), null);
+    assert.doesNotMatch(ui.doc.querySelector('#run-detail-head').textContent, /重新启动/);
+    const step = ui.doc.querySelector('#next-step');
+    assert.match(step.textContent, /任务状态是空闲，暂时没有可显示的结果。不把它写成已结束。/);
+    assert.doesNotMatch(step.textContent, /可以重新启动|按分析重新启动|写成分析/);
+    ui.routes['/api/runs'] = {
+      run: {id: 'an-idle', status: 'idle', kind: 'analysis', ticker: 'NVDA', date: '2026-10-01', selections: {ticker: 'NVDA', date: '2026-10-01'}},
+      runs: [{id: 'an-idle', status: 'idle', kind: 'analysis', ticker: 'NVDA'}],
+      progress: {agents: []},
+      result: {present: false},
+    };
+    ui.ui.state.selectedRunId = 'an-idle';
+    await ui.ui.renderRuns();
+    assert.equal(ui.doc.querySelector('#restart-run').textContent, '重新启动');
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unrecorded team card does not split 角色', async () => {
+  const pending = {team: 'Analyst Team', team_zh: '分析师团队', agent: 'Market Analyst', zh: '市场分析师', status: 'pending', status_zh: '等待'};
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'an-blank', status: 'failed', kind: 'analysis', ticker: 'NVDA', date: '2026-11-12', selections: {ticker: 'NVDA'}},
+    runs: [{id: 'an-blank', status: 'failed', kind: 'analysis', ticker: 'NVDA'}],
+    progress: {agents: [pending]},
+    result: {present: false},
+  }});
+  try {
+    await openRunFromList(ui, 'an-blank');
+    const note = ui.doc.querySelector('.team .now');
+    assert.equal(note.textContent, '未记录：日志里没有这组角色，不把它们写成等待。');
+    assert.match(note.innerHTML, /未记录：<\/b><br>日志里没有这组角色，<br>不把它们写成等待。/);
+    assert.doesNotMatch(note.textContent, /仍在等待|写成等待中/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an idle or unknown backtest without role records is not given a completion count', async () => {
+  const pending = {team: 'Analyst Team', team_zh: '分析师团队', agent: 'Market Analyst', zh: '市场分析师', status: 'pending', status_zh: '等待'};
+  const open = async (status) => {
+    const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+      run: {id: 'bt-blank', status, kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08', selections: {ticker: 'NVDA'}},
+      runs: [{id: 'bt-blank', status, kind: 'backtest', ticker: 'NVDA'}],
+      progress: {agents: [pending, {...pending, agent: 'News Analyst', zh: '新闻分析师'}]},
+      result: {present: false},
+    }});
+    await openRunFromList(ui, 'bt-blank');
+    return ui;
+  };
+  for (const status of ['idle', 'mystery']) {
+    const ui = await open(status);
+    try {
+      assert.match(ui.doc.querySelector('#task-progress').textContent, /没有角色进度，不写成已完成/);
+      assert.doesNotMatch(ui.doc.querySelector('#task-progress').textContent, /个角色完成|0\/2/);
+      assert.equal(ui.doc.querySelector('.progress-table .status-badge').textContent, '未记录');
+      assert.doesNotMatch(ui.doc.querySelector('.progress-table').textContent, /等待/);
+      assert.match(ui.doc.querySelector('#unrecorded-roles').textContent, /不把它们写成等待/);
+    } finally { ui.dom.window.close(); }
+  }
+  const live = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'bt-live', status: 'running', kind: 'backtest', ticker: 'NVDA', selections: {ticker: 'NVDA'}},
+    runs: [{id: 'bt-live', status: 'running', kind: 'backtest', ticker: 'NVDA'}],
+    progress: {agents: [pending]},
+    result: {present: false},
+  }});
+  try {
+    await openRunFromList(live, 'bt-live');
+    assert.match(live.doc.querySelector('#task-progress').textContent, /0\/1 个角色完成/);
+    assert.equal(live.doc.querySelector('.progress-table .status-badge').textContent, '等待');
+  } finally { live.dom.window.close(); }
+});
+
+test('an idle backtest list does not show a completion count or call it ended', async () => {
+  const idle = {
+    id: 'bt-idle', status: 'idle', kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08',
+    done: 0, total: 12, team_zh: '准备中', blank: true, started_at: '2026-11-12T09:15:00',
+  };
+  const running = {
+    id: 'bt-live', status: 'running', kind: 'backtest', ticker: 'AAPL', date: '2026-11-12',
+    done: 0, total: 12, team_zh: '准备中', started_at: '2026-11-12T09:10:00',
+  };
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: idle, runs: [running, idle], progress: {agents: []}, result: {present: false},
+    counts: {all: 2, running: 1, queued: 0, failed: 0, finished: 0},
+  }});
+  try {
+    await ui.click('[data-page=runs]');
+    const row = [...ui.doc.querySelectorAll('#run-list [data-run-id]')].find((item) => item.dataset.runId === 'bt-idle');
+    assert.match(row.querySelector('.pg').textContent, /没有记录/);
+    assert.doesNotMatch(row.querySelector('.pg').textContent, /0\/12/);
+    assert.equal(ui.doc.querySelector('#unrecorded-list'), null);
+    const live = [...ui.doc.querySelectorAll('#run-list [data-run-id]')].find((item) => item.dataset.runId === 'bt-live');
+    assert.match(live.querySelector('.pg').textContent, /0\/12/);
+    assert.doesNotMatch(live.querySelector('.pg').textContent, /没有记录/);
+    ui.window.matchMedia = (query) => ({matches: String(query).includes('600'), addEventListener() {}, removeEventListener() {}});
+    await ui.ui.renderRuns();
+    const card = ui.doc.querySelector('#run-list .b');
+    assert.match(card.innerHTML, /准备中 · <br class="notice-break">开始/);
+    assert.doesNotMatch(card.innerHTML, /&nbsp;·/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a running backtest next step does not split 停止任务', async () => {
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'bt-live', status: 'running', kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08', selections: {ticker: 'NVDA'}},
+    runs: [{id: 'bt-live', status: 'running', kind: 'backtest', ticker: 'NVDA'}],
+    progress: {agents: []},
+    result: {present: false},
+  }});
+  try {
+    await openRunFromList(ui, 'bt-live');
+    const step = ui.doc.querySelector('#next-step');
+    assert.match(step.textContent, /任务仍在运行。稍后刷新状态，或在确认后停止任务。/);
+    assert.match(step.querySelector('.notice').innerHTML, /任务仍在运行。<br class="notice-break">稍后刷新状态，<br class="notice-break">或在确认后停止任务。/);
+    assert.doesNotMatch(step.textContent, /写成分析|已结束|准备中/);
+    assert.equal(ui.doc.querySelector('#restart-run'), null);
+    assert.ok(ui.doc.querySelector('#stop-run'));
+  } finally { ui.dom.window.close(); }
+});
+
+test('a starting backtest next step does not split 刷新状态', async () => {
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'bt-start', status: 'starting', kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08', selections: {ticker: 'NVDA'}},
+    runs: [{id: 'bt-start', status: 'starting', kind: 'backtest', ticker: 'NVDA'}],
+    progress: {agents: []},
+    result: {present: false},
+  }});
+  try {
+    await openRunFromList(ui, 'bt-start');
+    const step = ui.doc.querySelector('#next-step');
+    assert.match(step.textContent, /任务正在启动，还没有进入运行。稍后刷新状态，或在确认后停止任务。/);
+    assert.match(step.querySelector('.notice').innerHTML, /任务正在启动，<br class="notice-break">还没有进入运行。<br class="notice-break">稍后刷新状态，<br class="notice-break">或在确认后停止任务。/);
+    assert.doesNotMatch(step.textContent, /写成分析|已结束/);
+    assert.equal(ui.doc.querySelector('#restart-run'), null);
+    assert.ok(ui.doc.querySelector('#stop-run'));
+  } finally { ui.dom.window.close(); }
+});
+
+test('the backtest model summary breaks before the change hint on a narrow screen', async () => {
+  const ui = await setup({'/api/backtests': {sweeps: []}});
+  try {
+    await ui.click('[data-page=backtest]');
+    const note = ui.doc.querySelector('#backtest-model-summary');
+    assert.match(note.textContent, /当前模型：.+。可展开上方设置更改。/);
+    assert.match(note.innerHTML, /。<br class="notice-break">可展开上方设置更改。/);
+    assert.doesNotMatch(note.textContent, /分析完成|回测完成/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the backtest page description does not split 成交 on a narrow screen', async () => {
+  const ui = await setup({'/api/backtests': {sweeps: []}});
+  try {
+    await ui.click('[data-page=backtest]');
+    const desc = ui.doc.querySelector('.page-description');
+    assert.match(desc.textContent, /在历史日期上重复分析，评估过往判断。结果不包含成交、滑点和手续费。/);
+    assert.match(desc.innerHTML, /在历史日期上重复分析，<br class="notice-break">评估过往判断。<br class="notice-break">结果不包含成交、<br class="notice-break">滑点和手续费。/);
+    assert.doesNotMatch(desc.textContent, /分析完成|回测完成/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an immediate backtest exit is not called an analysis completion', async () => {
+  const ui = await setup({'/api/backtests': (options) => options.method === 'POST'
+    ? {id: 'bt-fail', status: 'failed', kind: 'backtest', zh: '后台启动失败。进程启动不等于分析完成。'}
+    : {sweeps: []}, '/api/runs': {run: null, runs: [], progress: {}, counts: {all: 0, running: 0, queued: 0, failed: 0, finished: 0}}});
+  try {
+    await ui.click('[data-page=backtest]');
+    ui.fill('#bt-tickers', 'NVDA');
+    ui.fill('#bt-start', '2026-10-01');
+    ui.fill('#bt-end', '2026-10-08');
+    await ui.click('#start-backtest');
+    await settleMany();
+    const note = [...ui.doc.querySelectorAll('[data-kept-notice]')].map((item) => item.textContent).join('\n');
+    assert.match(note, /后台启动失败/);
+    assert.match(note, /进程启动不等于回测完成/);
+    assert.doesNotMatch(note, /不等于分析完成|写成分析完成/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a started backtest is not called an analysis completion', async () => {
+  const ui = await setup({'/api/backtests': (options) => options.method === 'POST'
+    ? {id: 'bt-live', status: 'running', kind: 'backtest', zh: '已在后台启动。进程启动不等于分析完成。'}
+    : {sweeps: []}, '/api/runs': {run: null, runs: [], progress: {}, counts: {all: 0, running: 0, queued: 0, failed: 0, finished: 0}}});
+  try {
+    await ui.click('[data-page=backtest]');
+    ui.fill('#bt-tickers', 'NVDA');
+    ui.fill('#bt-start', '2026-10-01');
+    ui.fill('#bt-end', '2026-10-08');
+    await ui.click('#start-backtest');
+    await settleMany();
+    const note = [...ui.doc.querySelectorAll('[data-kept-notice]')].map((item) => item.textContent).join('\n');
+    assert.match(note, /回测已在后台运行/);
+    assert.match(note, /进程启动不等于回测完成/);
+    assert.doesNotMatch(note, /不等于分析完成|写成分析完成/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a finished backtest response is not called still starting', async () => {
+  const ui = await setup({'/api/backtests': (options) => options.method === 'POST'
+    ? {id: 'bt-done', status: 'finished', ticker: 'NVDA'}
+    : {sweeps: []}, '/api/runs': {run: null, runs: [], progress: {}}});
+  try {
+    await ui.click('[data-page=backtest]');
+    ui.fill('#bt-tickers', 'NVDA');
+    ui.fill('#bt-start', '2026-10-01');
+    ui.fill('#bt-end', '2026-10-08');
+    await ui.click('#start-backtest');
+    await settleMany();
+    const note = [...ui.doc.querySelectorAll('[data-kept-notice]')].map((item) => item.textContent).join('\n');
+    assert.match(note, /回测已经结束，不把它写成仍在启动/);
+    assert.doesNotMatch(note, /回测已启动|可在这里跟踪进度/);
+    ui.routes['/api/backtests'] = (options) => options.method === 'POST'
+      ? {id: 'bt-live', status: 'running'}
+      : {sweeps: []};
+    await ui.click('[data-page=backtest]');
+    ui.fill('#bt-tickers', 'NVDA');
+    ui.fill('#bt-start', '2026-10-01');
+    ui.fill('#bt-end', '2026-10-08');
+    await ui.click('#start-backtest');
+    await settleMany();
+    const running = [...ui.doc.querySelectorAll('[data-kept-notice]')].map((item) => item.textContent).join('\n');
+    assert.match(running, /回测已在后台运行/);
+    assert.match(running, /进程启动不等于回测完成/);
+    assert.doesNotMatch(running, /回测已启动，可在这里跟踪进度/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unrecognized run kind is not called analysis', async () => {
+  const unknown = {
+    run: {id: 'kind-unknown', status: 'running', kind: 'index', ticker: 'AAA', date: '2026-11-12', selections: {ticker: 'AAA', date: '2026-11-12'}},
+    runs: [{id: 'kind-unknown', status: 'running', kind: 'index', ticker: 'AAA', date: '2026-11-12', framework_name: 'TradingAgents'}],
+    progress: {agents: [], complete: 'Analysis Complete!'},
+    result: {present: true, kind: 'index', text: 'not an analysis'},
+    counts: {all: 1, running: 1, queued: 0, failed: 0, finished: 0},
+  };
+  const ui = await setup({'/api/runs': unknown});
+  try {
+    await ui.click('[data-page=runs]');
+    await openRunFromList(ui, 'kind-unknown');
+    const kind = ui.doc.querySelector('#run-kind').textContent;
+    assert.match(kind, /^任务类型未知，不把它写成分析/);
+    assert.doesNotMatch(kind, /^分析$/);
+    assert.match(ui.doc.querySelector('#completion-note').textContent, /任务类型未知，不把它写成分析已完成/);
+    assert.doesNotMatch(ui.doc.querySelector('#completion-note').textContent, /^分析已完成/);
+    assert.match(ui.doc.querySelector('#unknown-result-kind').textContent, /不把它写成分析结果/);
+    ui.routes['/api/runs'] = {run: {id: 'known-analysis', status: 'running', kind: 'analysis', ticker: 'AAA', date: '2026-11-12', selections: {ticker: 'AAA'}}, runs: [{id: 'known-analysis', status: 'running', ticker: 'AAA', date: '2026-11-12'}], progress: {agents: []}, result: {present: false}};
+    ui.ui.state.selectedRunId = 'known-analysis';
+    await ui.ui.renderRuns();
+    assert.equal(ui.doc.querySelector('#run-kind').textContent, '分析');
+    ui.routes['/api/runs'] = {run: {id: 'known-backtest', status: 'running', kind: 'backtest', ticker: 'AAA', date: '2026-11-12', selections: {ticker: 'AAA'}}, runs: [{id: 'known-backtest', status: 'running', ticker: 'AAA', date: '2026-11-12'}], progress: {agents: []}, result: {present: false}};
+    ui.ui.state.selectedRunId = 'known-backtest';
+    await ui.ui.renderRuns();
+    assert.equal(ui.doc.querySelector('#run-kind').textContent, '回测');
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unverified backtest stop is not called an analysis process', async () => {
+  const old = '读不到这个任务进程的启动时间，无法确认它还是本任务的分析进程。为安全起见没有发送任何信号；任务仍算运行中，继续占用名额。\n下一步：稍后点「刷新」再试。';
+  const running = {id: 'bt-live', status: 'running', kind: 'backtest', ticker: 'NVDA', date: '2026-11-12', selections: {ticker: 'NVDA'}, started_at: '2026-11-12T09:00:00'};
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {run: running, runs: [running], progress: {agents: []}, result: {present: false}, counts: {all: 1, running: 1, queued: 0, failed: 0, finished: 0}}, '/api/runs/stop': {__status: 409, body: {error: old}}});
+  try {
+    await ui.click('[data-page=runs]');
+    await openRunFromList(ui, 'bt-live');
+    await ui.click('#stop-run');
+    assert.match(ui.doc.body.textContent, /停止当前回测/);
+    await ui.click('#confirm-yes');
+    await settleMany();
+    const banner = ui.doc.querySelector('#stop-refused');
+    assert.ok(banner);
+    assert.match(banner.textContent, /无法确认这是回测进程/);
+    assert.match(banner.textContent, /没有发送任何信号/);
+    assert.match(banner.textContent, /下一步：稍后点「刷新」再试/);
+    assert.doesNotMatch(banner.textContent, /分析进程/);
+    assert.match(banner.innerHTML, /<br>下一步：/);
+
+    const otherRun = {id: 'idx-live', status: 'running', kind: 'index', ticker: 'NVDA', date: '2026-11-12', selections: {ticker: 'NVDA'}};
+    ui.routes['/api/runs'] = {run: otherRun, runs: [otherRun], progress: {agents: []}, result: {present: false}, counts: {all: 1, running: 1, queued: 0, failed: 0, finished: 0}};
+    ui.ui.state.stopRefused = {id: 'idx-live', text: old};
+    ui.ui.state.selectedRunId = 'idx-live';
+    await ui.ui.renderRuns();
+    const other = ui.doc.querySelector('#stop-refused').textContent;
+    assert.match(other, /不把它写成分析进程/);
+    assert.doesNotMatch(other, /这是回测进程|本任务的分析进程/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unverified analysis stop does not split 分析 or 信号', async () => {
+  const sentence = '读不到这个任务进程的启动时间，无法确认它还是本任务的分析进程。为安全起见没有发送任何信号；任务仍算运行中，继续占用名额。\n下一步：稍后点「刷新」再试。';
+  const running = {id: 'an-live', status: 'running', kind: 'analysis', ticker: 'NVDA', date: '2026-11-12', selections: {ticker: 'NVDA'}, started_at: '2026-11-12T09:00:00'};
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {run: running, runs: [running], progress: {agents: []}, result: {present: false}, counts: {all: 1, running: 1, queued: 0, failed: 0, finished: 0}}, '/api/runs/stop': {__status: 409, body: {error: sentence}}});
+  try {
+    await ui.click('[data-page=runs]');
+    await openRunFromList(ui, 'an-live');
+    await ui.click('#stop-run');
+    await ui.click('#confirm-yes');
+    await settleMany();
+    const banner = ui.doc.querySelector('#stop-refused');
+    assert.ok(banner);
+    assert.equal(banner.textContent, sentence.replace('\n', ''));
+    assert.match(banner.innerHTML, /分析进程。<br class="notice-break">为安全起见没有发送任何信号；<br class="notice-break">/);
+    assert.match(banner.innerHTML, /<br>下一步：稍后点「刷新」再试。/);
+    assert.equal(banner.querySelector('img'), null);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a reused pid on a backtest is not called an analysis process', async () => {
+  const old = '这个任务记录的进程号现在属于另一个程序（启动时间对不上），原来的分析进程已经不在，没有写出结果。控制台没有向那个程序发送任何信号。';
+  const failed = {
+    run: {id: 'bt-reused', status: 'failed', kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08', selections: {ticker: 'NVDA'}, detail: old, pid_reused: true},
+    runs: [{id: 'bt-reused', status: 'failed', kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08'}],
+    progress: {agents: []},
+    result: {present: false},
+    counts: {all: 1, running: 0, queued: 0, failed: 1, finished: 0},
+  };
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': failed});
+  try {
+    await openRunFromList(ui, 'bt-reused');
+    const line = ui.doc.querySelector('#run-status-line').textContent;
+    assert.match(line, /原来的回测进程已经不在/);
+    assert.match(line, /没有向那个程序发送信号/);
+    assert.doesNotMatch(line, /原来的分析进程|分析进程/);
+    const note = ui.doc.querySelector('#run-detail-note').textContent;
+    assert.match(note, /原来的回测进程已经不在/);
+    assert.doesNotMatch(note, /原来的分析进程/);
+
+    ui.routes['/api/runs'] = {
+      run: {id: 'an-reused', status: 'failed', kind: 'analysis', ticker: 'NVDA', date: '2026-11-12', selections: {ticker: 'NVDA'}, detail: old, pid_reused: true},
+      runs: [{id: 'an-reused', status: 'failed', kind: 'analysis', ticker: 'NVDA', date: '2026-11-12'}],
+      progress: {agents: []},
+      result: {present: false},
+    };
+    ui.ui.state.selectedRunId = 'an-reused';
+    await ui.ui.renderRuns();
+    const analysisNote = ui.doc.querySelector('#run-detail-note');
+    assert.equal(analysisNote.textContent, old);
+    assert.match(analysisNote.innerHTML, /程序<br class="notice-break">（启动时间对不上），<br class="notice-break">原来的分析进程已经不在，<br class="notice-break">没有写出结果。<br class="notice-break">控制台没有向那个程序发送任何信号。/);
+    const reason = ui.doc.querySelector('#run-failure code');
+    assert.equal(reason.textContent, old);
+    assert.match(reason.innerHTML, /程序<br>（启动时间对不上），<br>原来的分析进程已经不在，/);
+    assert.match(ui.doc.querySelector('#run-failure .why').innerHTML, /原因：<br><code>/);
+    assert.doesNotMatch(reason.innerHTML, /notice-break/);
+    assert.equal(ui.doc.querySelector('#run-failure img, #run-failure script'), null);
+
+    ui.routes['/api/runs'] = {
+      run: {id: 'idx-reused', status: 'failed', kind: 'index', ticker: 'NVDA', date: '2026-11-12', selections: {ticker: 'NVDA'}, detail: old, pid_reused: true},
+      runs: [{id: 'idx-reused', status: 'failed', kind: 'index', ticker: 'NVDA', date: '2026-11-12'}],
+      progress: {agents: []},
+      result: {present: false},
+    };
+    ui.ui.state.selectedRunId = 'idx-reused';
+    await ui.ui.renderRuns();
+    const other = ui.doc.querySelector('#run-detail-note').textContent;
+    assert.match(other, /不把它写成分析进程/);
+    assert.doesNotMatch(other, /原来的分析进程|原来的回测进程/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a finished backtest with a result is not called an analysis exit', async () => {
+  const old = '分析进程已退出，结果文件已写出。这只说明进程结束，不表示分析完成或评级已确认。';
+  const finished = {
+    run: {id: 'bt-wrote', status: 'finished', kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08', selections: {ticker: 'NVDA'}, detail: old},
+    runs: [{id: 'bt-wrote', status: 'finished', kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08'}],
+    progress: {agents: []},
+    result: {present: true, kind: 'backtest', text: '回测摘要'},
+    counts: {all: 1, running: 0, queued: 0, failed: 0, finished: 1},
+  };
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': finished});
+  try {
+    await openRunFromList(ui, 'bt-wrote');
+    const note = ui.doc.querySelector('#run-detail-note').textContent;
+    assert.match(note, /回测进程已退出，结果文件已写出。这只说明进程结束，不表示回测完成/);
+    assert.doesNotMatch(note, /分析进程|不表示分析完成|评级已确认/);
+    assert.doesNotMatch(ui.doc.querySelector('#run-log').textContent, /分析进程|不表示分析完成/);
+
+    ui.routes['/api/runs'] = {
+      run: {id: 'an-wrote', status: 'finished', kind: 'analysis', ticker: 'NVDA', date: '2026-11-12', selections: {ticker: 'NVDA'}, detail: old},
+      runs: [{id: 'an-wrote', status: 'finished', kind: 'analysis', ticker: 'NVDA', date: '2026-11-12'}],
+      progress: {agents: []},
+      result: {present: false},
+    };
+    ui.ui.state.selectedRunId = 'an-wrote';
+    await ui.ui.renderRuns();
+    assert.match(ui.doc.querySelector('#run-detail-note').textContent, /分析进程已退出，结果文件已写出/);
+    assert.match(ui.doc.querySelector('#run-detail-note').textContent, /不表示分析完成或评级已确认/);
+
+    ui.routes['/api/runs'] = {
+      run: {id: 'idx-wrote', status: 'finished', kind: 'index', ticker: 'NVDA', date: '2026-11-12', selections: {ticker: 'NVDA'}, detail: old},
+      runs: [{id: 'idx-wrote', status: 'finished', kind: 'index', ticker: 'NVDA', date: '2026-11-12'}],
+      progress: {agents: []},
+      result: {present: false},
+    };
+    ui.ui.state.selectedRunId = 'idx-wrote';
+    await ui.ui.renderRuns();
+    const other = ui.doc.querySelector('#run-detail-note').textContent;
+    assert.match(other, /不把它写成分析完成/);
+    assert.doesNotMatch(other, /分析进程|不表示分析完成|不表示回测完成/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a failed backtest without a result is not called an exited analysis', async () => {
+  const old = '分析进程已退出，但没有写出结果。进程退出不等于分析完成。';
+  const failed = {
+    run: {id: 'bt-dead', status: 'failed', kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08', selections: {ticker: 'NVDA'}, detail: old},
+    runs: [{id: 'bt-dead', status: 'failed', kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08'}],
+    progress: {agents: []},
+    result: {present: false},
+    counts: {all: 1, running: 0, queued: 0, failed: 1, finished: 0},
+  };
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': failed});
+  try {
+    await openRunFromList(ui, 'bt-dead');
+    const line = ui.doc.querySelector('#run-status-line').textContent;
+    assert.match(line, /回测进程已退出，但没有写出结果。进程退出不等于回测完成/);
+    assert.doesNotMatch(line, /分析进程|不等于分析完成/);
+    const note = ui.doc.querySelector('#run-detail-note').textContent;
+    assert.match(note, /不等于回测完成/);
+    assert.doesNotMatch(note, /分析进程|不等于分析完成/);
+    assert.doesNotMatch(ui.doc.querySelector('#run-log').textContent, /分析进程|不等于分析完成/);
+
+    ui.routes['/api/runs'] = {
+      run: {id: 'an-dead', status: 'failed', kind: 'analysis', ticker: 'NVDA', date: '2026-11-12', selections: {ticker: 'NVDA'}, detail: old},
+      runs: [{id: 'an-dead', status: 'failed', kind: 'analysis', ticker: 'NVDA', date: '2026-11-12'}],
+      progress: {agents: []},
+      result: {present: false},
+    };
+    ui.ui.state.selectedRunId = 'an-dead';
+    await ui.ui.renderRuns();
+    assert.match(ui.doc.querySelector('#run-detail-note').textContent, /分析进程已退出，但没有写出结果。进程退出不等于分析完成/);
+
+    ui.routes['/api/runs'] = {
+      run: {id: 'idx-dead', status: 'failed', kind: 'index', ticker: 'NVDA', date: '2026-11-12', selections: {ticker: 'NVDA'}, detail: old},
+      runs: [{id: 'idx-dead', status: 'failed', kind: 'index', ticker: 'NVDA', date: '2026-11-12'}],
+      progress: {agents: []},
+      result: {present: false},
+    };
+    ui.ui.state.selectedRunId = 'idx-dead';
+    await ui.ui.renderRuns();
+    const other = ui.doc.querySelector('#run-detail-note').textContent;
+    assert.match(other, /不把它写成分析完成/);
+    assert.doesNotMatch(other, /分析进程|不等于分析完成|不等于回测完成/);
+
+    ui.routes['/api/runs'] = {
+      run: {id: 'bt-why', status: 'failed', kind: 'backtest', ticker: 'NVDA', date: '2026-11-12', selections: {ticker: 'NVDA'}, detail: '新闻分析师调用超时', failure: {summary: '新闻分析师调用超时'}},
+      runs: [{id: 'bt-why', status: 'failed', kind: 'backtest', ticker: 'NVDA', date: '2026-11-12'}],
+      progress: {agents: []},
+      result: {present: false},
+    };
+    ui.ui.state.selectedRunId = 'bt-why';
+    await ui.ui.renderRuns();
+    assert.match(ui.doc.querySelector('#run-status-line').textContent, /新闻分析师调用超时/);
+    assert.doesNotMatch(ui.doc.querySelector('#run-status-line').textContent, /不等于回测完成/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a finished backtest without a result is not called an unfinished analysis', async () => {
+  const finished = {
+    run: {id: 'bt-fin', status: 'finished', kind: 'backtest', ticker: 'NVDA', date: '2026-11-12', selections: {ticker: 'NVDA', date: '2026-11-12'}},
+    runs: [{id: 'bt-fin', status: 'finished', kind: 'backtest', ticker: 'NVDA', date: '2026-11-12'}],
+    progress: {agents: []},
+    result: {present: false},
+    counts: {all: 1, running: 0, queued: 0, failed: 0, finished: 1},
+  };
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': finished});
+  try {
+    await openRunFromList(ui, 'bt-fin');
+    const step = ui.doc.querySelector('#next-step').textContent;
+    assert.match(step, /不表示回测完成/);
+    assert.doesNotMatch(step, /不表示分析完成|不把它写成分析完成/);
+    const analysis = ui.doc.createElement('div');
+    analysis.innerHTML = ui.window.uiTest.nextStepPanel({status: 'finished', kind: 'analysis'}, {present: false}, {});
+    assert.match(analysis.textContent, /不表示分析完成/);
+    assert.doesNotMatch(analysis.textContent, /不表示回测完成|不把它写成分析完成/);
+    const other = ui.doc.createElement('div');
+    other.innerHTML = ui.window.uiTest.nextStepPanel({status: 'finished', kind: 'index'}, {present: false}, {});
+    assert.match(other.textContent, /不把它写成分析完成/);
+    assert.doesNotMatch(other.textContent, /不表示回测完成|不表示分析完成/);
+
+    ui.routes['/api/runs'] = {
+      run: {id: 'bt-live', status: 'running', kind: 'backtest', ticker: 'NVDA', date: '2026-11-12', selections: {ticker: 'NVDA'}},
+      runs: [{id: 'bt-live', status: 'running', kind: 'backtest', ticker: 'NVDA', date: '2026-11-12'}],
+      progress: {agents: [], report: '回测日志'},
+      result: {present: false},
+      counts: {all: 1, running: 1, queued: 0, failed: 0, finished: 0},
+    };
+    ui.ui.state.selectedRunId = 'bt-live';
+    await ui.ui.renderRuns();
+    const summary = ui.doc.querySelector('#current-report summary').textContent;
+    assert.match(summary, /查看当前回测内容/);
+    assert.doesNotMatch(summary, /查看当前分析内容/);
+    assert.match(ui.doc.querySelector('#current-report').textContent, /回测过程中/);
+    assert.doesNotMatch(ui.doc.querySelector('#current-report').textContent, /分析过程中/);
+
+    ui.routes['/api/runs'] = {
+      run: {id: 'an-live', status: 'running', kind: 'analysis', ticker: 'NVDA', date: '2026-11-12', selections: {ticker: 'NVDA'}},
+      runs: [{id: 'an-live', status: 'running', kind: 'analysis', ticker: 'NVDA', date: '2026-11-12'}],
+      progress: {agents: [], report: '分析日志'},
+      result: {present: false},
+    };
+    ui.ui.state.selectedRunId = 'an-live';
+    await ui.ui.renderRuns();
+    assert.match(ui.doc.querySelector('#current-report summary').textContent, /查看当前分析内容/);
+    assert.doesNotMatch(ui.doc.querySelector('#current-report summary').textContent, /查看当前回测内容/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a backtest failure and an unknown live report do not split 信号 or 写成', async () => {
+  const detail = '这个任务记录的进程号现在属于另一个程序（启动时间对不上），原来的分析进程已经不在，没有写出结果。控制台没有向那个程序发送任何信号。';
+  const failed = {id: 'bt-fail', status: 'failed', kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08', selections: {ticker: 'NVDA'}, failure: {summary: '超时'}, detail};
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {run: failed, runs: [failed], progress: {agents: []}, result: {present: false}, counts: {all: 1, running: 0, queued: 0, failed: 1, finished: 0}}});
+  try {
+    await ui.click('[data-page=runs]');
+    await openRunFromList(ui, 'bt-fail');
+    const banner = ui.doc.querySelector('#run-failure');
+    assert.ok(banner);
+    assert.match(banner.textContent, /原来的回测进程已经不在/);
+    assert.match(banner.textContent, /没有向那个程序发送信号/);
+    assert.doesNotMatch(banner.textContent, /原来的分析进程/);
+    assert.match(banner.innerHTML, /启动时间对不上。<br class="notice-break">原来的回测进程已经不在，<br class="notice-break">没有写出结果。<br class="notice-break">没有向那个程序发送信号。/);
+    assert.equal(banner.querySelector('img, script'), null);
+
+    const live = {id: 'idx-live', status: 'running', kind: 'index', ticker: 'NVDA', date: '2026-11-12', selections: {ticker: 'NVDA'}};
+    ui.routes['/api/runs'] = {run: live, runs: [live], progress: {agents: []}, result: {present: false}, counts: {all: 1, running: 1, queued: 0, failed: 0, finished: 0}};
+    ui.ui.state.selectedRunId = 'idx-live';
+    await ui.ui.renderRuns();
+    const waiting = ui.doc.querySelector('#current-report-waiting');
+    assert.equal(waiting.textContent, '任务过程中，最新内容会显示在这里。不把它写成分析。');
+    assert.equal(waiting.innerHTML, '任务过程中，<br class="notice-break">最新内容会显示在这里。<br class="notice-break">不把它写成分析。');
+  } finally { ui.dom.window.close(); }
+});
+
+test('paste, crawl, and analyst notes do not split 地址, 用量, or 一名', async () => {
+  const ui = await setup();
+  try {
+    await ui.click('[data-page=accounts]');
+    const paste = ui.doc.querySelector('#paste-label');
+    assert.match(paste.textContent, /当前没有等待粘贴的 ChatGPT 登录/);
+    assert.match(paste.innerHTML, /登录。<br class="notice-break">/);
+    assert.doesNotMatch(paste.innerHTML, /<script|onerror/);
+    const crawl = ui.doc.createElement('div');
+    crawl.innerHTML = ui.window.uiTest.infoItemsHtml({job: {status: 'done'}, items: [{id: '1', title: '条目', published_at: '2026-11-12T00:00:00Z', source_name: '来源', kind: 'news'}], picked: []});
+    const hint = crawl.querySelector('#ic-pick-hint');
+    assert.equal(hint.textContent, '默认不带入；只有勾选的条目会作为上下文加入分析，会增加模型用量。');
+    assert.equal(hint.innerHTML, '默认不带入；<br class="notice-break">只有勾选的条目会作为上下文加入分析，<br class="notice-break">会增加模型用量。');
+    const analyst = ui.doc.createElement('div');
+    analyst.innerHTML = ui.window.uiTest.analystRequiredHtml('请至少选择一名分析师。');
+    assert.equal(analyst.textContent, '至少选择一名分析师。对应命令行：请至少选择一名分析师。页面没有取消这一问，不会退出。');
+    assert.match(analyst.innerHTML, /至少选择一名分析师。<br class="notice-break">对应命令行：请至少选择一名分析师。<br class="notice-break">页面没有取消这一问，不会退出。/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('custom model, empty backtest dates, and attached crawl do not split 手填, 日期, or 引用', async () => {
+  const ui = await setup({'/api/backtests/validate': {cells: 0, analysts: ['market']}});
+  try {
+    const row = ui.doc.createElement('div');
+    row.innerHTML = ui.window.uiTest.customModelRow('ollama');
+    const label = row.querySelector('label');
+    assert.match(label.textContent, /列表失败或选择自定义时手填/);
+    assert.match(label.innerHTML, /<br class="notice-break">列表失败或选择自定义时手填。/);
+    ui.ui.state.infoAttach = {job: {status: 'done'}, keyword: '贵州茅台', items: [{id: '1'}]};
+    // AUDIT-CHECK-02 merge: with news selected the own-line no-news hint stays empty and hidden.
+    ui.ui.state.form.analysts = ['market', 'news'];
+    const attach = ui.doc.createElement('div');
+    attach.innerHTML = ui.window.uiTest.infoAttachHtml();
+    assert.equal(attach.querySelector('#info-attach').textContent.replace(/\s+/g, ''), '已带入信息抓取「贵州茅台」中勾选的1条资讯，报告会附来源引用。不带入');
+    assert.match(attach.innerHTML, /<br class="notice-break">报告会附来源引用。/);
+    ui.ui.state.backtest = {tickers: 'NVDA', start: '2026-10-01', end: '2026-10-08', every: 7, asset_type: 'stock', analysts: ['market'], run_id: '', portfolio: ''};
+    await ui.click('[data-page=backtest]');
+    ui.fill('#bt-tickers', 'NVDA');
+    ui.fill('#bt-start', '2026-10-01');
+    ui.fill('#bt-end', '2026-10-08');
+    await ui.click('#check-backtest');
+    const estimate = ui.doc.querySelector('#backtest-result');
+    assert.equal(estimate.textContent, '共 0 次分析。所选范围没有可分析的日期，请调整日期。');
+    assert.match(estimate.innerHTML, /共 0 次分析。<br class="notice-break">所选范围没有可分析的日期，<br class="notice-break">请调整日期。/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('asset, holding, import, and restart notes do not split 成本, 使用, or 模型', async () => {
+  const ui = await setup();
+  try {
+    ui.ui.state.form.asset_type = 'commodity';
+    await ui.click('[data-page=analyze]');
+    await ui.click('.fw[data-framework=tradingagents]');
+    const asset = ui.doc.querySelector('#asset-hint');
+    assert.equal(asset.textContent, '按代码识别为贵金属/商品期货（如 XAUUSD→GC=F），不做公司基本面分析。');
+    assert.match(asset.innerHTML, /<br class="notice-break">（如 XAUUSD→GC=F），<br class="notice-break">不做公司基本面分析。/);
+    const holding = ui.doc.querySelector('#holding-hint');
+    assert.equal(holding.textContent, '用于组合经理给出加仓或减仓建议。持仓价格按买入成本填写。');
+    assert.match(holding.innerHTML, /减仓建议。<br class="notice-break">持仓价格按买入成本填写。/);
+    const note = ui.doc.createElement('div');
+    note.innerHTML = ui.window.uiTest.formNoteHtml('未选新闻分析师，本地导入的资料不会被使用。请勾选新闻分析师，或清除导入。');
+    assert.match(note.innerHTML, /新闻分析师，<br class="notice-break">本地导入的资料不会被使用。<br class="notice-break">/);
+    ui.window.uiTest.showToast('已从断点重新启动，已完成的角色不会再调用模型');
+    const toast = ui.doc.querySelector('#toast-host .toast');
+    assert.equal(toast.textContent.replace(/\s+/g, ''), '✓已从断点重新启动，已完成的角色不会再调用模型');
+    assert.match(toast.innerHTML, /重新启动，<br class="toast-break">已完成的角色不会再调用模型/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a compare card does not split 评级 when the saved rating is not structured', async () => {
+  const ui = await setup();
+  try {
+    const card = ui.doc.createElement('div');
+    card.innerHTML = ui.window.uiTest.compareCard({rating: 'Overweight', source: 'text', evidence_note: '没有结构化证据引用，不从正文猜测。'});
+    const line = card.querySelector('p');
+    assert.equal(line.textContent, '记录里有 Overweight，但不把它当成结构化评级。');
+    assert.match(line.innerHTML, /记录里有 Overweight，<br class="notice-break">但不把它当成结构化评级。/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a cost match note does not split 核对', async () => {
+  const ui = await setup({'/api/cost': {runs: [{
+    id: 'c-match', ticker: 'NVDA', date: '2026-11-12',
+    api_text: '费用无法核对。',
+    match_text: '有用量没有归到这次运行的角色，不把部分合计当成已核对。',
+    health_text: '登录失效或无权限，不是预算超限。',
+    roles: [],
+  }], note: ''}});
+  try {
+    await ui.click('[data-page=cost]');
+    const hint = ui.doc.querySelector('.cost-card .form-hint');
+    assert.equal(hint.textContent, '有用量没有归到这次运行的角色，不把部分合计当成已核对。');
+    assert.match(hint.innerHTML, /这次运行的角色，<br class="notice-break">不把部分合计当成已核对。/);
+    const health = ui.doc.querySelector('.cost-health');
+    assert.equal(health.textContent, '登录失效或无权限，不是预算超限。');
+    assert.match(health.innerHTML, /无权限，<br class="notice-break">不是预算超限。/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unsaved crawl count does not split 结果', async () => {
+  const ui = await setup();
+  try {
+    const html = ui.window.uiTest.infoStatusHtml({status: 'failed', sources: {sec: {status: 'ok', count: 12}}}, []);
+    const row = ui.doc.createElement('div');
+    row.innerHTML = html;
+    const item = row.querySelector('[data-source-status=sec]');
+    assert.equal(item.textContent.replace(/\s+/g, ''), 'sec来源返回了12条，但结果没有保存，不把条数当成已有结果。');
+    assert.match(item.innerHTML, /来源返回了 12 条，<br class="notice-break">但结果没有保存，<br class="notice-break">不把条数当成已有结果。/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('replay and wizard hints do not split 提示词 or leave 页面 alone', async () => {
+  const ui = await setup();
+  try {
+    await ui.click('[data-page=compare]');
+    ui.ui.state.compareReplay = {
+      note: '回放使用这次运行保存的提示词版本，不用当前提示词。',
+      steps: [{agent: 'market', zh: '市场分析师', status_zh: '完成', time: '09:00'}],
+      prompts: [{agent: 'market', zh: '市场分析师', sha256: 'abc', saved: true, changed: null}],
+    };
+    ui.ui.state.compareStep = 0;
+    ui.window.uiTest.paintReplay();
+    const hint = ui.doc.querySelector('#compare-replay .form-hint');
+    assert.equal(hint.textContent, '回放使用这次运行保存的提示词版本，不用当前提示词。');
+    assert.match(hint.innerHTML, /提示词版本，<br class="notice-break">不用当前提示词。/);
+    const saved = ui.doc.querySelector('.compare-prompt span:last-child');
+    assert.match(saved.textContent, /当前源码没有这个角色，回放仍用保存版本/);
+    assert.match(saved.innerHTML, /这个角色，<br class="notice-break">回放仍用保存版本/);
+    await ui.click('[data-page=analyze]');
+    await ui.click('.fw[data-framework=tradingagents]');
+    await fillToReview(ui);
+    const step = ui.doc.querySelector('#step-cli');
+    assert.equal(step.textContent, '启动后会自动打开查看状态，可以随时离开这个页面。');
+    assert.match(step.innerHTML, /查看状态，<br class="notice-break">可以随时离开这个页面。/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an ended run list does not show an unrecorded completion count', async () => {
+  const finished = {
+    id: 'bt-list', status: 'finished', kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08',
+    done: 0, total: 12, team_zh: '进程已结束', unrecorded: true, started_at: '2026-11-12T09:00:00',
+  };
+  const running = {
+    id: 'bt-live', status: 'running', kind: 'backtest', ticker: 'AAPL', date: '2026-11-12',
+    done: 0, total: 12, team_zh: '准备中', started_at: '2026-11-12T09:10:00',
+  };
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: finished,
+    runs: [running, finished],
+    progress: {agents: []},
+    result: {present: false},
+    counts: {all: 2, running: 1, queued: 0, failed: 0, finished: 1},
+  }});
+  try {
+    await ui.click('[data-page=runs]');
+    const list = ui.doc.querySelector('#run-list').textContent;
+    assert.match(list, /没有记录/);
+    assert.match(ui.doc.querySelector('#unrecorded-list').textContent, /不写成完成数/);
+    const rows = [...ui.doc.querySelectorAll('#run-list [data-run-id]')];
+    const ended = rows.find((row) => row.dataset.runId === 'bt-list');
+    const live = rows.find((row) => row.dataset.runId === 'bt-live');
+    assert.match(ended.textContent, /没有记录/);
+    assert.doesNotMatch(ended.textContent, /0\/12/);
+    assert.match(live.textContent, /0\/12/);
+    assert.doesNotMatch(live.querySelector('.pg').textContent, /没有记录/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an ended run without role records is not given a completion count', async () => {
+  const pending = {team: 'Analyst Team', team_zh: '分析师团队', agent: 'Market Analyst', zh: '市场分析师', status: 'pending', status_zh: '等待'};
+  const finished = {
+    run: {id: 'bt-count', status: 'finished', kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08', selections: {ticker: 'NVDA'}},
+    runs: [{id: 'bt-count', status: 'finished', kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08'}],
+    progress: {agents: [pending, {team: 'Research Team', team_zh: '研究团队', agent: 'Bull Researcher', zh: '多头研究员', status: 'pending', status_zh: '等待'}]},
+    result: {present: false},
+  };
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': finished});
+  try {
+    await openRunFromList(ui, 'bt-count');
+    const progress = ui.doc.querySelector('#task-progress').textContent;
+    assert.match(progress, /没有角色进度，不写成已完成/);
+    assert.doesNotMatch(progress, /个角色完成|等待进度|0\/2/);
+    ui.routes['/api/runs'] = {
+      run: {id: 'bt-live', status: 'running', kind: 'backtest', ticker: 'NVDA', selections: {ticker: 'NVDA'}},
+      runs: [{id: 'bt-live', status: 'running', kind: 'backtest', ticker: 'NVDA'}],
+      progress: {agents: [pending]},
+      result: {present: false},
+    };
+    ui.ui.state.selectedRunId = 'bt-live';
+    await ui.ui.renderRuns();
+    assert.match(ui.doc.querySelector('#task-progress').textContent, /0\/1 个角色完成/);
+    assert.doesNotMatch(ui.doc.querySelector('#task-progress').textContent, /不写成已完成/);
+
+    ui.routes['/api/runs'] = {
+      run: {id: 'an-blank', status: 'finished', kind: 'analysis', ticker: 'NVDA', selections: {ticker: 'NVDA'}},
+      runs: [{id: 'an-blank', status: 'finished', kind: 'analysis', ticker: 'NVDA'}],
+      progress: {agents: [pending]},
+      result: {present: false},
+    };
+    ui.ui.state.selectedRunId = 'an-blank';
+    await ui.ui.renderRuns();
+    assert.match(ui.doc.querySelector('#role-progress').textContent, /没有角色进度，不写成已完成/);
+    assert.equal(ui.doc.querySelector('#role-progress .bar, #current-task .bar'), null);
+    ui.routes['/api/runs'] = {
+      run: {id: 'an-live', status: 'running', kind: 'analysis', ticker: 'NVDA', selections: {ticker: 'NVDA'}},
+      runs: [{id: 'an-live', status: 'running', kind: 'analysis', ticker: 'NVDA'}],
+      progress: {agents: []},
+      result: {present: false},
+    };
+    ui.ui.state.selectedRunId = 'an-live';
+    await ui.ui.renderRuns();
+    assert.match(ui.doc.querySelector('#waiting-progress').textContent, /等待进度/);
+    assert.doesNotMatch(ui.doc.querySelector('#waiting-progress').textContent, /不写成已完成/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a backtest date span is not called an analysis date', async () => {
+  const backtest = {
+    run: {id: 'bt-span', status: 'finished', kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08', selections: {ticker: 'NVDA'}},
+    runs: [{id: 'bt-span', status: 'finished', kind: 'backtest', ticker: 'NVDA', date: '2026-10-01..2026-10-08'}],
+    progress: {agents: []},
+    result: {present: false},
+    counts: {all: 1, running: 0, queued: 0, failed: 0, finished: 1},
+  };
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': backtest});
+  try {
+    await ui.click('[data-page=runs]');
+    assert.match(ui.doc.querySelector('#run-list').textContent, /回测区间 2026-10-01\.\.2026-10-08/);
+    assert.doesNotMatch(ui.doc.querySelector('#run-list').textContent, /分析日期/);
+    await openRunFromList(ui, 'bt-span');
+    const summary = ui.doc.querySelector('#current-task').textContent;
+    assert.match(summary, /回测区间/);
+    assert.match(summary, /2026-10-01\.\.2026-10-08/);
+    assert.doesNotMatch(summary, /分析日期/);
+    ui.routes['/api/runs'] = {
+      run: {id: 'an-date', status: 'finished', kind: 'analysis', ticker: 'NVDA', date: '2026-11-12', selections: {ticker: 'NVDA', date: '2026-11-12'}},
+      runs: [{id: 'an-date', status: 'finished', kind: 'analysis', ticker: 'NVDA', date: '2026-11-12'}],
+      progress: {agents: []},
+      result: {present: false},
+    };
+    ui.ui.state.runDetailOpen = false;
+    ui.ui.state.selectedRunId = null;
+    await ui.ui.renderRuns();
+    assert.match(ui.doc.querySelector('#run-list').textContent, /分析日期 2026-11-12/);
+    ui.routes['/api/runs'] = {
+      run: {id: 'kind-date', status: 'running', kind: 'index', ticker: 'AAA', date: '2026-11-12', selections: {ticker: 'AAA'}},
+      runs: [{id: 'kind-date', status: 'running', kind: 'index', ticker: 'AAA', date: '2026-11-12'}],
+      progress: {agents: []},
+      result: {present: false},
+    };
+    await ui.ui.renderRuns();
+    assert.match(ui.doc.querySelector('#run-list').textContent, /日期，不把它写成分析日期/);
+    assert.doesNotMatch(ui.doc.querySelector('#run-list small').textContent, /^分析日期/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an ended run does not call an unrecorded role still waiting', async () => {
+  const pending = {team: 'Trading Team', team_zh: '交易团队', agent: 'Trader', zh: '交易员', status: 'pending', status_zh: '等待'};
+  const finished = {
+    run: {id: 'bt-wait', status: 'finished', kind: 'backtest', ticker: 'NVDA', date: '2026-11-12', selections: {ticker: 'NVDA'}},
+    runs: [{id: 'bt-wait', status: 'finished', kind: 'backtest', ticker: 'NVDA', date: '2026-11-12'}],
+    progress: {agents: [pending]},
+    result: {present: false},
+    counts: {all: 1, running: 0, queued: 0, failed: 0, finished: 1},
+  };
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': finished});
+  try {
+    await openRunFromList(ui, 'bt-wait');
+    const badge = ui.doc.querySelector('.progress-table .status-badge').textContent;
+    assert.equal(badge, '未记录');
+    assert.doesNotMatch(ui.doc.querySelector('.progress-table').textContent, /等待/);
+    assert.match(ui.doc.querySelector('#unrecorded-roles').textContent, /不把它们写成等待/);
+    ui.routes['/api/runs'] = {
+      run: {id: 'bt-live', status: 'running', kind: 'backtest', ticker: 'NVDA', selections: {ticker: 'NVDA'}},
+      runs: [{id: 'bt-live', status: 'running', kind: 'backtest', ticker: 'NVDA'}],
+      progress: {agents: [pending]},
+      result: {present: false},
+    };
+    ui.ui.state.selectedRunId = 'bt-live';
+    await ui.ui.renderRuns();
+    assert.equal(ui.doc.querySelector('.progress-table .status-badge').textContent, '等待');
+    assert.equal(ui.doc.querySelector('#unrecorded-roles'), null);
+
+    ui.routes['/api/runs'] = {
+      run: {id: 'failed-wait', status: 'failed', kind: 'analysis', selections: {ticker: 'NVDA', date: '2026-11-12'}},
+      runs: [{id: 'failed-wait', status: 'failed', kind: 'analysis', ticker: 'NVDA'}],
+      progress: {agents: [
+        {team: 'Research Team', team_zh: '研究团队', agent: 'Bull Researcher', zh: '多头研究员', status: 'error', status_zh: '错误'},
+        pending,
+      ]},
+      result: {present: false},
+    };
+    ui.ui.state.selectedRunId = 'failed-wait';
+    await ui.ui.renderRuns();
+    assert.match(ui.doc.querySelector('.team.bad').textContent, /失败/);
+    const later = ui.doc.querySelector('.team[data-team="Trading Team"]');
+    assert.equal(later.querySelector('.pill').textContent, '未记录');
+    assert.match(later.textContent, /不把它们写成等待/);
+    assert.doesNotMatch(later.querySelector('.pill').textContent, /等待/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a failed run with a completion line is not called analysis complete', async () => {
+  const failed = failedRun({saved: true});
+  failed.progress.complete = 'Analysis Complete!';
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': failed});
+  try {
+    await ui.click('[data-page=runs]');
+    await openRunFromList(ui, 'failed-fixture');
+    const note = ui.doc.querySelector('#completion-note');
+    assert.ok(note);
+    assert.match(note.textContent, /日志里有完成句，但任务状态是失败，不把它写成分析已完成/);
+    assert.match(note.innerHTML, /日志里有完成句，<br class="notice-break">但任务状态是失败，<br class="notice-break">不把它写成分析已完成。/);
+    assert.doesNotMatch(note.textContent, /^分析已完成/);
+    const finished = {run: {id: 'done-fixture', status: 'finished', kind: 'analysis', selections: {ticker: 'NVDA', date: '2026-11-11'}}, progress: {agents: [], complete: 'Analysis Complete!'}, result: {present: false}, runs: [{id: 'done-fixture', status: 'finished', ticker: 'NVDA', date: '2026-11-11'}]};
+    ui.routes['/api/runs'] = finished;
+    ui.ui.state.selectedRunId = 'done-fixture';
+    await ui.ui.renderRuns();
+    assert.equal(ui.doc.querySelector('#completion-note').textContent, '分析已完成。');
+  } finally { ui.dom.window.close(); }
+});
+
+test('a stopped or finished restart is not called a failed restart', async () => {
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'fin', status: 'finished', kind: 'analysis', selections: {ticker: 'AAPL', date: '2026-11-11'}},
+    progress: {agents: []}, result: {present: false},
+    runs: [{id: 'fin', status: 'finished', ticker: 'AAPL', date: '2026-11-11'}],
+  }});
+  try {
+    await ui.click('[data-page=runs]');
+    await openRunFromList(ui, 'fin');
+    const cases = [
+      ['stopped', /任务已停止，不把它写成已重新启动/],
+      ['finished', /任务已经结束，不把它写成已重新启动/],
+      ['cancelled', /任务已取消，不把它写成已重新启动/],
+      ['stopping', /任务正在停止，不把它写成已重新启动/],
+      ['mystery', /重新启动结果状态未知，不把它写成已启动/],
+    ];
+    for (const [status, pattern] of cases) {
+      ui.routes['/api/runs/restart'] = {id: 'fin', status, zh: '已重新启动'};
+      ui.routes['/api/runs'] = {run: {id: 'fin', status: 'finished', kind: 'analysis', selections: {ticker: 'AAPL'}}, progress: {agents: []}, result: {present: false}, runs: [{id: 'fin', status: 'finished', ticker: 'AAPL'}]};
+      await ui.ui.renderRuns();
+      await ui.click('#restart-run');
+      await settleMany();
+      const toast = ui.doc.querySelector('#toast-host .toast');
+      assert.match(toast.textContent, pattern, status);
+      assert.doesNotMatch(toast.textContent, /没有重新启动成功|已重新启动任务/);
+      assert.equal(toast.classList.contains('toast--unknown'), status !== 'stopping', status);
+      assert.equal(toast.classList.contains('toast--wait'), status === 'stopping', status);
+    }
+  } finally { ui.dom.window.close(); }
+});
+
+test('a restart without a status is not called submitted', async () => {
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'fin', status: 'finished', kind: 'analysis', selections: {ticker: 'AAPL', date: '2026-11-11'}},
+    progress: {agents: []}, result: {present: false},
+    runs: [{id: 'fin', status: 'finished', ticker: 'AAPL', date: '2026-11-11'}],
+  }});
+  try {
+    await ui.click('[data-page=runs]');
+    await openRunFromList(ui, 'fin');
+    ui.routes['/api/runs/restart'] = {id: 'fin', zh: '已重新启动'};
+    await ui.click('#restart-run');
+    await settleMany();
+    const toast = ui.doc.querySelector('#toast-host .toast');
+    assert.match(toast.textContent, /不把它写成已提交或已重新启动/);
+    assert.doesNotMatch(toast.textContent, /任务已提交|已重新启动任务/);
+    assert.equal(toast.classList.contains('toast--unknown'), true);
+    assert.doesNotMatch(toast.querySelector('.ck').textContent, /✓/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a resume without a status is not called submitted or resumed', async () => {
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': failedRun({saved: true})});
+  try {
+    await ui.click('[data-page=runs]');
+    await openRunFromList(ui, 'failed-fixture');
+    ui.routes['/api/runs/restart'] = {id: 'failed-fixture', zh: '已从断点重新启动'};
+    await ui.click('#resume-run');
+    await settleMany();
+    const toast = ui.doc.querySelector('#toast-host .toast');
+    assert.match(toast.textContent, /不把它写成已提交或已从断点重新启动/);
+    assert.doesNotMatch(toast.textContent, /任务已提交/);
+    assert.equal(toast.classList.contains('toast--unknown'), true);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a queued resume is not called already restarted', async () => {
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': failedRun({saved: true})});
+  try {
+    await ui.click('[data-page=runs]');
+    await openRunFromList(ui, 'failed-fixture');
+    ui.routes['/api/runs/restart'] = {id: 'queued-resume', status: 'queued', zh: '已加入队列，前面还有 1 个。有任务结束后会自动开始。', queue_ahead: 1};
+    ui.routes['/api/runs'] = {run: {id: 'queued-resume', status: 'queued', kind: 'analysis', selections: {ticker: 'NVDA'}}, progress: {agents: []}, result: {present: false}};
+    await ui.click('#resume-run');
+    await settleMany();
+    const toastEl = ui.doc.querySelector('#toast-host .toast');
+    const toast = toastEl.textContent;
+    assert.match(toast, /已加入队列/);
+    assert.match(toast, /还没有|有任务结束后会自动开始/);
+    assert.doesNotMatch(toast, /已从断点重新启动|已重新启动/);
+    assert.equal(toastEl.classList.contains('toast--wait'), true);
+    assert.doesNotMatch(toastEl.querySelector('.ck').textContent, /✓/);
+    ui.routes['/api/runs'] = failedRun({saved: true});
+    ui.routes['/api/runs/restart'] = {id: 'running-resume', status: 'running', zh: '已在后台启动。进程启动不等于分析完成。'};
+    await ui.ui.renderRuns();
+    await ui.click('#resume-run');
+    await settleMany();
+    const runningToast = ui.doc.querySelector('#toast-host .toast');
+    assert.match(runningToast.textContent, /已从断点重新启动/);
+    assert.equal(runningToast.querySelector('.ck').textContent, '✓');
+    assert.equal(runningToast.classList.contains('toast--wait'), false);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a failed info crawl does not call an unsaved source count available', async () => {
+  const sources = {inject_default: false, existing: [], sources: [
+    {id: 'sec_edgar', name: 'SEC EDGAR 公告', kind: 'filing', assets: ['stock'], terms_url: 'https://www.sec.gov/os/accessing-edgar-data', description: '官方披露', optional: false, available: true, reason: ''},
+    {id: 'gdelt', name: 'GDELT 全球新闻索引', kind: 'news', assets: ['stock'], terms_url: 'https://www.gdeltproject.org/about.html', description: '新闻', optional: false, available: true, reason: ''},
+  ]};
+  const failed = {id: 'ic-20261111-save0001', keyword: 'NVDA', asset_type: 'stock', hours: 72, status: 'failed',
+    reason: '抓取结果没有保存成功（OSError），请重新抓取。',
+    sources: {sec_edgar: {status: 'ok', count: 1, reason: ''}, gdelt: {status: 'unavailable', count: 0, reason: '来源暂不可用'}}};
+  const ui = await setup({
+    '/api/frameworks': {...FRAMEWORKS, tools: [{id: 'info-crawl', name: '信息抓取', description: '官方来源', icon: '/icons/logo.svg', tags: ['公告'], tool: true}]},
+    '/api/info-crawl/sources': sources,
+    '/api/info-crawl/jobs': () => ({job: failed}),
+    '/api/info-crawl/items': {job: failed, items: []},
+  }, {url: 'http://localhost/#start'});
+  try {
+    const {doc, click, fill} = ui;
+    await click('.fw[data-framework="info-crawl"]');
+    for (let i = 0; i < 6; i++) await settle();
+    ui.ui.state.infoPollMs = 0;
+    fill('#ic-keyword', 'NVDA');
+    doc.querySelector('#ic-form').dispatchEvent(new ui.window.Event('submit', {cancelable: true}));
+    for (let i = 0; i < 3; i++) { await new Promise((r) => setTimeout(r, 15)); await settleMany(); }
+    const edgar = doc.querySelector('[data-source-status="sec_edgar"]').textContent;
+    assert.match(edgar, /来源返回了 1 条，但结果没有保存，不把条数当成已有结果/);
+    assert.doesNotMatch(edgar, /公告 1 条$/);
+    assert.match(doc.querySelector('[data-source-status="gdelt"]').textContent, /不可用/);
+    assert.doesNotMatch(doc.querySelector('#ic-status').textContent, /抓取中/);
+    assert.match(doc.querySelector('#ic-job-note').textContent, /没有保存成功/);
+    assert.equal(doc.querySelector('#ic-items'), null);
+    assert.equal(doc.querySelector('#ic-start').textContent, '开始抓取');
   } finally { ui.window.close(); }
 });
 
@@ -2603,6 +6071,178 @@ test('K 线行情: draw → loading keeps 未更新 dim, draw → fail clears ol
     assert.match(doc.querySelector('#kline-status').textContent, /代码格式正确：002323\.SZ/);
     assert.doesNotMatch(doc.querySelector('#kline-source').textContent, /NVDA/);
     assert.equal(doc.querySelector('#kline-name').textContent, '002323');
+    assert.equal(doc.querySelector('#kline-note').textContent, '没有拿到行情。');
+    assert.equal(doc.querySelector('#kline-live').hidden, true);
+    assert.equal(doc.querySelector('#kline-live').textContent, '');
+    assert.equal(doc.querySelector('#kline-future').textContent, '');
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unrecognized kline timeframe is not called daily', async () => {
+  const bars = [{time: 1761955200, open: 10, high: 11, low: 9, close: 10.5, volume: 5}];
+  const ui = await klineSetup('stock', 60, async () => ({
+    symbol: 'NVDA', canonical: 'NVDA', asset_type: 'stock', tf: '15m',
+    provider: 'yahoo', provider_symbol: 'NVDA', bars,
+    span_note: '小时线，请求近 60 天。',
+  }));
+  try {
+    const source = ui.doc.querySelector('#kline-source').textContent;
+    const note = ui.doc.querySelector('#kline-note').textContent;
+    assert.match(source, /周期未知，不把它写成日线/);
+    assert.match(note, /周期未知，不把它写成日线/);
+    assert.match(ui.doc.querySelector('#kline-note').innerHTML, /不把它写成日线。<br class="notice-break">/);
+    assert.match(note, /不按日线刷新/);
+    assert.doesNotMatch(note, /知情|60 秒|小时线|周线|月线|5分钟/);
+    assert.doesNotMatch(source, /股票日线|期货日线|加密货币日线|小时|周线|月线|5分钟/);
+    assert.equal(ui.doc.querySelector('#kline-tf .seg-item.on'), null);
+    assert.match(ui.doc.querySelector('#kline-live').textContent, /不把它写成日线/);
+    assert.equal(ui.timers.size, 0);
+    await ui.runTimers();
+    assert.equal(ui.calls.some((item) => item.path.includes('/api/kline/latest') && item.path.includes('tf=1D')), false);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a kline response without a timeframe is not called daily', async () => {
+  const bars = [{time: 1761955200, open: 10, high: 11, low: 9, close: 10.5, volume: 5}];
+  const ui = await klineSetup('stock', 60, async () => ({
+    symbol: 'NVDA', canonical: 'NVDA', asset_type: 'stock',
+    provider: 'yahoo', provider_symbol: 'NVDA', bars,
+  }));
+  try {
+    const source = ui.doc.querySelector('#kline-source').textContent;
+    const note = ui.doc.querySelector('#kline-note').textContent;
+    assert.match(source, /周期未知，不把它写成日线/);
+    assert.match(note, /周期未知，不把它写成日线/);
+    assert.match(note, /不按日线刷新/);
+    assert.doesNotMatch(note, /知情|60 秒/);
+    assert.doesNotMatch(source, /股票日线/);
+    assert.equal(ui.doc.querySelector('#kline-tf .seg-item.on'), null);
+    assert.match(ui.doc.querySelector('#kline-live').textContent, /不把它写成日线/);
+    await ui.runTimers();
+    assert.equal(ui.calls.some((item) => item.path.includes('/api/kline/latest') && item.path.includes('tf=1D')), false);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a known daily kline is still called daily', async () => {
+  const ui = await klineSetup('stock', 60);
+  try {
+    assert.match(ui.doc.querySelector('#kline-source').textContent, /股票日线/);
+    assert.match(ui.doc.querySelector('#kline-note').textContent, /日线/);
+    assert.doesNotMatch(ui.doc.querySelector('#kline-note').textContent, /不把它写成日线/);
+    assert.equal(ui.doc.querySelector('#kline-tf .seg-item.on')?.textContent, '日线');
+    assert.doesNotMatch(ui.doc.querySelector('#kline-live').textContent, /不把它写成日线/);
+    await ui.runTimers();
+    assert.equal(ui.calls.some((item) => item.path.includes('/api/kline/latest') && item.path.includes('tf=1D')), true);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a five minute kline is still called five minutes', async () => {
+  const bars = [{time: 1761955200, open: 10, high: 11, low: 9, close: 10.5, volume: 5}];
+  const ui = await klineSetup('stock', 60, async () => ({
+    symbol: 'NVDA', canonical: 'NVDA', asset_type: 'stock', tf: '5m',
+    provider: 'yahoo', provider_symbol: 'NVDA', bars,
+    span_note: '5分钟线，请求近 5 天，长度以实际返回为准。',
+  }));
+  try {
+    assert.match(ui.doc.querySelector('#kline-source').textContent, /股票5分钟/);
+    assert.match(ui.doc.querySelector('#kline-note').textContent, /5分钟线/);
+    assert.doesNotMatch(ui.doc.querySelector('#kline-source').textContent, /日线/);
+    assert.doesNotMatch(ui.doc.querySelector('#kline-note').textContent, /不把它写成日线/);
+    assert.equal(ui.doc.querySelector('#kline-tf .seg-item.on')?.textContent, '5分钟');
+  } finally { ui.dom.window.close(); }
+});
+
+test('a kline without an asset type is not called a stock', async () => {
+  const bars = [{time: 1761955200, open: 10, high: 11, low: 9, close: 10.5, volume: 5}];
+  const ui = await klineSetup('stock', 60, async () => ({symbol: 'NVDA', canonical: 'NVDA', tf: '1D', provider: 'yahoo', provider_symbol: 'NVDA', bars}));
+  try {
+    const source = ui.doc.querySelector('#kline-source').textContent;
+    const note = ui.doc.querySelector('#kline-note').textContent;
+    const live = ui.doc.querySelector('#kline-live').textContent;
+    assert.match(source, /不把它写成股票/);
+    assert.doesNotMatch(source, /数据源：股票|数据源：期货|数据源：加密货币/);
+    assert.match(note, /不把它写成股票，也不写成延时行情/);
+    assert.doesNotMatch(note, /知情：最新价约每 60 秒/);
+    assert.match(live, /不把它写成股票/);
+    assert.doesNotMatch(live, /知情|约 60 秒|实时 ·/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a later kline tick without an asset type is not called delayed stock', async () => {
+  const bars = [{time: 1761955200, open: 10, high: 11, low: 9, close: 10.5, volume: 5}, {time: 1762041600, open: 10.5, high: 12, low: 10, close: 11, volume: 6}];
+  const ui = await klineSetup('stock', 60, async () => ({symbol: 'NVDA', canonical: 'NVDA', tf: '1D', provider: 'yahoo', provider_symbol: 'NVDA', bars}), {
+    '/api/kline/latest': {poll_seconds: 60, provider: 'yahoo', provider_symbol: 'NVDA', delayed: true, bar: {time: 1762041600, open: 10.5, high: 13, low: 10, close: 12.5, volume: 9}},
+  });
+  try {
+    await ui.runTimers();
+    const live = ui.doc.querySelector('#kline-live').textContent;
+    const note = ui.doc.querySelector('#kline-note').textContent;
+    assert.match(live, /不把它写成股票/);
+    assert.doesNotMatch(live, /知情|约 60 秒|实时 ·/);
+    assert.doesNotMatch(note, /知情：延时行情|知情：最新价约每 60 秒/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unrecognized asset type is not called a stock', async () => {
+  const ui = await setup({'/api/asset': {asset_type: 'index', analysts: ['market', 'news'], fundamentals_hidden: false, ticker: 'AAA'}});
+  try {
+    ui.fill('#ticker', 'AAA');
+    ui.doc.querySelector('#ticker').dispatchEvent(new ui.window.Event('change', {bubbles: true}));
+    for (let i = 0; i < 8; i++) await settle();
+    const hint = ui.doc.querySelector('#asset-hint').textContent;
+    assert.match(hint, /不把它写成股票/);
+    assert.doesNotMatch(hint, /按代码识别为股票/);
+    assert.equal(ui.doc.querySelector('#asset-seg .seg-item.on'), null);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a detected stock is still called a stock', async () => {
+  const ui = await setup({'/api/asset': {asset_type: 'stock', analysts: ['market', 'news', 'fundamentals'], fundamentals_hidden: false, ticker: 'AAPL'}});
+  try {
+    ui.fill('#ticker', 'AAPL');
+    ui.doc.querySelector('#ticker').dispatchEvent(new ui.window.Event('change', {bubbles: true}));
+    for (let i = 0; i < 8; i++) await settle();
+    assert.match(ui.doc.querySelector('#asset-hint').textContent, /按代码识别为股票/);
+    assert.equal(ui.doc.querySelector('#asset-seg [data-asset="stock"]').classList.contains('on'), true);
+  } finally { ui.dom.window.close(); }
+});
+
+test('opening a watchlist kline without an asset type does not select stock', async () => {
+  const ui = await setup({
+    '/api/watchlist': {mode: 'observe', mode_label: '观察', rule_version: 'watch-1', note: '', items: [
+      {symbol: '600519', enabled: true, last_price: 10},
+    ], triggers: [], visible_triggers: []},
+    '/api/watchlist/kline': {mode: 'observe', items: [], triggers: [], visible_triggers: []},
+  });
+  try {
+    await ui.click('[data-page=watchlist]');
+    for (let i = 0; i < 6; i++) await settle();
+    const button = ui.doc.querySelector('[data-watch-kline]');
+    assert.equal(button.dataset.watchAsset, undefined);
+    assert.doesNotMatch(ui.doc.querySelector('.watch-table').textContent, /股票/);
+    await ui.click('[data-watch-kline]');
+    for (let i = 0; i < 6; i++) await settle();
+    assert.equal(ui.doc.querySelector('#kline-asset .seg-item.on'), null);
+    assert.equal(ui.ui.state.kline.asset, '');
+    assert.equal(ui.ui.state.kline.symbol, '600519');
+  } finally { ui.dom.window.close(); }
+});
+
+test('opening a stock watchlist kline still selects stock', async () => {
+  const ui = await setup({
+    '/api/watchlist': {mode: 'observe', mode_label: '观察', rule_version: 'watch-1', note: '', items: [
+      {symbol: '600519', asset_type: 'stock', asset_label: '股票', enabled: true, last_price: 10},
+    ], triggers: [], visible_triggers: []},
+    '/api/watchlist/kline': {mode: 'observe', items: [], triggers: [], visible_triggers: []},
+  });
+  try {
+    await ui.click('[data-page=watchlist]');
+    for (let i = 0; i < 6; i++) await settle();
+    assert.equal(ui.doc.querySelector('[data-watch-kline]').dataset.watchAsset, 'stock');
+    await ui.click('[data-watch-kline]');
+    for (let i = 0; i < 6; i++) await settle();
+    assert.equal(ui.doc.querySelector('#kline-asset .seg-item.on').textContent, '股票');
+    assert.equal(ui.ui.state.kline.asset, 'stock');
   } finally { ui.dom.window.close(); }
 });
 
@@ -2729,4 +6369,453 @@ test('账户菜单: bottom-left button opens 修改密码 / 退出登录 (V2-AUT
   assert.equal(menu.hidden, false);
   assert.equal(ui.doc.querySelector('#account-change-password').getAttribute('href'), '/login?change=1');
   assert.match(ui.doc.querySelector('#account-logout').textContent, /退出登录/);
+});
+
+test('kline errors, live marks, and fallback headings do not split 老代码 or leave 查询 alone', async () => {
+  const bj = '行情源近一年没有 830000.BJ 的数据：北交所 4/8 开头的老代码已切换为 920 开头的新代码，请用新代码查询。';
+  const empty = '行情源暂时没有这只股票的数据（代码格式正确：600519.SS）。';
+  const bars = [{time: 1761955200, open: 10, high: 11, low: 9, close: 10.5, volume: 5}];
+  const ok = {symbol: 'XAUUSD', canonical: 'XAUUSD', asset_type: 'commodity', tf: '1D', provider: 'yahoo', provider_symbol: 'XAUUSD', bars};
+  let mode = 'ok';
+  let release;
+  const ui = await klineSetup('commodity', 60, async () => {
+    if (mode === 'hang') {
+      await new Promise((done) => { release = done; });
+      return {__status: 400, body: {error: bj}};
+    }
+    if (mode === 'empty') return {__status: 400, body: {error: empty}};
+    return ok;
+  }, {'/api/kline/latest': {
+    asset_type: 'commodity', poll_seconds: 60, delayed: true, stale_bar: true, freshness_note: '可能未更新',
+    bar: {time: 1762041600, open: 10.5, high: 13, low: 10, close: 12.5, volume: 9},
+  }});
+  try {
+    const doc = ui.doc;
+    const flush = async () => { for (let i = 0; i < 8; i++) await new Promise((done) => setImmediate(done)); };
+    await ui.runTimers();
+    const live = doc.querySelector('#kline-live');
+    assert.equal(live.textContent, '最新一根已经过去一段时间，不据此判断是否开市。 知情 · 约 60 秒询问 · 可能未更新');
+    assert.match(live.innerHTML, /一段时间，<br class="notice-break">不据此判断是否开市。/);
+    const input = doc.querySelector('#kline-symbol');
+    input.value = '贵州茅台';
+    input.dispatchEvent(new ui.window.Event('input'));
+    const stale = doc.querySelector('#kline-stale');
+    assert.equal(stale.textContent, '未更新：当前仍是 XAUUSD，点「查询」或按回车查看 贵州茅台');
+    assert.match(stale.innerHTML, /XAUUSD，<br class="notice-break">点「查询」或按回车查看 贵州茅台/);
+
+    mode = 'hang';
+    input.value = '830799';
+    doc.querySelector('#kline-form').dispatchEvent(new ui.window.Event('submit', {cancelable: true}));
+    await flush();
+    assert.equal(stale.textContent, '加载中：830799…（下图仍是 XAUUSD，未更新）');
+    assert.match(stale.innerHTML, /830799…<br class="notice-break">（下图仍是 XAUUSD，<br class="notice-break">未更新）/);
+    release();
+    await flush();
+    const status = doc.querySelector('#kline-status');
+    assert.equal(status.textContent, bj);
+    assert.match(status.innerHTML, /数据：<br class="notice-break">北交所 4\/8 开头的老代码<br class="notice-break">已切换为 920 开头的新代码，<br class="notice-break">请用新代码查询。/);
+    assert.doesNotMatch(status.textContent, /<br/);
+
+    mode = 'empty';
+    input.value = '600519';
+    doc.querySelector('#kline-form').dispatchEvent(new ui.window.Event('submit', {cancelable: true}));
+    await flush();
+    assert.equal(status.textContent, empty);
+    assert.match(status.innerHTML, /这只股票的数据<br class="notice-break">（代码格式正确：600519\.SS）。/);
+
+    ui.routes['/api/watchlist'] = () => { throw new Error('列表暂时读不到。'); };
+    await ui.click('[data-page=watchlist]');
+    const watch = doc.querySelector('.page-description');
+    assert.equal(watch.textContent, '股票、加密货币和贵金属。价格或决定变化只记录触发。观察模式不会自动启动分析。');
+    assert.match(watch.innerHTML, /贵金属。<br class="notice-break">价格或决定变化只记录触发。<br class="notice-break">观察模式不会自动启动分析。/);
+
+    ui.routes['/api/schedule/tick'] = () => { throw new Error('定时暂时读不到。'); };
+    await ui.click('[data-page=schedule]');
+    const schedule = doc.querySelector('.page-description');
+    assert.equal(schedule.textContent, '到点只记录触发。观察模式不会自动启动分析。去分析只打开向导。提醒先写入，再显示在本页。');
+    assert.match(schedule.innerHTML, /触发。<br class="notice-break">观察模式不会自动启动分析。<br class="notice-break">去分析只打开向导。<br class="notice-break">提醒先写入，<br class="notice-break">再显示在本页。/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('key status and kline asset buttons do not split 填写 or 贵金属', async () => {
+  const ui = await setup({'/api/config': {saved: {}, keys: [
+    {provider: 'openai', configured: false, env_var: 'OPENAI_API_KEY'},
+  ], data_env: [], cloud_env: []}, '/api/kline': {symbol: 'X', canonical: 'X', asset_type: 'commodity', tf: '1D', provider: 'yahoo', provider_symbol: 'X', bars: []}});
+  try {
+    await ui.click('[data-page=accounts]');
+    const status = ui.doc.querySelector('#key-status');
+    assert.equal(status.textContent, '尚未配置 API Key。使用订阅账户时无需填写。');
+    assert.match(status.innerHTML, /API Key。<br class="notice-break">使用订阅账户时无需填写。/);
+    assert.doesNotMatch(status.innerHTML, /填<br|写<br/);
+    await ui.click('[data-page=kline]');
+    const metal = [...ui.doc.querySelectorAll('#kline-asset .seg-item')].find((button) => button.textContent === '贵金属/商品期货');
+    assert.ok(metal, 'commodity asset button');
+    const css = [...ui.doc.styleSheets].map((sheet) => [...sheet.cssRules].map((rule) => rule.cssText).join('\n')).join('\n');
+    assert.match(css, /\.kline-controls \.seg-item\s*\{[^}]*white-space:\s*nowrap/);
+    assert.match(css, /\.kline-controls \.seg-item\s*\{[^}]*min-width:\s*max-content/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('update check and account load errors do not leave 信息 or 重试 alone', async () => {
+  const ui = await setup({'/api/updates/refresh': () => new Promise(() => {})});
+  try {
+    await ui.click('[data-page=accounts]');
+    await ui.click('#check-updates');
+    const note = ui.doc.querySelector('#updates-note');
+    assert.equal(note.textContent, '正在检查更新。这会询问 GitHub 和公告服务，不发送身份信息。');
+    assert.match(note.innerHTML, /更新。<br class="notice-break">这会询问 GitHub 和公告服务，<br class="notice-break">不发送身份信息。/);
+    ui.routes['/api/config'] = () => { throw new Error(''); };
+    await ui.click('[data-page=accounts]');
+    const banner = ui.doc.querySelector('#account-load-error .error-banner');
+    assert.equal(banner.textContent, '操作未完成。请检查网络或本机登录材料后重试。');
+    assert.match(banner.innerHTML, /操作未完成。<br class="notice-break">请检查网络或本机登录材料后重试。/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a fixed kline price line and a commodity note do not split 高低价 or 期货', async () => {
+  const ui = await klineSetup('stock', 60, {
+    symbol: 'X', canonical: 'X', asset_type: 'stock', tf: '1D', provider: 'yahoo', provider_symbol: 'X',
+    ohlc_note: '源数据不一致，已修正高低价',
+    bars: [{time: 1761955200, open: 10, high: 11, low: 9, close: 10.5, volume: 5, ohlc_fixed: true}],
+  });
+  try {
+    const ohlc = ui.doc.querySelector('#kline-ohlc');
+    assert.match(ohlc.textContent, /收 10\.50/);
+    assert.match(ohlc.textContent, /源数据不一致，已修正高低价/);
+    assert.match(ohlc.innerHTML, /<br class="notice-break">源数据不一致，已修正高低价/);
+    assert.doesNotMatch(ohlc.innerHTML, /高低<br|价<br/);
+    ui.routes['/api/asset'] = {asset_type: 'commodity', analysts: ['market'], fundamentals_hidden: true};
+    await ui.click('[data-page=analyze]');
+    await ui.click('.fw[data-framework=tradingagents]');
+    const ticker = ui.doc.querySelector('#ticker');
+    ticker.value = 'XAUUSD';
+    ticker.dispatchEvent(new ui.window.Event('change'));
+    for (let i = 0; i < 6; i++) await new Promise((done) => setImmediate(done));
+    const note = ui.doc.querySelector('#form-note');
+    assert.equal(note.textContent, '已识别为贵金属/商品期货，不使用基本面分析。');
+    assert.match(note.innerHTML, /贵金属\/商品期货，<br class="notice-break">不使用基本面分析。/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('status notes and the watch rule fallback do not split 完成 or 检查', async () => {
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'bt-note', status: 'finished', kind: 'backtest', ticker: 'NVDA', selections: {ticker: 'NVDA'}, started_at: '2026-11-11T10:00:00'},
+    runs: [{id: 'bt-note', status: 'finished', kind: 'backtest', ticker: 'NVDA'}],
+    progress: {complete: 'Analysis Complete!', agents: [
+      {team: 'Analyst Team', team_zh: '分析师团队', agent: 'Market Analyst', zh: '市场分析师', status: 'mystery', status_zh: 'mystery'},
+    ]},
+    result: {present: false},
+  }});
+  try {
+    await openRunFromList(ui, 'bt-note');
+    const done = ui.doc.querySelector('#completion-note');
+    assert.equal(done.textContent, '日志里有分析完成句。这不表示整次回测已完成。');
+    assert.match(done.innerHTML, /分析完成句。<br class="notice-break">这不表示整次回测已完成。/);
+    const role = ui.doc.querySelector('#unknown-role-status');
+    assert.equal(role.textContent, '角色状态未知，不把它写成进行中或已完成。');
+    assert.match(role.innerHTML, /状态未知，<br class="notice-break">不把它写成进行中或已完成。/);
+    ui.routes['/api/runs'] = {
+      run: {id: 'ended', status: 'failed', kind: 'analysis', selections: {ticker: '600519', date: '2026-11-11'}, started_at: '2026-11-10T10:00:00'},
+      runs: [{id: 'ended', status: 'failed', kind: 'analysis', ticker: '600519'}],
+      progress: {agents: [], timeline: []},
+      result: {present: false},
+    };
+    ui.ui.state.selectedRunId = 'ended';
+    await ui.ui.renderRuns();
+    const end = ui.doc.querySelector('#missing-end');
+    assert.equal(end.textContent, '没有结束时间，不按当前时间计算已用时间。');
+    assert.match(end.innerHTML, /结束时间，<br class="notice-break">不按当前时间计算已用时间。/);
+    ui.routes['/api/watchlist'] = () => { throw new Error('列表暂时读不到。'); };
+    await ui.click('[data-page=watchlist]');
+    const rule = ui.doc.querySelector('#watch-rule');
+    assert.equal(rule.textContent, '打开 K 线不消耗触发。未检查表示还没有规则检查；已检查并不表示已启动。');
+    assert.match(rule.innerHTML, /不消耗触发。<br class="notice-break">未检查表示还没有规则检查；<br class="notice-break">已检查并不表示已启动。/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an idle backtest next step does not split 结束', async () => {
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {id: 'bt-idle', status: 'idle', kind: 'backtest', ticker: 'NVDA', selections: {ticker: 'NVDA'}},
+    runs: [{id: 'bt-idle', status: 'idle', kind: 'backtest', ticker: 'NVDA'}],
+    progress: {agents: []},
+    result: {present: false},
+  }});
+  try {
+    await openRunFromList(ui, 'bt-idle');
+    const note = ui.doc.querySelector('#next-step .notice');
+    assert.equal(note.textContent, '任务状态是空闲，暂时没有可显示的结果。不把它写成已结束。');
+    assert.match(note.innerHTML, /空闲，<br class="notice-break">暂时没有可显示的结果。<br class="notice-break">不把它写成已结束。/);
+    assert.doesNotMatch(note.innerHTML, /已<br|结<br/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a restart without an id does not split 刷新状态', async () => {
+  const ui = await setup({'/api/logs': {lines: []}, '/api/runs': {
+    run: {status: 'finished', kind: 'analysis', ticker: 'NVDA', selections: {ticker: 'NVDA'}},
+    runs: [{id: 'listed', status: 'finished', kind: 'analysis', ticker: 'NVDA'}],
+    progress: {agents: []},
+    result: {present: false},
+  }});
+  try {
+    await openRunFromList(ui, 'listed');
+    await ui.click('#restart-run');
+    const banner = ui.doc.querySelector('.error-banner');
+    assert.equal(banner.textContent, '这个任务没有 id，无法操作。请刷新状态后再试。');
+    assert.match(banner.innerHTML, /没有 id，<br class="notice-break">无法操作。<br class="notice-break">请刷新状态后再试。/);
+    assert.doesNotMatch(banner.innerHTML, /刷<br|新<br/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the gpt-5 temperature note does not split 推理模型', async () => {
+  const ui = await setup();
+  try {
+    ui.ui.state.form.quick_think_llm = 'gpt-5.4';
+    ui.ui.state.form.deep_think_llm = 'gpt-5-chat-latest';
+    await ui.click('[data-page=models]');
+    const note = ui.doc.querySelector('#gpt5-temperature-note');
+    assert.equal(note.textContent, '所选模型 gpt-5.4 属于 gpt-5 系列推理模型（非 chat 版）：temperature 只接受 1，填写其他值会被直接去掉，不会生效。');
+    assert.match(note.innerHTML, /gpt-5\.4 <br class="notice-break">属于 gpt-5 系列推理模型（非 chat 版）：<br class="notice-break">temperature 只接受 1，<br class="notice-break">填写其他值会被直接去掉，<br class="notice-break">不会生效。/);
+    assert.doesNotMatch(note.innerHTML, /推理<br|模型<br/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the ChatGPT refusal note does not split 订阅', async () => {
+  const ui = await setup();
+  try {
+    ui.ui.state.form.llm_provider = 'chatgpt';
+    ui.ui.state.form.quick_think_provider = 'chatgpt';
+    ui.ui.state.form.deep_think_provider = 'chatgpt';
+    await ui.click('[data-page=models]');
+    const note = ui.doc.querySelector('#model-refusal-note');
+    assert.match(note.textContent, /当前有一层使用 ChatGPT 订阅：订阅不接受 temperature 和 max_tokens，填写了也不会发送。/);
+    assert.match(note.innerHTML, /ChatGPT 订阅：<br class="notice-break">订阅不接受 temperature 和 max_tokens，<br class="notice-break">填写了也不会发送。<br class="notice-break">日志会写<br class="notice-break">/);
+    assert.doesNotMatch(note.innerHTML, /订<br|阅<br/);
+    assert.match(note.textContent, /A ChatGPT plan does not accept temperature/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a compare summary does not split 证据 on a narrow screen', async () => {
+  const ui = await setup();
+  try {
+    const card = ui.doc.createElement('div');
+    card.innerHTML = ui.window.uiTest.compareCard({
+      source: 'structured',
+      rating: 'Hold',
+      summary: '建议持有，但要等待更多证据，不能现在下结论。',
+      sections: [{heading: '要点', text: '第一条已经写出。第二条证据不足。'}],
+      evidence: ['没有结构化证据引用，不从正文猜测。'],
+    });
+    const summary = card.querySelectorAll('article > p')[1];
+    assert.equal(summary.textContent, '建议持有，但要等待更多证据，不能现在下结论。');
+    assert.match(summary.innerHTML, /建议持有，<br class="notice-break">但要等待更多证据，<br class="notice-break">不能现在下结论。/);
+    const section = card.querySelectorAll('article > p')[2];
+    assert.equal(section.textContent, '要点 第一条已经写出。第二条证据不足。');
+    assert.match(section.innerHTML, /已经写出。<br class="notice-break">第二条证据不足。/);
+    const quote = card.querySelector('.compare-quotes li');
+    assert.equal(quote.textContent, '没有结构化证据引用，不从正文猜测。');
+    assert.match(quote.innerHTML, /证据引用，<br class="notice-break">不从正文猜测。/);
+    assert.doesNotMatch(card.textContent, /已经猜测|证据已改/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('the account material note does not leave 校验 alone', async () => {
+  const ui = await setup();
+  try {
+    await ui.click('[data-page=accounts]');
+    const notes = [...ui.doc.querySelectorAll('.account-provider-meta')].filter((node) => node.textContent.includes('不会联网校验'));
+    assert.ok(notes.length >= 1);
+    for (const note of notes) {
+      assert.equal(note.textContent, '登录状态只读取本机材料，页面打开时不会联网校验。');
+      assert.match(note.innerHTML, /本机材料，<br class="notice-break">页面打开时不会联网校验。/);
+      assert.doesNotMatch(note.innerHTML, /校<br|验<br/);
+    }
+  } finally { ui.dom.window.close(); }
+});
+
+test('a failed crawl save note does not split 保存成功', async () => {
+  const reason = '抓取任务没有保存成功（VendorUnavailableError），请重新抓取。';
+  const ui = await setup();
+  try {
+    ui.ui.state.info = {
+      keyword: 'NVDA', asset: 'stock', hours: 72, sources: [], selected: [],
+      job: {id: 'job-1', status: 'failed', reason, sources: {}},
+      items: [], error: '', picked: [], catalog: {sources: [], existing: []},
+    };
+    ui.ui.showPage('analyze', {framework: 'info-crawl'});
+    const note = ui.doc.querySelector('#ic-job-note');
+    assert.equal(note.textContent, reason);
+    assert.match(note.innerHTML, /保存成功<br class="notice-break">（VendorUnavailableError），<br class="notice-break">请重新抓取。/);
+    assert.doesNotMatch(note.innerHTML, /保<br|存<br/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a failed source list does not split 来源列表', async () => {
+  const error = '没能读取来源列表：不要把这次失败写成已经抓到条目。';
+  const ui = await setup();
+  try {
+    ui.ui.state.info = {
+      keyword: '', asset: 'stock', hours: 72, sources: [], selected: [],
+      job: null, items: [], error, picked: [], catalog: {sources: [], existing: []},
+    };
+    ui.ui.showPage('analyze', {framework: 'info-crawl'});
+    const banner = ui.doc.querySelector('#ic-error');
+    assert.equal(banner.textContent, error);
+    assert.match(banner.innerHTML, /来源列表：<br class="notice-break">不要把这次失败写成已经抓到条目。/);
+    assert.doesNotMatch(banner.innerHTML, /来<br|源<br|列<br/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a schedule reminder does not split 结构化评级', async () => {
+  const body = '600519.SS 的分析已完成，记录里有 Overweight，但不把它当成结构化评级。';
+  const ui = await setup({'/api/schedule/tick': {mode: 'observe', mode_label: '观察', rule_version: 'sched-1', note: '', schedules: [], reminders: [
+    {id: 'r1', body, status: 'pending', status_label: '待发送', system_problem: true},
+  ]}});
+  try {
+    await ui.click('[data-page=schedule]');
+    for (let i = 0; i < 6; i++) await settle();
+    const row = ui.doc.querySelector('.schedule-reminder-main');
+    assert.equal(row.textContent, `${body} 发送失败，仍会重试。`);
+    assert.match(row.innerHTML, /600519\.SS 的分析已完成，<br class="notice-break">记录里有 Overweight，<br class="notice-break">但不把它当成结构化评级。<br class="notice-break"> 发送失败，<br class="notice-break">仍会重试。/);
+    assert.doesNotMatch(row.innerHTML, /结<br|构<br|评<br|级<br/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a kline name hint does not split 港股', async () => {
+  const hint = '港股请用 4-5 位代码，例如 0700 或 00700；A 股请用 6 位代码。';
+  const ui = await klineSetup('stock', 60, null, {
+    '/api/kline/search': {query: '07', results: [], hint},
+  });
+  try {
+    const input = ui.doc.querySelector('#kline-symbol');
+    input.value = '07';
+    input.dispatchEvent(new ui.window.Event('input'));
+    await ui.runTimers();
+    const row = ui.doc.querySelector('#kline-suggest-hint');
+    assert.equal(row.textContent, hint);
+    assert.match(row.innerHTML, /港股请用 4-5 位代码，<br class="notice-break">例如 0700 或 00700；<br class="notice-break">A 股请用 6 位代码。/);
+    assert.doesNotMatch(row.innerHTML, /港<br|股<br/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an unsupported kline code does not split 沪市 or 深市', async () => {
+  const error = '暂不支持这个 6 位代码（支持沪市 6/90、深市 0/2/3、北交所 4/8/92 开头）。';
+  const ui = await klineSetup('stock', 60, async () => ({__status: 400, body: {error}}));
+  try {
+    const input = ui.doc.querySelector('#kline-symbol');
+    input.value = '123456';
+    ui.doc.querySelector('#kline-form').dispatchEvent(new ui.window.Event('submit', {cancelable: true}));
+    for (let i = 0; i < 8; i++) await settle();
+    const status = ui.doc.querySelector('#kline-status');
+    assert.equal(status.textContent, error);
+    assert.match(status.innerHTML, /支持<br class="notice-break">沪市 6\/90、<br class="notice-break">深市 0\/2\/3、<br class="notice-break">北交所 4\/8\/92 开头）。/);
+    assert.doesNotMatch(status.innerHTML, /沪<br|深<br|北<br|交<br/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an auto schedule rule does not split 已启动', async () => {
+  const ui = await setup({'/api/schedule/tick': {mode: 'auto', mode_label: '自动', rule_version: 'sched-1', note: '', schedules: [], reminders: []}});
+  try {
+    await ui.click('[data-page=schedule]');
+    for (let i = 0; i < 6; i++) await settle();
+    const rule = ui.doc.querySelector('#sched-rule');
+    assert.equal(rule.textContent, '规则 sched-1 · 自动。到点会检查规则。没有运行编号不算已启动。');
+    assert.match(rule.innerHTML, /自动。<br class="notice-break">到点会检查规则。<br class="notice-break">没有运行编号不算已启动。/);
+    assert.doesNotMatch(rule.innerHTML, /已<br|启<br|动<br/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a missing log path does not split 路径', async () => {
+  const sentence = '这次控制台任务还没有日志路径。不编造命令行的路径句。';
+  const ui = await setup({'/api/logs': {lines: [], path: null, cli: null}});
+  try {
+    await ui.click('[data-page=reports]');
+    const details = ui.doc.querySelector('#report-log-details');
+    details.open = true;
+    details.dispatchEvent(new ui.window.Event('toggle'));
+    for (let i = 0; i < 8; i++) await settle();
+    const note = ui.doc.querySelector('#report-log-path');
+    assert.equal(note.textContent, sentence);
+    assert.match(note.innerHTML, /这次控制台任务还没有日志路径。<br class="notice-break">不编造命令行的路径句。/);
+    assert.doesNotMatch(note.innerHTML, /路<br|径<br/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a checkpoint note does not split 断点库', async () => {
+  const note = '这些文件对应 --clear-checkpoints 会删除的断点库。是否续跑要等启动时用和 CLI 相同的签名判断，页面不提前声称已恢复。';
+  const cleared = '已清除 2 个断点。这是删除结果，不是恢复，也没有启动模型。';
+  const ui = await setup({'/api/checkpoints': {directory: '/tmp/checkpoints', note, files: []}, '/api/checkpoints/clear': {cleared: 2, zh: cleared}});
+  try {
+    ui.ui.openSaveDrawer(ui.doc.querySelector('#step-next'));
+    for (let i = 0; i < 4; i++) await settle();
+    await ui.click('#list-checkpoints');
+    const list = ui.doc.querySelector('#checkpoint-list');
+    assert.equal(list.textContent, `目录 /tmp/checkpoints${note}没有断点文件。`);
+    assert.match(list.innerHTML, /会删除的<br class="notice-break">断点库。<br class="notice-break">是否续跑要等启动时用和 CLI 相同的签名判断，<br class="notice-break">页面不提前声称已恢复。/);
+    assert.doesNotMatch(list.innerHTML, /断<br|点<br|库<br/);
+    await ui.click('#clear-checkpoints-now');
+    await ui.click('#clear-checkpoints-yes');
+    assert.equal(list.textContent, cleared);
+    assert.match(list.innerHTML, /已清除 2 个断点。<br class="notice-break">这是删除结果，<br class="notice-break">不是恢复，<br class="notice-break">也没有启动模型。/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a vendor menu hint does not split 供应商', async () => {
+  const vendor = '空格切换，a 全选或取消全选，Enter 完成。命令行没有供应商菜单，这里改的是 data_vendors。';
+  const tool = '空格切换。留空沿用类别链。tool_vendors 优先于 data_vendors。';
+  const ui = await setup();
+  try {
+    await ui.click('[data-page=accounts]');
+    ui.doc.querySelector('#data-sources-details').open = true;
+    await ui.click('#vendor-select-core_stock_apis .custom-select-trigger');
+    const vendorHint = ui.doc.querySelector('.custom-select-menu .form-hint');
+    assert.equal(vendorHint.textContent, vendor);
+    assert.match(vendorHint.innerHTML, /空格切换，<br class="notice-break">a 全选或取消全选，<br class="notice-break">Enter 完成。<br class="notice-break">命令行没有供应商菜单，<br class="notice-break">这里改的是 data_vendors。/);
+    assert.doesNotMatch(vendorHint.innerHTML, /供<br|应<br|商<br/);
+    ui.doc.querySelector('#tool-vendor-details').open = true;
+    await ui.click('#tool-select-get_stock_data .custom-select-trigger');
+    const toolHint = ui.doc.querySelector('.custom-select-menu .form-hint');
+    assert.equal(toolHint.textContent, tool);
+    assert.match(toolHint.innerHTML, /空格切换。<br class="notice-break">留空沿用类别链。<br class="notice-break">tool_vendors 优先于 data_vendors。/);
+    assert.doesNotMatch(toolHint.innerHTML, /留<br|沿<br/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a failed model list does not split 模型列表', async () => {
+  const detail = '模型列表没有读到。命令行会继续提供 Custom model ID，这里也可以手填。';
+  const ui = await setup();
+  try {
+    const host = ui.doc.createElement('div');
+    ui.doc.body.append(host);
+    host.innerHTML = ui.window.uiTest.modelTable('chatgpt', {
+      cli: 'Could not list models',
+      detail,
+      models: [],
+      title: '快模型',
+      mode: 'quick',
+    });
+    const warning = host.querySelector('#model-list-warning');
+    assert.equal(warning.textContent, `${detail} 对应命令行：Could not list models`);
+    assert.match(warning.innerHTML, /模型列表没有读到。<br class="notice-break">命令行会继续提供 Custom model ID，<br class="notice-break">这里也可以手填。 <br class="notice-break">对应命令行：Could not list models/);
+    assert.doesNotMatch(warning.innerHTML, /模<br|型<br|列<br|表<br/);
+    const list = ui.doc.createElement('div');
+    ui.doc.body.append(list);
+    ui.window.uiTest.renderModelChoices(list, {provider: 'chatgpt', models: [], detail}, 'quick');
+    assert.match(list.textContent, /模型列表没有读到。命令行会继续提供 Custom model ID，这里也可以手填。/);
+    assert.match(list.innerHTML, /模型列表没有读到。<br class="notice-break">命令行会继续提供 Custom model ID，<br class="notice-break">这里也可以手填。/);
+    assert.doesNotMatch(list.innerHTML, /模<br|型<br|列<br|表<br/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a save path refusal does not split 目录', async () => {
+  const reason = '保存路径必须在结果目录的 reports 下。命令行可以选其他文件夹，控制台不写出这个目录。';
+  const ui = await setup({'/api/runs': (options) => options.method ? {__status: 400, body: {error: reason}} : {run: null, progress: {}}});
+  try {
+    await fillToReview(ui);
+    await ui.click('#run-analysis');
+    await settleMany();
+    const error = ui.doc.querySelector('#launch-error');
+    assert.equal(error.textContent, reason);
+    assert.match(error.innerHTML, /reports 下。<br class="notice-break">命令行可以选其他文件夹，<br class="notice-break">控制台不写出这个目录。/);
+    assert.doesNotMatch(error.innerHTML, /目<br|录<br/);
+  } finally { ui.dom.window.close(); }
 });

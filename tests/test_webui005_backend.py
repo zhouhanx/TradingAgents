@@ -91,6 +91,31 @@ def test_report_list_reads_ticker_date_and_rating_from_the_header_only(results):
     _report(results / "reports" / "NVDA_20261029_211200", rating="Overweight")
     row = service.list_reports()[0]
     assert (row["ticker"], row["date"], row["rating"], row["generated"]) == ("NVDA", "2026-10-29", "Overweight", "2026-10-29 21:12:00")
+    assert row["has_decision"] is False
+
+
+def test_report_list_marks_only_a_portfolio_paragraph_as_a_decision(results):
+    folder = _report(results / "reports" / "NVDA_20261029_211200", rating="Hold")
+    decision = folder / "5_portfolio"
+    decision.mkdir()
+    (decision / "decision.md").write_text("持有\n", encoding="utf-8")
+    assert service.list_reports()[0]["has_decision"] is False
+    (decision / "decision.md").write_text("## 核心判断\n\n数据中心需求仍在上升，技术面站上均线，建议分批建仓。\n", encoding="utf-8")
+    row = service.list_reports()[0]
+    assert row["rating"] == "Hold"
+    assert row["has_decision"] is True
+
+
+def test_report_list_does_not_follow_a_decision_symlink_outside_the_results_dir(results, tmp_path):
+    folder = _report(results / "reports" / "NVDA_20261029_211200", rating="Hold")
+    outside = tmp_path / "decision.md"
+    outside.write_text("这是一段足够长的组合经理结论，不应该被越界读取。", encoding="utf-8")
+    target = folder / "5_portfolio"
+    target.mkdir()
+    (target / "decision.md").symlink_to(outside)
+    row = service.list_reports()[0]
+    assert row["rating"] == "Hold"
+    assert row["has_decision"] is False
 
 
 # --- recent tickers -------------------------------------------------------------------------

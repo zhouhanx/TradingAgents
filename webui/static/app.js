@@ -110,7 +110,14 @@ function bindDepth() {
   }, false, {
     allowEmpty: skipped && !matched,
     emptyLabel: depthEnvLine() || "命令行已用环境变量跳过研究深度，不预选菜单第一项。",
+    unknownLabel: "研究深度未知",
   });
+  const unknown = document.querySelector("#depth-unknown");
+  if (unknown) {
+    const show = !skipped && !matched && current !== "";
+    unknown.hidden = !show;
+    unknown.textContent = show ? "研究深度未知，不把它写成浅层。" : "";
+  }
 }
 
 function bindLanguages() {
@@ -253,11 +260,12 @@ function cliDoc(text) {
   return `<pre class="log-view">${escapeHtml(text)}</pre>`;
 }
 
-function heading(kicker, title, description, actions = "") {
+function heading(kicker, title, description, actions = "", options = {}) {
+  const body = options.html ? description : escapeHtml(description);
   return `<header class="page-heading">
     <div>
       <h1>${escapeHtml(title)}</h1>
-      <p class="page-description">${escapeHtml(description)}</p>
+      <p class="page-description">${body}</p>
     </div>
     <div class="page-actions page-actions-group">${actions}</div>
   </header>`;
@@ -287,7 +295,7 @@ function showPage(name, {runDetail = null, framework = null} = {}) {
   document.querySelectorAll(".nav-item").forEach((button) => {
     button.classList.toggle("nav-item--active", button.dataset.page === name);
   });
-  const renderers = { analyze: renderAnalyze, runs: renderRuns, reports: renderReports, kline: renderKline, backtest: renderBacktest, accounts: renderAccounts, models: renderModels };
+  const renderers = { analyze: renderAnalyze, runs: renderRuns, reports: renderReports, kline: renderKline, watchlist: renderWatchlist, schedule: renderSchedule, cost: renderCost, compare: renderCompare, backtest: renderBacktest, accounts: renderAccounts, models: renderModels };
   if (!renderers[name]) {
     state.page = "analyze";
     pageEl.dataset.page = "analyze";
@@ -325,7 +333,7 @@ function updatesSection() {
 function bindUpdates() {
   document.querySelector("#check-updates")?.addEventListener("click", async () => {
     const note = document.querySelector("#updates-note");
-    note.textContent = "正在检查更新。这会询问 GitHub 和公告服务，不发送身份信息。";
+    note.innerHTML = punctBreakHtml("正在检查更新。这会询问 GitHub 和公告服务，不发送身份信息。");
     try {
       const data = await api("/api/updates/refresh", { method: "POST", body: "{}" });
       state.updates = data;
@@ -359,18 +367,23 @@ function assetSegHtml() {
     `<span class="seg-item${current === value ? " on" : ""}" data-asset="${value}"${current === value ? ' aria-current="true"' : ""}>${zh}</span>`).join("");
 }
 
+function assetHintHtml() {
+  return punctBreakHtml(assetHint()).replace("（如", "<br class=\"notice-break\">（如");
+}
+
 function assetHint() {
   if (!state.form.asset_type) return "填写代码后自动识别，例如 BTC-USD 是加密货币。";
   if (state.form.asset_type === "crypto") return "按代码识别为加密货币，不做基本面分析。";
   if (state.form.asset_type === "commodity") return "按代码识别为贵金属/商品期货（如 XAUUSD→GC=F），不做公司基本面分析。";
-  return "按代码识别为股票。";
+  if (state.form.asset_type === "stock") return "按代码识别为股票。";
+  return "资产类型未知，不把它写成股票。";
 }
 
 function paintAssetSeg() {
   const host = document.querySelector("#asset-seg");
   if (host) host.innerHTML = assetSegHtml();
   const hint = document.querySelector("#asset-hint");
-  if (hint) hint.textContent = assetHint();
+  if (hint) hint.innerHTML = assetHintHtml();
 }
 
 function languageMode() {
@@ -440,12 +453,20 @@ function lastUsedText(stamp) {
   return match ? `${match[1]}/${match[2]} ${match[3]}:${match[4]}` : "";
 }
 
+function cardDescriptionHtml(text) {
+  // The hub card stays about 320px wide at 1440, so notice-break would still split 财政部.
+  const wide = String(text).includes("财政部");
+  const br = wide ? "<br>" : "<br class=\"notice-break\">";
+  const html = escapeHtml(text).replace(/[。，、；]/g, (mark) => `${mark}${br}`);
+  return wide ? html.replace(/<br>$/, "") : html.replace(/<br class="notice-break">$/, "");
+}
+
 function frameworkCard(item) {
   const used = lastUsedText(item.last_used);
   const icon = /^\/icons\/[A-Za-z0-9_.-]+\.(svg|png)$/.test(String(item.icon || "")) ? item.icon : "";
   return `<article class="fw" role="link" tabindex="0" data-framework="${escapeHtml(item.id)}" aria-label="${escapeHtml(item.name)}">
     <div class="fw-t">${icon ? `<img class="fw-logo" src="${escapeHtml(icon)}" width="28" height="28" alt="">` : ""}<span class="fw-name">${escapeHtml(item.name)}</span></div>
-    <p class="fw-d">${escapeHtml(item.description || "")}</p>
+    <p class="fw-d">${cardDescriptionHtml(item.description || "")}</p>
     ${(item.tags || []).length ? `<div class="fw-m">${item.tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>` : ""}
     <div class="fw-f">${used ? `<span class="fw-k">上次使用 ${escapeHtml(used)}</span>` : "<span></span>"}<button class="button button--primary" type="button" data-start-framework="${escapeHtml(item.id)}">开始</button></div>
   </article>`;
@@ -454,7 +475,7 @@ function frameworkCard(item) {
 function hubHtml() {
   const head = heading("", "启动分析", "选一个分析工具开始，结果只用于研究参考。");
   if (state.frameworksError && !(state.frameworks || []).length) {
-    return `${head}<div class="error-banner" id="frameworks-error" role="alert">${escapeHtml(state.frameworksError)} <button class="button button--secondary button--small" type="button" id="frameworks-retry">重试</button></div>`;
+    return `${head}<div class="error-banner" id="frameworks-error" role="alert">${colonBreakHtml(state.frameworksError)} <button class="button button--secondary button--small" type="button" id="frameworks-retry">重试</button></div>`;
   }
   if (!state.frameworks) return `${head}<p class="notice" id="frameworks-loading" role="status">正在读取分析工具…</p>`;
   return `${head}<div class="fw-grid" id="fw-grid">${[...state.frameworks, ...(state.tools || [])].map(frameworkCard).join("")}</div>`;
@@ -556,7 +577,7 @@ function renderAnalyze() {
         <section data-step-panel="1">
           <div class="field"><label id="ticker-label" for="ticker">标的代码</label><input id="ticker" name="ticker" value="${escapeHtml(state.form.ticker)}" placeholder="例如 NVDA、AAPL 或 BTC-USD" autocomplete="off">${recentChips()}</div>
           <div class="row2">
-            <div class="field"><span class="field-label" id="asset-label">资产类型</span><div class="seg seg--readonly" id="asset-seg" role="group" aria-labelledby="asset-label">${assetSegHtml()}</div><p class="form-hint" id="asset-hint">${escapeHtml(assetHint())}</p></div>
+            <div class="field"><span class="field-label" id="asset-label">资产类型</span><div class="seg seg--readonly" id="asset-seg" role="group" aria-labelledby="asset-label">${assetSegHtml()}</div><p class="form-hint" id="asset-hint">${assetHintHtml()}</p></div>
             <div class="field"><label id="date-label" for="date">分析日期</label><input id="date" name="date" type="date" value="${escapeHtml(state.form.date)}" max="${todayLocal()}"><p class="form-hint">默认今天，选过去的日期就是复盘当天。</p></div>
           </div>
           <div class="field"><span class="field-label" id="language-label">报告语言</span><div class="seg" id="language-seg" role="group" aria-labelledby="language-label"></div>
@@ -566,13 +587,19 @@ function renderAnalyze() {
         </section>
         <section data-step-panel="2">
           <div class="field"><label id="analyst-label">分析维度</label><div class="choice-row" id="analysts"></div><p class="form-hint">可选择市场、新闻、情绪和基本面等维度。</p></div>
-          <div class="field"><label>研究深度</label><div class="choice-row" id="depths"></div><p class="form-hint">深度越高，辩论轮次越多，耗时和模型用量也会增加。</p></div>
+          <div class="field"><label>研究深度</label><div class="choice-row" id="depths"></div><p class="form-hint" id="depth-unknown" hidden></p><p class="form-hint">深度越高，辩论轮次越多，耗时和模型用量也会增加。</p></div>
+          <details class="disclosure" id="local-import-details"><summary>导入本地资料（CSV/JSON）</summary>
+            <p class="form-hint" id="local-import-hint">只读取你自己导出的文件，<br class="notice-break">不会联网抓取。<br class="notice-break">新闻分析师会把内容当作证据，<br class="notice-break">报告标明「本地导入」。</p>
+            <div class="file-picker"><input id="local-import-file" class="file-picker-input visually-hidden" type="file" accept=".csv,.json,text/csv,application/json" tabindex="-1" aria-hidden="true"><button class="button button--secondary button--small" type="button" id="local-import-pick">选择 CSV 或 JSON</button><span class="file-picker-name" id="local-import-name">未选择文件</span></div>
+            <p class="notice" id="local-import-status" role="status" hidden></p>
+            <button class="button button--secondary button--small" type="button" id="local-import-clear" hidden>清除导入</button>
+          </details>
         </section>
         <section data-step-panel="3">
-          <div class="field"><label>模型服务</label><div id="main-providers"></div><input id="main-provider" type="hidden" value="${escapeHtml(state.form.llm_provider)}"><p class="form-hint">订阅服务需先在「账户」中登录；API 服务需先配置密钥。</p></div>
+          <div class="field"><label>模型服务</label><div id="main-providers"></div><input id="main-provider" type="hidden" value="${escapeHtml(state.form.llm_provider)}"><p class="form-hint" id="provider-login-hint">订阅服务需先在「账户」中登录；<br class="notice-break">API 服务需先配置密钥。</p></div>
           <div class="field"><label id="region-label">服务地区</label><div class="choice-row" id="regions"></div></div>
           <div class="field"><label id="backend-url-label" for="backend-url">服务地址</label><input id="backend-url" value="${escapeHtml(backendUrlValue())}" placeholder="例如 http://localhost:11434" ${backendUrlLocked() ? "readonly" : ""}></div>
-          <p class="form-hint" id="tier-role-note">快模型负责资料分析与辩论，深模型负责综合判断。可使用同一服务中的不同模型。</p>
+          <p class="form-hint" id="tier-role-note">快模型负责资料分析与辩论，<br class="notice-break">深模型负责综合判断。<br class="notice-break">可使用同一服务中的不同模型。</p>
           <div class="model-settings-grid">
             ${["quick", "deep"].map((tier) => `<section class="panel"><h3>${tier === "quick" ? "快模型" : "深模型"}</h3><div class="field"><label>供应商</label><div id="${tier}-providers"></div><input id="${tier}-provider" type="hidden" value="${escapeHtml(state.form[`${tier}_think_provider`])}"></div><div class="field"><label>模型</label><div class="choice-row" id="${tier}-models"></div></div><details><summary>手动填写模型 ID</summary><input id="${tier}-model" value="${escapeHtml(state.form[`${tier}_think_llm`])}" aria-label="${tier === "quick" ? "快模型" : "深模型"} ID"></details></section>`).join("")}
           </div>
@@ -615,6 +642,7 @@ function renderAnalyze() {
     refreshAnalystsForTicker();
   }));
   bindDepth();
+  bindLocalImport();
   if (envFieldLocked("research_depth")) document.querySelector("#depths button").disabled = true;
   bindTier("quick");
   bindTier("deep");
@@ -630,7 +658,9 @@ function renderAnalyze() {
   document.querySelector("#check-analysis").addEventListener("click", async () => {
     const note = document.querySelector("#form-note");
     try {
-      const result = await api("/api/runs/validate", { method: "POST", body: JSON.stringify(readForm()) });
+      // W218: validate with the same attach payload as start, so the server judges the
+      // ticked 信息抓取 rows exactly as it will on 启动分析.
+      const result = await api("/api/runs/validate", { method: "POST", body: JSON.stringify(withInfoAttach(readForm())) });
       note.textContent = "配置检查通过，可以启动分析。";
       paintReview();
       if (result.ignored?.length) note.textContent += " 部分设置由本机配置决定。";
@@ -648,6 +678,55 @@ function renderAnalyze() {
 }
 
 // A native file input shows the browser's own English words. Keep it hidden and label it in Chinese.
+
+const LOCAL_IMPORT_MAX = 512 * 1024;
+function bindLocalImport() {
+  const input = document.querySelector("#local-import-file");
+  const pick = document.querySelector("#local-import-pick");
+  const clear = document.querySelector("#local-import-clear");
+  const status = document.querySelector("#local-import-status");
+  const name = document.querySelector("#local-import-name");
+  if (!input || !pick) return;
+  const paint = () => {
+    const imported = state.localImport;
+    if (name) name.textContent = imported ? (imported.filename || "已导入") : "未选择文件";
+    if (status) {
+      status.hidden = !imported;
+      status.textContent = imported ? `已导入 ${imported.count} 条，报告会标明「本地导入」。` : "";
+    }
+    if (clear) clear.hidden = !imported;
+  };
+  paint();
+  pick.addEventListener("click", () => input.click());
+  clear?.addEventListener("click", () => {
+    state.localImport = null;
+    input.value = "";
+    paint();
+  });
+  input.addEventListener("change", () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    if (file.size > LOCAL_IMPORT_MAX) {
+      if (status) { status.hidden = false; status.textContent = "文件超过 512KB，请拆小后再导入。"; }
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const data = await api("/api/local-import/validate", {method: "POST", body: JSON.stringify({text: String(reader.result || ""), filename: file.name})});
+        state.localImport = {filename: data.filename || file.name, count: data.count, items: data.items};
+        paint();
+      } catch (error) {
+        state.localImport = null;
+        paint();
+        if (status) { status.hidden = false; status.textContent = error.message || "文件无法导入。"; }
+      }
+    };
+    reader.onerror = () => { if (status) { status.hidden = false; status.textContent = `无法读取 ${file.name}。`; } };
+    reader.readAsText(file);
+  });
+}
+
 function filePicker(id, label) {
   return `<div class="file-picker"><input id="${id}" class="file-picker-input" type="file" accept="application/json,.json" tabindex="-1" aria-hidden="true"><button class="button button--secondary button--small" type="button" data-file-for="${id}" aria-label="${escapeHtml(label)}">选择 JSON 文件</button><span class="file-picker-name" data-file-name="${id}">未选择文件</span></div>`;
 }
@@ -689,6 +768,7 @@ function renderAnalystChoices(items) {
     pressed ? set.add(value) : set.delete(value);
     state.form.analysts = [...set];
     refreshStepNote();
+    refreshInfoAttachHint();
   }, {
     requireOne: true,
     emptyLabel: "未选择",
@@ -707,11 +787,14 @@ async function refreshAnalystsForTicker() {
     state.form.analysts = state.form.analysts.filter((item) => data.analysts.includes(item));
     const items = state.catalog.analysts.filter((item) => data.analysts.includes(item.value));
     renderAnalystChoices(items);
+    refreshInfoAttachHint();
     const note = document.querySelector("#form-note");
     if (note) {
-      note.textContent = data.fundamentals_hidden
-        ? "已识别为加密资产，不使用基本面分析。"
-        : "";
+      const hidden = {
+        crypto: "已识别为加密资产，不使用基本面分析。",
+        commodity: "已识别为贵金属/商品期货，不使用基本面分析。",
+      };
+      note.innerHTML = data.fundamentals_hidden ? punctBreakHtml(hidden[data.asset_type] || "不使用基本面分析。") : "";
     }
     return true;
   } catch (error) {
@@ -899,11 +982,11 @@ function holdingImportedHtml() {
 function holdingBoxHtml(holding, readOnly = false) {
   const lock = readOnly ? " disabled" : "";
   const imported = readOnly ? holdingImportedHtml() : "";
-  if (!holding.held) return `${imported}${readOnly ? "" : '<p class="form-hint" id="holding-hint">已持仓时填写成本，组合经理会给出加仓或减仓建议。</p>'}`;
+  if (!holding.held) return `${imported}${readOnly ? "" : `<p class="form-hint" id="holding-hint">${punctBreakHtml(HOLDING_HINT)}</p>`}`;
   return `${imported}<div class="hold-box${readOnly ? " hold-box--readonly" : ""}"><div class="row2">
     <div class="field"><label for="holding-price">持仓价格<span class="req" aria-hidden="true">*</span></label><input id="holding-price" inputmode="decimal"${readOnly ? "" : ' required aria-required="true"'} value="${escapeHtml(holding.average_price || "")}" placeholder="例如 62000"${lock}></div>
     <div class="field"><label for="holding-quantity">持有数量（可选）</label><input id="holding-quantity" inputmode="decimal" value="${escapeHtml(holding.quantity || "")}" placeholder="例如 0.5"${lock}></div>
-  </div>${readOnly ? "" : `<p class="form-hint" id="holding-hint">${HOLDING_HINT}</p>`}</div>`;
+  </div>${readOnly ? "" : `<p class="form-hint" id="holding-hint">${punctBreakHtml(HOLDING_HINT)}</p>`}</div>`;
 }
 
 function paintHolding() {
@@ -944,21 +1027,50 @@ function holdingError() {
   return "";
 }
 
+function reviewValueHtml(value) {
+  const text = String(value);
+  if (text.includes("不把它写成")) return narrowBreakHtml(text);
+  if (text.includes("展开全文")) return escapeHtml(text).replace("，", "，<br class=\"notice-break\">");
+  return escapeHtml(text);
+}
+
 function reviewSection(title, rows, action) {
   return `<section class="sec"><div class="sh"><span>${escapeHtml(title)}</span>${action}</div><dl class="kv">${rows.map(([label, value]) =>
-    `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join("")}</dl></section>`;
+    `<dt>${escapeHtml(label)}</dt><dd>${reviewValueHtml(value)}</dd>`).join("")}</dl></section>`;
+}
+
+function reviewDepthText() {
+  const value = state.form.research_depth;
+  if (value == null || value === "") return "";
+  const known = (state.catalog.depths || []).find((item) => String(item.value) === String(value));
+  return known ? known.zh : "研究深度未知，不把它写成浅层";
+}
+
+function reviewAssetText(ticker) {
+  const type = state.form.asset_type;
+  if (!type) return ticker;
+  const asset = ASSET_ZH[type];
+  return asset ? `${ticker} · ${asset}` : `${ticker} · 资产类型未知，不把它写成股票`;
+}
+
+function reviewLanguageText() {
+  const raw = state.form.output_language;
+  if (raw === "custom") {
+    const text = currentOutputLanguage();
+    return text && text !== "custom" ? text : "请填写自定义报告语言";
+  }
+  const language = raw || "Chinese";
+  const found = (state.catalog.languages || []).find((item) => item.value === language);
+  if (found) return found.zh;
+  return "报告语言未知，不把它写成中文";
 }
 
 function analysisSummary() {
-  const language = currentOutputLanguage();
-  const languageLabel = (state.catalog.languages || []).find((item) => item.value === language)?.zh || language;
   const ticker = document.querySelector("#ticker")?.value.trim() || state.form.ticker || "未填写";
-  const asset = ASSET_ZH[state.form.asset_type];
-  const depth = (state.catalog.depths || []).find((item) => String(item.value) === String(state.form.research_depth))?.zh || state.form.research_depth;
   const edit = (step) => `<button class="link-button" type="button" data-edit-step="${step}">修改</button>`;
   return [
-    reviewSection("分析对象", [["标的", asset ? `${ticker} · ${asset}` : ticker], ["日期", document.querySelector("#date")?.value || state.form.date || "今天"], ["语言", languageLabel], ["持仓", holdingSummaryText()]], edit(1)),
-    reviewSection("研究范围", [["分析维度", (state.catalog.analysts || []).filter((item) => state.form.analysts.includes(item.value)).map((item) => item.zh).join("、") || "未选择"], ["研究深度", String(depth ?? "")]], edit(2)),
+    reviewSection("分析对象", [["标的", reviewAssetText(ticker)], ["日期", document.querySelector("#date")?.value || state.form.date || "今天"], ["语言", reviewLanguageText()], ["持仓", holdingSummaryText()]], edit(1)),
+    reviewSection("研究范围", [["分析维度", (state.catalog.analysts || []).filter((item) => state.form.analysts.includes(item.value)).map((item) => item.zh).join("、") || "未选择"], ["研究深度", reviewDepthText()], ["本地导入", state.localImport ? `${state.localImport.filename || "文件"} · ${state.localImport.count} 条` : "无"]], edit(2)),
     reviewSection("模型", [["快模型", `${providerLabel(state.form.quick_think_provider)} · ${document.querySelector("#quick-model")?.value || state.form.quick_think_llm || "未选择"}`], ["深模型", `${providerLabel(state.form.deep_think_provider)} · ${document.querySelector("#deep-model")?.value || state.form.deep_think_llm || "未选择"}`]], edit(3)),
     reviewSection("保存与续跑", [["报告", reportSummaryText()], ["断点续跑", state.form.checkpoint === false ? "关，失败后只能从头开始" : "开，失败后可从出错的角色继续"]],
       `<button class="link-button" type="button" id="open-save-drawer">调整</button>`),
@@ -1014,7 +1126,7 @@ function openSaveDrawer(trigger) {
         <div class="field"><label for="drawer-timeout">单次超时（秒）</label><input id="drawer-timeout" inputmode="numeric" value="${escapeHtml(state.form.timeout || "")}" placeholder="${escapeHtml(String(timeoutRow.default ?? 300))}"></div>
         <div class="field"><label for="drawer-retries">失败重试（次）</label><input id="drawer-retries" inputmode="numeric" value="${escapeHtml(envFieldValue("llm_max_retries"))}" placeholder="3" ${envFieldLocked("llm_max_retries") ? "readonly" : ""}></div>
       </div>
-      <p class="form-hint">只在超时、断网和服务端出错时重试，不会因为登录失效反复重试。</p>
+      <p class="form-hint" id="retry-hint">只在超时、断网和服务端出错时重试，<br class="notice-break">不会因为登录失效反复重试。</p>
       <details class="disclosure drawer-details" id="portfolio-json-details"${String(state.portfolioText || "").trim() ? " open" : ""}><summary>导入持仓 JSON（含现金或多个持仓）</summary>
         <p class="form-hint">填写后以 JSON 为准，第 1 步填写的持仓不再使用。</p>
         ${filePicker("portfolio-file", "选择持仓 JSON 文件")}
@@ -1023,7 +1135,7 @@ function openSaveDrawer(trigger) {
       <details class="disclosure drawer-details" id="checkpoint-manage"><summary>管理已保存的断点</summary>
         ${toggleRow("clear_checkpoints", "启动前清除断点", flags.clear_checkpoints)}
         <div class="inline-actions"><button class="button button--secondary button--small" type="button" id="list-checkpoints">查看断点</button><button class="button button--danger button--small" type="button" id="clear-checkpoints-now">立即清除断点</button></div>
-        <div class="inline-confirm" id="clear-checkpoints-confirm" hidden><span>会删除本机全部断点，正在运行的分析不受影响。</span><button class="button button--danger button--small" type="button" id="clear-checkpoints-yes">确认清除</button><button class="button button--secondary button--small" type="button" id="clear-checkpoints-no">取消</button></div>
+        <div class="inline-confirm" id="clear-checkpoints-confirm" hidden><span>会删除本机全部断点，<br class="notice-break">正在运行的分析不受影响。</span><button class="button button--danger button--small" type="button" id="clear-checkpoints-yes">确认清除</button><button class="button button--secondary button--small" type="button" id="clear-checkpoints-no">取消</button></div>
         <pre class="log-view" id="checkpoint-list">点击「查看断点」检查可恢复的记录。</pre>
       </details>
       <details class="disclosure drawer-details" id="save-more"><summary>更多保存设置</summary>
@@ -1046,7 +1158,8 @@ function openSaveDrawer(trigger) {
     try {
       const data = await api("/api/checkpoints");
       const rows = (data.files || []).map((item) => `${item.ticker}  ${item.bytes} bytes`);
-      view.textContent = [data.directory ? `目录 ${data.directory}` : "", data.note, ...(rows.length ? rows : ["没有断点文件。"])].filter(Boolean).join("\n");
+      const lines = [data.directory ? `目录 ${data.directory}` : "", data.note, ...(rows.length ? rows : ["没有断点文件。"])].filter(Boolean);
+      view.innerHTML = lines.map(checkpointLineHtml).join("<br>");
     } catch (error) {
       view.textContent = error.message;
     }
@@ -1065,12 +1178,19 @@ function openSaveDrawer(trigger) {
     confirmBox.hidden = true;
     try {
       const data = await api("/api/checkpoints/clear", { method: "POST", body: "{}" });
-      view.textContent = data.zh || `已清除 ${data.cleared} 个断点。`;
+      view.innerHTML = checkpointLineHtml(data.zh || `已清除 ${data.cleared} 个断点。`);
     } catch (error) {
       view.textContent = error.message;
     }
   });
   document.querySelector("#save-drawer-save").addEventListener("click", saveDrawer);
+}
+
+
+function checkpointLineHtml(line) {
+  // The first sentence is about one narrow log line wide, so a period break
+  // still splits 断点库. Break before that word; wide screens hide the break.
+  return punctBreakHtml(line).replace("断点库", "<br class=\"notice-break\">断点库");
 }
 
 function positiveNumber(raw, message) {
@@ -1107,7 +1227,7 @@ async function saveDrawer() {
     draft = readSaveDrawer();
   } catch (error) {
     note.className = "error-banner";
-    note.textContent = error.message;
+    note.innerHTML = punctBreakHtml(error.message);
     return;
   }
   const saved = await saveConfigPart(draft.config, note, document.querySelector("#save-drawer-save"), "已保存。");
@@ -1131,6 +1251,12 @@ function buildPortfolio(ticker) {
   return {positions: [position]};
 }
 
+function formNoteHtml(text) {
+  let html = punctBreakHtml(text);
+  if (String(text).includes("分别选择供应商")) html = html.replace("分别选择", "<br class=\"notice-break\">分别选择");
+  return html;
+}
+
 function analysisStepError() {
   if (state.step === 1) {
     const ticker = visibleText(document.querySelector("#ticker").value);
@@ -1143,6 +1269,7 @@ function analysisStepError() {
     if (holding) return holding;
   }
   if (state.step === 2 && !state.form.analysts.length) return "请至少选择一个分析维度。";
+  if (state.step === 2 && state.localImport && !(state.form.analysts || []).includes("news")) return "未选新闻分析师，本地导入的资料不会被使用。请勾选新闻分析师，或清除导入。";
   if (state.step === 3) {
     if (!["quick", "deep"].every((tier) => document.querySelector(`#${tier}-provider`).value && document.querySelector(`#${tier}-model`).value.trim())) return "请为快模型和深模型分别选择供应商和模型。";
   }
@@ -1152,7 +1279,7 @@ function analysisStepError() {
 async function advanceAnalysisStep(target = state.step + 1) {
   const note = document.querySelector("#form-note");
   const error = analysisStepError();
-  if (error) { note.textContent = error; return; }
+  if (error) { note.innerHTML = formNoteHtml(error); return; }
   if (state.step === 1 && await refreshAnalystsForTicker() === false) return;
   showStep(Math.min(4, target));
   document.querySelector("#step-title")?.focus();
@@ -1175,7 +1302,7 @@ function showStep(step) {
   });
   document.querySelector("#step-progress").textContent = `第 ${state.step} 步，共 4 步`;
   document.querySelector("#step-title").textContent = WIZARD_TITLES[state.step - 1];
-  document.querySelector("#step-cli").textContent = WIZARD_HINTS[state.step - 1];
+  document.querySelector("#step-cli").innerHTML = punctBreakHtml(WIZARD_HINTS[state.step - 1]);
   document.querySelector("#step-back").hidden = state.step === 1;
   document.querySelector("#step-next").hidden = state.step === 4;
   document.querySelector("#run-analysis").hidden = state.step !== 4;
@@ -1580,7 +1707,9 @@ function bindMenu(menu, trigger, onKey) {
 function mountSelect(host, items, current, onPick, options = {}) {
   let currentValue = current;
   const matched = items.find((item) => String(item.value) === String(current));
-  const selected = matched || (options.allowEmpty ? null : items[0]);
+  const blank = current == null || String(current) === "";
+  // A stored value that is not in the menu is not the first item.
+  const selected = matched || (options.allowEmpty || !blank ? null : (items[0] || null));
   host.innerHTML = "";
   host.classList.add("custom-select");
   const trigger = document.createElement("button");
@@ -1590,7 +1719,9 @@ function mountSelect(host, items, current, onPick, options = {}) {
   trigger.setAttribute("aria-expanded", "false");
   const label = document.createElement("span");
   label.className = "custom-select-value";
-  label.textContent = selected ? selected.zh : (options.emptyLabel || "请选择");
+  label.textContent = selected
+    ? selected.zh
+    : (options.allowEmpty ? (options.emptyLabel || "请选择") : (options.unknownLabel || "状态未知"));
   trigger.innerHTML = "";
   trigger.append(label);
   trigger.insertAdjacentHTML("beforeend", '<svg class="custom-select-chevron" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>');
@@ -1694,7 +1825,7 @@ function mountMultiSelect(host, items, current, onPick, options = {}) {
       menu.innerHTML = items.map((item, i) => {
         const chosen = selected.has(String(item.value));
         return `<button type="button" class="custom-select-option${i === index ? " custom-select-option--highlighted" : ""}${chosen ? " custom-select-option--selected" : ""}" role="option" aria-selected="${chosen}" data-index="${i}"><span class="custom-select-check custom-select-check--lead">${chosen ? "✓" : ""}</span><span class="custom-select-value">${escapeHtml(item.zh)}</span>${item.cli ? `<span class="custom-select-option-detail">${escapeHtml(item.cli)}</span>` : ""}</button>`;
-      }).join("") + (options.hint ? `<p class="form-hint">${escapeHtml(options.hint)}</p>` : "");
+      }).join("") + (options.hint ? `<p class="form-hint">${punctBreakHtml(options.hint)}</p>` : "");
       label.textContent = summary();
       menu.querySelector(`[data-index="${index}"]`)?.scrollIntoView({block: "nearest"});
     };
@@ -1724,7 +1855,7 @@ function mountMultiSelect(host, items, current, onPick, options = {}) {
         event.preventDefault();
         if (options.requireOne && selected.size === 0) {
           const sentence = state.catalog?.guard_sentences?.analyst_required || "";
-          label.textContent = `至少选择一名分析师。对应命令行：${sentence} 页面没有取消这一问，不会退出。`;
+          label.innerHTML = analystRequiredHtml(sentence);
           return;
         }
         closeMenus();
@@ -1812,6 +1943,7 @@ function readForm() {
     output_language: currentOutputLanguage(),
     // WEBUI-008: the framework whose wizard this is (the backend refuses an unknown one).
     framework: state.analyzeFramework || undefined,
+    local_import: state.localImport && state.localImport.items ? state.localImport.items : undefined,
   });
 }
 
@@ -1896,6 +2028,29 @@ function multilineHtml(text) {
 // ended (stopped from the API or another tab) the stale banner goes away.
 const STOP_REFUSAL_LIVE = new Set(["queued", "starting", "running", "stopping"]);
 
+const ANALYSIS_UNVERIFIED_PREFIX = "读不到这个任务进程的启动时间，无法确认它还是本任务的分析进程。";
+
+function unverifiedSentence(kind) {
+  if (kind === "analysis") return ANALYSIS_UNVERIFIED_PREFIX + "为安全起见没有发送任何信号；任务仍算运行中，继续占用名额。\n下一步：稍后点「刷新」再试；若确认该进程已不在或可以结束，请在终端结束任务详情里显示的进程号，再刷新本页；也可以等它自行结束，名额会自动释放。";
+  if (kind === "backtest") return "读不到启动时间，无法确认这是回测进程。没有发送任何信号，任务仍算运行中。\n下一步：稍后点「刷新」再试。";
+  return "读不到启动时间，无法确认这是本任务的进程。不把它写成分析进程。没有发送任何信号，任务仍算运行中。\n下一步：稍后点「刷新」再试。";
+}
+
+function shownStopRefusal(run, text) {
+  const value = String(text || "");
+  if (run && run.kind !== "analysis" && value.startsWith(ANALYSIS_UNVERIFIED_PREFIX)) return unverifiedSentence(run.kind);
+  return value;
+}
+
+function stopRefusalHtml(text) {
+  const value = String(text || "");
+  // Narrow banners otherwise split 分析 and 信号. Break only after punctuation;
+  // a real newline stays visible on wide screens too.
+  let html = escapeHtml(value).replace(/[。，；]/g, (mark) => `${mark}<br class="notice-break">`);
+  html = html.replace(/\n/g, "<br>");
+  return html.replace(/(?:<br>|<br class="notice-break">)$/, "");
+}
+
 function stopRefusedHtml(run) {
   const kept = state.stopRefused;
   if (!kept || !run || kept.id !== runIdOf(run.id)) return "";
@@ -1903,11 +2058,15 @@ function stopRefusedHtml(run) {
     state.stopRefused = null;
     return "";
   }
-  return `<p class="error-banner" role="alert" id="stop-refused">${multilineHtml(kept.text)}</p>`;
+  return `<p class="error-banner" role="alert" id="stop-refused">${stopRefusalHtml(shownStopRefusal(run, kept.text))}</p>`;
 }
 
 function noticesHtml() {
-  return (state.notices || []).map((text) => `<p class="notice" data-kept-notice="true">${escapeHtml(text)}</p>`).join("");
+  return (state.notices || []).map((text) => {
+    let html = escapeHtml(text).replaceAll("，", "，<br class=\"notice-break\">");
+    if (String(text).includes("不等于回测完成")) html = html.replace("。", "。<br class=\"notice-break\">");
+    return `<p class="notice" data-kept-notice="true">${html}</p>`;
+  }).join("");
 }
 
 async function submitAnalysis() {
@@ -1955,9 +2114,16 @@ async function resetAnalysisForm() {
   if (state.page === "analyze") renderAnalyze();
 }
 
+function launchMark(kind) {
+  if (kind === "ok") return "✓";
+  if (kind === "unknown" || kind === "wait") return "—";
+  return "!";
+}
+
 function launchDialog(kind, title, bodyHtml, actionsHtml, focus, trigger) {
-  openLayer(`<div class="confirm-dialog-layer" role="presentation"><div class="confirm-dialog launch-dialog launch-dialog--${kind}" id="launch-dialog" role="${kind === "ok" ? "dialog" : "alertdialog"}" aria-modal="true" aria-labelledby="launch-title" aria-describedby="launch-body">
-    <div class="launch-mark" aria-hidden="true">${kind === "ok" ? "✓" : "!"}</div>
+  const role = kind === "fail" ? "alertdialog" : "dialog";
+  openLayer(`<div class="confirm-dialog-layer" role="presentation"><div class="confirm-dialog launch-dialog launch-dialog--${kind}" id="launch-dialog" role="${role}" aria-modal="true" aria-labelledby="launch-title" aria-describedby="launch-body">
+    <div class="launch-mark" aria-hidden="true">${launchMark(kind)}</div>
     <h2 id="launch-title">${escapeHtml(title)}</h2>
     <div id="launch-body">${bodyHtml}</div>
     <div class="confirm-dialog-actions launch-actions">${actionsHtml}</div>
@@ -1978,12 +2144,21 @@ function showLaunchStarted(record, payload) {
   const assetType = record.selections?.asset_type || payload?.asset_type;
   const ignored = (record.ignored || []).length ? `<p class="launch-hint">部分设置由本机配置决定。</p>` : "";
   // RUN-004: when every run slot is busy the run waits in the queue instead.
-  const queued = record.status === "queued";
+  const status = record.status;
+  const queued = status === "queued";
+  const starting = status === "starting";
+  const running = status === "running";
   const ahead = Number(record.queue_ahead) || 0;
-  const lead = !queued ? "任务已在后台运行，可以继续启动下一个。"
-    : ahead > 0 ? `前面还有 ${ahead} 个任务在排队，轮到时自动开始。` : "前面没有排队的任务，有任务结束后自动开始。";
-  launchDialog("ok", queued ? "已加入队列" : "已启动分析",
-    `<p id="launch-lead">${escapeHtml(lead)}</p>${launchMeta("launch-run-info", [["标的", launchTickerLabel(ticker, assetType)], ["日期", record.date || payload?.date || ""], ["任务", record.id || ""]])}${ignored}`,
+  const lead = queued
+    ? (ahead > 0 ? `前面还有 ${ahead} 个任务在排队，轮到时自动开始。` : "前面没有排队的任务，有任务结束后自动开始。")
+    : starting
+      ? "任务正在启动，还没有进入运行。可以继续准备下一个。"
+      : running
+        ? "任务已在后台运行，可以继续启动下一个。"
+        : "任务状态未知，不把它写成已提交或已启动。";
+  const title = queued ? "已加入队列" : starting ? "正在启动" : running ? "已启动分析" : "状态未知";
+  launchDialog(running ? "ok" : queued || starting ? "wait" : "unknown", title,
+    `<p id="launch-lead">${launchLeadHtml(lead)}</p>${launchMeta("launch-run-info", [["标的", launchTickerLabel(ticker, assetType)], ["日期", record.date || payload?.date || ""], ["任务", record.id || ""]])}${ignored}`,
     `<button class="button button--secondary" type="button" id="launch-another">再启动一个</button><button class="button button--primary" type="button" id="launch-open-runs">查看状态</button>`,
     "#launch-open-runs", document.querySelector("#ticker"));
   document.querySelector("#launch-another").addEventListener("click", () => {
@@ -2001,10 +2176,37 @@ const SIGN_IN_PROBLEM = /登录|未登录|重新登录|密钥|API key|api_key|�
 
 const QUEUE_FULL = "队列已满";
 
+function launchLeadHtml(lead) {
+  const text = String(lead || "");
+  let html = escapeHtml(text);
+  // 390 puts the last character of 下一个 on the next line. Break only at the comma and period.
+  if (text.includes("可以继续准备下一个")) {
+    html = html.replace("，", "，<br class=\"notice-break\">").replace("。", "。<br class=\"notice-break\">");
+    html = html.replace(/<br class="notice-break">$/, "");
+  }
+  return html;
+}
+
+function launchRetryHintHtml() {
+  // 390 otherwise leaves 动。 alone, splitting 启动. Wide still fits the whole sentence.
+  return "你填写的设置都保留着，<br class=\"notice-break\">修改后可以直接再次启动。";
+}
+
+function queueFullDetailHtml(detail) {
+  let html = escapeHtml(detail);
+  // Commas are narrow breaks. The advice after 后再启动 does not fit the 440px dialog,
+  // so that break stays visible on wide screens; a notice-break would leave 一个 split.
+  html = html.replace(/，/g, "，<br class=\"notice-break\">");
+  html = html.replace("后再启动，<br class=\"notice-break\">也可以", "后再启动，<br>也可以");
+  html = html.replace("（最多同时运行", "<br>（最多同时运行");
+  html = html.replace("）。", "）。<br>");
+  return html.replace(/(?:<br>|<br class="notice-break">)$/, "");
+}
+
 function showQueueFull(reason, trigger) {
   const detail = reason.replace(/^队列已满[：:]\s*/, "");
   launchDialog("fail", QUEUE_FULL,
-    `<p class="launch-error" id="launch-error">${escapeHtml(detail)}</p><p class="launch-hint">你填写的设置都保留着。</p>`,
+    `<p class="launch-error" id="launch-error">${queueFullDetailHtml(detail)}</p><p class="launch-hint">你填写的设置都保留着。</p>`,
     `<button class="button button--secondary" type="button" id="launch-close">返回修改</button><button class="button button--primary" type="button" id="launch-open-runs">查看状态</button>`,
     "#launch-close", trigger?.isConnected ? trigger : document.querySelector("#run-analysis"));
   document.querySelector("#launch-close").addEventListener("click", closeLayer);
@@ -2026,7 +2228,7 @@ function showLaunchFailed(message, payload, trigger) {
   const toAccounts = SIGN_IN_PROBLEM.test(reason)
     ? `<button class="button button--primary" type="button" id="launch-open-accounts">去账户页</button>` : "";
   launchDialog("fail", "启动失败",
-    `<p class="launch-error" id="launch-error">${escapeHtml(reason)}</p>${launchMeta("launch-fail-info", [["标的", [ticker, form.date].filter(Boolean).join(" · ")], ["模型", quick]])}<p class="launch-hint">你填写的设置都保留着，修改后可以直接再次启动。</p>`,
+    `<p class="launch-error" id="launch-error">${punctBreakHtml(reason)}</p>${launchMeta("launch-fail-info", [["标的", [ticker, form.date].filter(Boolean).join(" · ")], ["模型", quick]])}<p class="launch-hint">${launchRetryHintHtml()}</p>`,
     `<button class="button ${toAccounts ? "button--secondary" : "button--primary"}" type="button" id="launch-close">返回修改</button>${toAccounts}`,
     "#launch-close", trigger?.isConnected ? trigger : document.querySelector("#run-analysis"));
   document.querySelector("#launch-close").addEventListener("click", closeLayer);
@@ -2068,11 +2270,16 @@ function runStatusLabel(status) {
     queued: "排队中",
     cancelled: "已取消",
     idle: "空闲",
-  })[status] || status || "未知";
+  })[status] || "状态未知";
+}
+
+function unknownRunNote(run) {
+  if (!run || runStatusLabel(run.status) !== "状态未知") return "";
+  return `<p class="notice" id="unknown-run-status">任务状态未知，<br class="notice-break">不把它写成已结束，<br class="notice-break">也不写成运行中。</p>`;
 }
 
 function runStatusClass(status) {
-  if (["finished", "completed"].includes(status)) return "status-badge--success";
+  if (status === "completed") return "status-badge--success";
   if (["failed"].includes(status)) return "status-badge--error";
   if (["running", "starting", "stopping"].includes(status)) return "status-badge--info";
   return "status-badge--muted";
@@ -2086,60 +2293,192 @@ function runDate(run) {
   return run?.date || run?.selections?.analysis_date || run?.selections?.date || "";
 }
 
+function runDateLabel(kind) {
+  if (kind === "backtest") return "回测区间";
+  if (kind === "analysis") return "分析日期";
+  return "日期，不把它写成分析日期";
+}
+
+function runDateHtml(run) {
+  const label = runDateLabel(run && run.kind);
+  return label.includes("不把它写成") ? narrowBreakHtml(label) : escapeHtml(label);
+}
+
 function statusLine(run) {
   if (!run) return "暂无正在记录的任务。";
   const label = runStatusLabel(run.status);
-  if (run.status === "failed" && run.failure && run.detail) return `当前任务：${label}。${run.detail}`;
+  const detail = shownRunDetail(run);
+  if (run.status === "failed" && run.failure && detail) return `当前任务：${label}。${detail}`;
   if (run.error) return `当前任务：${label}。${run.error}`;
-  if (run.status === "failed" && run.detail) return `当前任务：${label}。${run.detail}`;
+  if (run.status === "failed" && detail) return `当前任务：${label}。${detail}`;
   return `当前任务：${label}。`;
+}
+
+const ANALYSIS_EXIT_WITHOUT_RESULT = "分析进程已退出，但没有写出结果。进程退出不等于分析完成。";
+const ANALYSIS_RESULT_WRITTEN = "分析进程已退出，结果文件已写出。这只说明进程结束，不表示分析完成或评级已确认。";
+const ANALYSIS_PID_REUSED = "这个任务记录的进程号现在属于另一个程序（启动时间对不上），原来的分析进程已经不在，没有写出结果。控制台没有向那个程序发送任何信号。";
+
+function exitWithoutResultSentence(kind) {
+  if (kind === "backtest") return "回测进程已退出，但没有写出结果。进程退出不等于回测完成。";
+  if (kind === "analysis") return ANALYSIS_EXIT_WITHOUT_RESULT;
+  return "进程已退出，但没有写出结果。不把它写成分析完成。";
+}
+
+// An old record may still say the process was an analysis. Do not adopt that for another kind.
+function resultWrittenSentence(kind) {
+  if (kind === "backtest") return "回测进程已退出，结果文件已写出。这只说明进程结束，不表示回测完成。";
+  if (kind === "analysis") return ANALYSIS_RESULT_WRITTEN;
+  return "进程已退出，结果文件已写出。不把它写成分析完成。";
+}
+
+function pidReusedSentence(kind) {
+  if (kind === "backtest") return "进程号现在属于另一个程序，启动时间对不上。原来的回测进程已经不在，没有写出结果。没有向那个程序发送信号。";
+  if (kind === "analysis") return ANALYSIS_PID_REUSED;
+  return "进程号现在属于另一个程序，启动时间对不上。原来的进程已经不在，没有写出结果。不把它写成分析进程。没有向那个程序发送信号。";
+}
+
+function shownRunDetail(run) {
+  const detail = run && run.detail ? String(run.detail) : "";
+  const otherKind = !run || run.kind !== "analysis";
+  if (detail === ANALYSIS_EXIT_WITHOUT_RESULT && otherKind) return exitWithoutResultSentence(run && run.kind);
+  if (detail === ANALYSIS_RESULT_WRITTEN && otherKind) return resultWrittenSentence(run && run.kind);
+  if (detail === ANALYSIS_PID_REUSED && otherKind) return pidReusedSentence(run && run.kind);
+  return detail;
+}
+
+function exitNoticeHtml(text) {
+  const value = String(text || "");
+  const safe = escapeHtml(value);
+  const analysisPid = value.includes("原来的分析进程已经不在");
+  if (!value.includes("不把它写成") && !value.includes("不等于回测完成") && !value.includes("不表示回测完成") && !value.includes("原来的回测进程") && !value.includes("这是回测进程") && !analysisPid) return safe;
+  let html = safe.replaceAll("。", "。<br class=\"notice-break\">").replaceAll("，", "，<br class=\"notice-break\">");
+  if (analysisPid) html = html.replace("（启动时间对不上）", "<br class=\"notice-break\">（启动时间对不上）");
+  return html.replace(/<br class="notice-break">$/, "");
+}
+
+function statusLineHtml(run) {
+  return exitNoticeHtml(statusLine(run));
+}
+
+function punctBreakHtml(text) {
+  return escapeHtml(text).replace(/[。，；]/g, (mark) => `${mark}<br class="notice-break">`).replace(/<br class="notice-break">$/, "");
+}
+
+function analystRequiredHtml(sentence) {
+  return `至少选择一名分析师。<br class="notice-break">对应命令行：${escapeHtml(sentence)}<br class="notice-break">页面没有取消这一问，不会退出。`;
+}
+
+function runDetailNote(run) {
+  const detail = shownRunDetail(run);
+  if (!detail) return "";
+  return `<p class="notice" id="run-detail-note">${exitNoticeHtml(detail)}</p>`;
+}
+
+function runKindLabel(kind) {
+  if (kind === "backtest") return "回测";
+  if (kind === "analysis") return "分析";
+  return "任务类型未知，不把它写成分析";
+}
+
+function runKindHtml(kind) {
+  const label = runKindLabel(kind);
+  return label.includes("不把它写成") ? narrowBreakHtml(label) : escapeHtml(label);
 }
 
 function taskSummary(run, progress) {
   if (!run) {
-    return `<div class="empty-state" id="current-task"><div><h2>还没有分析任务</h2><p>启动一次分析后，这里会显示标的、进度和结果。</p><button class="button button--primary" type="button" id="start-analysis-from-runs">启动分析</button></div></div>`;
+    return `<div class="empty-state" id="current-task"><div><h2>还没有任务</h2><p>启动分析或回测后，这里会显示标的、进度和结果。</p><button class="button button--primary" type="button" id="start-analysis-from-runs">启动分析</button></div></div>`;
   }
   const rows = progress?.agents || [];
   const latest = progress?.backtest?.latest;
   const completed = rows.filter((row) => row.status === "completed").length;
-  const active = rows.filter((row) => row.status === "in_progress").length;
-  const progressText = latest
-    ? `${latest.done}/${latest.total} 个格子完成`
+  const working = rows.filter((row) => row.status === "in_progress").length;
+  const workingLabel = run.status === "stopping" ? "停止中" : workStillLive(run) ? "进行中" : "未写完";
+  const progressHtml = latest
+    ? escapeHtml(`${latest.done}/${latest.total} 个格子完成`)
+    : rolesUnrecorded(run, rows)
+    ? unrecordedProgressHtml()
     : rows.length
-    ? `${completed}/${rows.length} 个角色完成${active ? `，${active} 个进行中` : ""}`
-    : "等待进度";
-  const kind = run.kind === "backtest" ? "回测" : "分析";
+    ? escapeHtml(`${completed}/${rows.length} 个角色完成${working ? `，${working} 个${workingLabel}` : ""}`)
+    : escapeHtml("等待进度");
+  const kind = runKindHtml(run.kind);
   return `<section class="panel" id="current-task">
     <h2>当前任务</h2>
-    <dl class="summary-list"><div><dt>状态</dt><dd><span class="status-badge ${runStatusClass(run.status)}">${escapeHtml(runStatusLabel(run.status))}</span></dd></div><div><dt>任务</dt><dd>${escapeHtml(kind)}</dd></div><div><dt>标的</dt><dd>${escapeHtml(runTicker(run) || "—")}</dd></div><div><dt>分析日期</dt><dd>${escapeHtml(runDate(run) || "—")}</dd></div><div><dt>进度</dt><dd>${escapeHtml(progressText)}</dd></div></dl>
-    ${run.status === "failed" && run.failure && run.detail ? `<p class="error-banner" id="run-failure">${escapeHtml(run.detail)}</p>` : run.error ? `<p class="error-banner">${escapeHtml(run.error)}</p>` : ""}
+    <dl class="summary-list"><div><dt>状态</dt><dd><span class="status-badge ${runStatusClass(run.status)}">${escapeHtml(runStatusLabel(run.status))}</span></dd></div><div><dt>任务</dt><dd>${kind}</dd></div><div><dt>标的</dt><dd>${escapeHtml(runTicker(run) || "—")}</dd></div><div><dt>${runDateHtml(run)}</dt><dd>${escapeHtml(runDate(run) || "—")}</dd></div><div><dt>进度</dt><dd id="task-progress">${progressHtml}</dd></div></dl>
+    ${run.status === "failed" && run.failure && shownRunDetail(run) ? `<p class="error-banner" id="run-failure">${punctBreakHtml(shownRunDetail(run))}</p>` : run.error ? `<p class="error-banner">${punctBreakHtml(run.error)}</p>` : ""}
   </section>`;
+}
+
+function nextStepNotice(text, actions = "") {
+  return `<section class="panel" id="next-step"><h2>下一步</h2><p class="notice">${text}</p>${actions}</section>`;
 }
 
 function nextStepPanel(run, result, progress) {
   if (!run) {
-    return `<section class="panel" id="next-step"><h2>下一步</h2><p class="notice">启动分析后，这里会提供刷新、停止和查看结果的操作。</p></section>`;
+    return nextStepNotice("启动分析后，<br class=\"notice-break\">这里会提供刷新、停止和<br class=\"notice-break\">查看结果的操作。");
   }
-  if (["starting", "running", "stopping"].includes(run.status)) {
-    return `<section class="panel" id="next-step"><h2>下一步</h2><p class="notice">任务仍在运行。稍后刷新状态，或在确认后停止任务。</p></section>`;
+  if (run.status === "stopping") {
+    return nextStepNotice("任务正在停止，<br class=\"notice-break\">不把它写成运行中，<br class=\"notice-break\">也还不是已结束。<br class=\"notice-break\">稍后刷新状态。");
+  }
+  if (run.status === "starting") {
+    return nextStepNotice("任务正在启动，<br class=\"notice-break\">还没有进入运行。<br class=\"notice-break\">稍后刷新状态，<br class=\"notice-break\">或在确认后停止任务。");
+  }
+  if (run.status === "running") {
+    return nextStepNotice("任务仍在运行。<br class=\"notice-break\">稍后刷新状态，<br class=\"notice-break\">或在确认后停止任务。");
+  }
+  if (run.status === "queued") {
+    return nextStepNotice("任务还在排队，<br class=\"notice-break\">没有开始运行，<br class=\"notice-break\">也不是已结束。");
   }
   if (result?.present) {
-    return `<section class="panel" id="next-step"><h2>下一步</h2><p class="notice">结果已经写出。查看上方结果，或打开报告列表。</p><p class="inline-actions"><button class="button button--secondary" type="button" id="open-reports-from-run">打开报告列表</button></p></section>`;
+    return nextStepNotice("结果已经写出。<br class=\"notice-break\">查看上方结果，或打开报告列表。",
+      `<p class="inline-actions"><button class="button button--secondary" type="button" id="open-reports-from-run">打开报告列表</button></p>`);
+  }
+  if (run.status === "failed" && run.kind === "backtest") {
+    return nextStepNotice("回测没有生成结果。<br class=\"notice-break\">不能按分析重新启动。");
+  }
+  if (run.status === "failed" && run.kind && run.kind !== "analysis") {
+    return nextStepNotice("任务没有生成结果。<br class=\"notice-break\">不把它写成可以按分析重新启动。");
   }
   if (run.status === "failed" && run.checkpoint?.saved) {
-    return `<section class="panel" id="next-step"><h2>下一步</h2><p class="notice">任务没有生成结果，但已保存断点。点「重新启动」会从失败的角色继续，已完成的角色不再调用模型。</p></section>`;
+    return nextStepNotice("任务没有生成结果，<br class=\"notice-break\">但已保存断点。<br class=\"notice-break\">点「重新启动」会从失败的角色继续，<br class=\"notice-break\">已完成的角色不再调用模型。");
   }
   if (run.status === "failed") {
-    return `<section class="panel" id="next-step"><h2>下一步</h2><p class="notice">任务没有生成结果。展开技术详情查看日志，修正配置后可以重新启动。</p></section>`;
+    return nextStepNotice("任务没有生成结果。<br class=\"notice-break\">展开技术详情查看日志，<br class=\"notice-break\">修正配置后可以重新启动。");
   }
-  return `<section class="panel" id="next-step"><h2>下一步</h2><p class="notice">任务已结束，暂时没有可显示的结果。</p></section>`;
+  if (run.status === "finished") {
+    const sentence = run.kind === "backtest"
+      ? "进程已结束。这只说明进程退出，不表示回测完成。暂时没有可显示的结果。"
+      : run.kind === "analysis"
+        ? "进程已结束。这只说明进程退出，不表示分析完成。暂时没有可显示的结果。"
+        : "进程已结束。这只说明进程退出，不把它写成分析完成。暂时没有可显示的结果。";
+    return nextStepNotice(escapeHtml(sentence).replaceAll("。", "。<br class=\"notice-break\">").replace(/<br class="notice-break">$/, ""));
+  }
+  if (run.status === "stopped") {
+    return nextStepNotice("任务已停止，不是正常完成。<br class=\"notice-break\">暂时没有可显示的结果。");
+  }
+  if (run.status === "cancelled") {
+    return nextStepNotice("任务已取消，没有开始运行。");
+  }
+  if (run.status === "completed") {
+    return nextStepNotice("任务标记为已完成，<br class=\"notice-break\">但这里没有可显示的结果。");
+  }
+  const label = runStatusLabel(run.status);
+  if (label === "状态未知") return nextStepNotice("任务状态未知，<br class=\"notice-break\">不把它写成已结束，<br class=\"notice-break\">也不写成运行中。");
+  return nextStepNotice(punctBreakHtml(`任务状态是${label}，暂时没有可显示的结果。不把它写成已结束。`));
+}
+
+function alreadyRunningHtml(item) {
+  const safe = escapeHtml(`${item.zh}。${item.when}`);
+  if (item.key === "already_running_lock") return safe.replace("这句打印", "<br class=\"notice-break\">这句打印").replace("第二次启动", "第二次<br class=\"notice-break\">启动").replace(/[。，]/g, (mark) => `${mark}<br class="notice-break">`).replace(/<br class="notice-break">$/, "");
+  if (item.key === "already_running_socket") return safe.replace("已经拿到文件锁", "<br class=\"notice-break\">已经拿到文件锁").replace(/[。，]/g, (mark) => `${mark}<br class="notice-break">`).replace("句尾没有句号。<br class=\"notice-break\">", "句尾没有句号。<br>").replace(/<br class="notice-break">$/, "");
+  return safe;
 }
 
 function alreadyRunningNote() {
   const rows = (state.catalog?.launcher_conditional || []).filter((item) =>
     item.key === "already_running_lock" || item.key === "already_running_socket");
   if (!rows.length) return "";
-  return `<details class="disclosure" id="already-running"><summary>查看并发启动说明</summary><section class="panel"><h2>已在运行</h2>${rows.map((item) => `<p class="notice">${escapeHtml(item.zh)}。${escapeHtml(item.when)}</p><pre class="log-view" data-already="${escapeHtml(item.key)}">${escapeHtml(item.cli)}</pre>`).join("")}</section></details>`;
+  return `<details class="disclosure" id="already-running"><summary>查看并发启动说明</summary><section class="panel"><h2>已在运行</h2>${rows.map((item) => `<p class="notice"${item.key === "already_running_lock" ? " id=\"already-lock-note\"" : item.key === "already_running_socket" ? " id=\"already-socket-note\"" : ""}>${alreadyRunningHtml(item)}</p><pre class="log-view" data-already="${escapeHtml(item.key)}">${escapeHtml(item.cli)}</pre>`).join("")}</section></details>`;
 }
 
 function statusArgvLine(line) {
@@ -2165,17 +2504,34 @@ function liveTitlePanel() {
   return `<details class="disclosure"><summary>查看报告分段说明</summary><section class="panel"><h2>实时报告分段</h2><p class="notice">分段标题和文件名来自实际运行记录。</p>${reportSectionMap()}</section></details>`;
 }
 
+function currentReportLabel(run) {
+  if (run && run.kind === "backtest") return "查看当前回测内容";
+  if (run && run.kind === "analysis") return "查看当前分析内容";
+  return "查看当前内容，不把它写成分析";
+}
+
+function currentReportWaiting(run) {
+  if (run && run.kind === "backtest") return "回测过程中，最新内容会显示在这里。";
+  if (run && run.kind === "analysis") return "分析过程中，最新报告内容会显示在这里。";
+  return "任务过程中，最新内容会显示在这里。不把它写成分析。";
+}
+
+function currentReportWaitingHtml(run) {
+  const text = currentReportWaiting(run);
+  return text.includes("不把它写成") ? punctBreakHtml(text) : escapeHtml(text);
+}
+
 function currentReportPanel(run, progress) {
   const report = progress && progress.report;
   const waiting = run && (run.status === "running" || run.status === "starting")
-    ? `<p class="notice">分析过程中，最新报告内容会显示在这里。</p>`
+    ? `<p class="notice" id="current-report-waiting">${currentReportWaitingHtml(run)}</p>`
     : "";
   if (!report && !waiting) return "";
-  return `<details class="disclosure"><summary>查看当前分析内容</summary>${waiting}${report ? `<pre class="log-view">${escapeHtml(report)}</pre>` : ""}</details>`;
+  return `<details class="disclosure" id="current-report"><summary>${escapeHtml(currentReportLabel(run))}</summary>${waiting}${report ? `<pre class="log-view">${escapeHtml(report)}</pre>` : ""}</details>`;
 }
 
 function runLogTailPanel(run) {
-  return `<details id="run-log-details"><summary>查看运行日志</summary><div class="field"><label for="log-lines">显示日志行数</label><input id="log-lines" value="40"></div><p class="notice" id="log-path">${escapeHtml(logPathNotice(null))}</p><pre class="log-view" id="run-log">${escapeHtml(run?.detail || "展开后读取日志。")}</pre></details>`;
+  return `<details id="run-log-details"><summary>查看运行日志</summary><div class="field"><label for="log-lines">显示日志行数</label><input id="log-lines" value="40"></div><p class="notice" id="log-path">${logWaitingHtml()}</p><pre class="log-view" id="run-log">${escapeHtml(shownRunDetail(run) || "展开后读取日志。")}</pre></details>`;
 }
 
 function runTechnicalDetails(run, data) {
@@ -2188,7 +2544,7 @@ function runTechnicalDetails(run, data) {
   ].filter(Boolean);
   const details = [
     statusArgvLine(data?.argv_line),
-    run.detail ? `<p class="notice">${escapeHtml(run.detail)}</p>` : "",
+    runDetailNote(run),
     progress.stats ? statsNote(progress) : "",
     progress.wall_time ? wallNote(progress) : "",
     progressTechnicalDetails(progress),
@@ -2202,10 +2558,15 @@ function runTechnicalDetails(run, data) {
   return `<details class="disclosure" id="run-technical-details"><summary>查看技术详情、消息与日志</summary>${details}</details>`;
 }
 
-function showToast(text) {
+function showToast(text, kind = "ok") {
   const host = document.querySelector("#toast-host");
   if (!host || !text) return;
-  host.innerHTML = `<div class="toast" role="status"><span class="ck" aria-hidden="true">✓</span><span>${escapeHtml(text)}</span></div>`;
+  const mark = kind === "ok" ? "✓" : "—";
+  const safe = escapeHtml(text);
+  let body = safe.replaceAll("，", "，<br class=\"toast-break\">");
+  body = body.replace("或已从断点", "或<br class=\"toast-break\">已从断点");
+  const tone = kind === "ok" ? "" : ` toast--${kind}`;
+  host.innerHTML = `<div class="toast${tone}" role="status"><span class="ck" aria-hidden="true">${mark}</span><span>${body}</span></div>`;
   window.clearTimeout(showToast.timer);
   showToast.timer = window.setTimeout(() => { host.innerHTML = ""; }, 4000);
 }
@@ -2215,8 +2576,20 @@ const ROLE_PILL = {
   run: ["run", "进行中"],
   bad: ["err", "失败"],
   wait: ["wait", "等待"],
+  unrecorded: ["wait", "未记录"],
   part: ["wait", "未完成"],
+  stop: ["wait", "停止中"],
+  unknown: ["wait", "状态未知"],
 };
+
+function knownAgentStatus(status) {
+  return status === "pending" || status === "in_progress" || status === "completed" || status === "error";
+}
+
+function unknownRoleNote(rows) {
+  if (!(rows || []).some((row) => row && row.status && !knownAgentStatus(row.status))) return "";
+  return `<p class="notice" id="unknown-role-status">${punctBreakHtml("角色状态未知，不把它写成进行中或已完成。")}</p>`;
+}
 
 function runActive(run) {
   return Boolean(run && ["starting", "running", "stopping"].includes(run.status));
@@ -2235,23 +2608,64 @@ function teamGroups(rows) {
   return groups;
 }
 
-function teamState(roles, active) {
+function workStillLive(run) {
+  return run?.status === "running" || run?.status === "starting";
+}
+
+function runEnded(run) {
+  return Boolean(run && ["finished", "failed", "stopped", "cancelled", "completed"].includes(run.status));
+}
+
+function progressNotLive(run) {
+  if (runEnded(run) || run?.status === "idle") return true;
+  return runStatusLabel(run?.status) === "状态未知";
+}
+
+function rolesUnrecorded(run, rows) {
+  if (!progressNotLive(run)) return false;
+  return !(rows || []).some((row) => row && row.status && row.status !== "pending");
+}
+
+function unrecordedProgressHtml() {
+  return narrowBreakHtml("没有角色进度，不写成已完成。");
+}
+
+function teamState(roles, run) {
+  const active = workStillLive(run);
   if (roles.some((row) => row.status === "error")) return "bad";
   if (roles.every((row) => row.status === "completed")) return "ok";
-  if (roles.some((row) => row.status === "in_progress")) return "run";
+  if (run?.status === "stopping" && roles.some((row) => row.status === "in_progress")) return "stop";
+  if (roles.some((row) => row.status === "in_progress")) return active ? "run" : "part";
   if (roles.some((row) => row.status === "completed")) return active ? "run" : "part";
+  if (roles.some((row) => row.status && !knownAgentStatus(row.status))) return "unknown";
+  if (progressNotLive(run)) return "unrecorded";
   return "wait";
 }
 
-function roleDot(status) {
+function roleDot(status, run) {
+  if (status === "in_progress" && run && !workStillLive(run)) return "wait";
   return ({completed: "ok", in_progress: "run", error: "err"})[status] || "wait";
 }
 
-function roleTime(row) {
+function roleTime(row, run) {
+  if (row && row.status && !knownAgentStatus(row.status)) return "状态未知";
   if (row.status === "completed") return row.elapsed || row.finished || "";
-  if (row.status === "in_progress") return "进行中";
+  if (row.status === "in_progress") {
+    if (run?.status === "stopping") return "停止中";
+    if (run && !workStillLive(run)) return "未写完";
+    return "进行中";
+  }
   if (row.status === "error") return "出错";
   return "";
+}
+
+function roleStatusText(row, run) {
+  if (row && row.status && !knownAgentStatus(row.status)) return "状态未知";
+  if (row.status === "in_progress" && run && !workStillLive(run)) {
+    return run.status === "stopping" ? "停止中" : "未写完";
+  }
+  if (row.status === "pending" && progressNotLive(run)) return "日志里没有这个角色，不把它写成等待。";
+  return row.status_zh || "";
 }
 
 function failureSummary(run) {
@@ -2259,32 +2673,47 @@ function failureSummary(run) {
 }
 
 function teamNow(group, stateKey, run) {
+  if (run?.status === "stopping" && group.roles.some((row) => row.status === "in_progress")) {
+    return `<div class="now"><b>停止中：</b><br>不把还在日志里的角色<br>写成仍在工作。</div>`;
+  }
+  if (!workStillLive(run) && group.roles.some((row) => row.status === "in_progress")) {
+    return `<div class="now"><b>未写完：</b><br>进程已经不在运行，<br>不把这个角色写成正在工作。</div>`;
+  }
   if (stateKey === "run") {
     const working = group.roles.filter((row) => row.status === "in_progress");
-    if (!working.length) return `<div class="now"><b>正在做：</b>等待本组下一个角色开始。</div>`;
-    return `<div class="now"><b>正在做：</b>${working.map((row) => `${escapeHtml(row.zh)}${row.started ? `（${escapeHtml(row.started)} 开始）` : ""}`).join("、")}正在工作。</div>`;
+    if (!working.length) return `<div class="now"><b>正在做：</b><br>等待本组下一个角色开始。</div>`;
+    const who = working.map((row) => {
+      const name = escapeHtml(row.zh);
+      return row.started ? `${name}<br>（${escapeHtml(row.started)} 开始）` : name;
+    }).join("、<br>");
+    return `<div class="now"><b>正在做：</b><br>${who}<br>正在工作。</div>`;
+  }
+  if (stateKey === "unrecorded") {
+    return `<div class="now"><b>未记录：</b><br>日志里没有这组角色，<br>不把它们写成等待。</div>`;
   }
   if (stateKey === "bad") {
     const failed = group.roles.find((row) => row.status === "error");
     const saved = run?.checkpoint?.saved;
     const reason = failureSummary(run) || `${failed?.zh || "这个角色"}出错`;
-    return `<div class="now"><b>停在这里：</b>${escapeHtml(reason)}${saved ? "。已完成的角色已存进断点，可以从这里继续。" : "。"}</div>`;
+    const reasonHtml = exitNoticeHtml(reason).replaceAll('<br class="notice-break">', '<br>');
+    const tail = saved ? "。<br>已完成的角色已存进断点，<br>可以从这里继续。" : "。";
+    return `<div class="now"><b>停在这里：</b><br>${reasonHtml}${tail}</div>`;
   }
   return "";
 }
 
 function pipelineHtml(rows, run) {
-  const active = runActive(run);
   return `<div class="pipe" id="team-pipeline">${teamGroups(rows).map((group) => {
-    const key = teamState(group.roles, active);
+    const key = teamState(group.roles, run);
     const [pill, label] = ROLE_PILL[key];
-    const cls = key === "run" ? " cur" : key === "bad" ? " bad" : key === "wait" ? " dim" : "";
+    const cls = key === "run" ? " cur" : key === "bad" ? " bad" : key === "wait" || key === "stop" || key === "unrecorded" ? " dim" : "";
     return `<section class="team${cls}" data-team="${escapeHtml(group.team)}" aria-label="${escapeHtml(group.team_zh)}：${label}"><div class="tn"><span>${escapeHtml(group.team_zh)}</span><span class="pill ${pill}">${label}</span></div>${group.roles.map((row) =>
-      `<div class="role" data-agent="${escapeHtml(row.agent)}"><span class="dot ${roleDot(row.status)}" aria-hidden="true"></span><span>${escapeHtml(row.zh)}</span><span class="t">${escapeHtml(roleTime(row))}</span><span class="visually-hidden">${escapeHtml(row.status_zh)}</span></div>`).join("")}${teamNow(group, key, run)}</section>`;
+      `<div class="role" data-agent="${escapeHtml(row.agent)}"><span class="dot ${roleDot(row.status, run)}" aria-hidden="true"></span><span>${escapeHtml(row.zh)}</span><span class="t">${escapeHtml(roleTime(row, run))}</span><span class="visually-hidden">${escapeHtml(roleStatusText(row, run))}</span></div>`).join("")}${teamNow(group, key, run)}</section>`;
   }).join("")}</div>`;
 }
 
 function timelineText(event) {
+  if (event && event.status && !knownAgentStatus(event.status)) return "状态未知";
   return ({in_progress: "开始工作", completed: "完成", error: "出错，任务在这里停止"})[event.status] || event.status_zh || "";
 }
 
@@ -2294,11 +2723,21 @@ function feedHtml(timeline) {
     `<div class="ev${event.status === "error" ? " ev--err" : ""}"><span class="tm">${escapeHtml(event.time || "—")}</span><span class="who">${escapeHtml(event.zh)}</span><span>${escapeHtml(timelineText(event))}</span></div>`).join("")}</div>`;
 }
 
+function missingEndNote(run) {
+  if (!run || runActive(run) || runStatusLabel(run.status) === "状态未知") return "";
+  const start = Date.parse(run.started_at || "");
+  const end = Date.parse(run.finished_at || "");
+  if (!Number.isFinite(start) || Number.isFinite(end)) return "";
+  return `<p class="notice" id="missing-end">${punctBreakHtml("没有结束时间，不按当前时间计算已用时间。")}</p>`;
+}
+
 function elapsedText(run) {
   const start = Date.parse(run?.started_at || "");
   if (!Number.isFinite(start)) return "—";
-  const endRaw = runActive(run) ? Date.now() : Date.parse(run.finished_at || "");
-  const end = Number.isFinite(endRaw) ? endRaw : Date.now();
+  const endRaw = runActive(run) ? Date.now() : Date.parse(run?.finished_at || "");
+  // A task that is not still live has no duration until it records an end.
+  if (!Number.isFinite(endRaw)) return "—";
+  const end = endRaw;
   const seconds = Math.max(0, Math.round((end - start) / 1000));
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
@@ -2307,7 +2746,7 @@ function elapsedText(run) {
 }
 
 function statusPill(run) {
-  const key = ({running: "run", starting: "run", stopping: "run", failed: "err", finished: "ok", completed: "ok"})[run.status] || "wait";
+  const key = ({running: "run", starting: "run", stopping: "run", failed: "err", completed: "ok"})[run.status] || "wait";
   return `<span class="pill ${key}">${escapeHtml(runStatusLabel(run.status))}</span>`;
 }
 
@@ -2328,19 +2767,40 @@ function runSummaryCards(run, rows) {
   const failed = run.status === "failed";
   const selections = run.selections || {};
   const modelLines = runModelLines(selections);
+  const unrecorded = rolesUnrecorded(run, rows);
   return `<div class="run-summary" id="current-task">
     <div class="stat-card"><div class="k">状态</div><div class="v">${statusPill(run)}</div></div>
-    <div class="stat-card"><div class="k">角色进度</div><div class="v" id="role-progress">${done} / ${total}</div><div class="bar${failed ? " bar--err" : ""}" role="progressbar" aria-label="角色进度" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${done}"><i style="width:${percent}%"></i></div></div>
+    <div class="stat-card"><div class="k">角色进度</div><div class="v" id="role-progress">${unrecorded ? unrecordedProgressHtml() : `${done} / ${total}`}</div>${unrecorded ? "" : `<div class="bar${failed ? " bar--err" : ""}" role="progressbar" aria-label="角色进度" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${done}"><i style="width:${percent}%"></i></div>`}</div>
     <div class="stat-card"><div class="k">已用时间</div><div class="v" id="run-elapsed">${escapeHtml(elapsedText(run))}</div></div>
     <div class="stat-card"><div class="k">模型</div><div class="v v--small" id="run-models">${modelLines.length ? modelLines.map((line) => `<span class="model-line">${escapeHtml(line)}</span>`).join("") : "—"}</div></div>
   </div>`;
+}
+
+function failureWhere(run, failedRow) {
+  const team = failedRow && failedRow.team_zh;
+  if (run && run.kind === "backtest") return team ? `回测在${team}这一步停止了` : "回测没有完成";
+  if (run && run.kind === "analysis") return team ? `分析在${team}这一步停止了` : "分析没有完成";
+  return team ? `任务在${team}这一步停止了，不把它写成分析。` : "任务没有完成，不把它写成分析。";
+}
+
+function failureWhereHtml(run, failedRow) {
+  const where = failureWhere(run, failedRow);
+  const html = escapeHtml(where);
+  return where.includes("不把它写成") ? html.replaceAll("，", "，<br class=\"notice-break\">") : html;
+}
+
+function failureReasonHtml(reason) {
+  if (!reason) return "";
+  const html = exitNoticeHtml(reason);
+  if (!String(reason).includes("原来的分析进程已经不在")) return `原因：<br class="notice-break"><code>${html}</code>`;
+  return `原因：<br><code>${html.replaceAll('<br class="notice-break">', '<br>')}</code>`;
 }
 
 function failureAlert(run, rows) {
   if (run.status !== "failed") return "";
   const failedRow = rows.find((row) => row.status === "error");
   const done = rows.filter((row) => row.status === "completed").length;
-  const where = failedRow ? `分析在${failedRow.team_zh}这一步停止了` : "分析没有完成";
+  const where = failureWhereHtml(run, failedRow);
   const who = failedRow?.zh || run.failure?.role_zh;
   const reason = failureSummary(run);
   const saved = Boolean(run.checkpoint?.saved);
@@ -2349,7 +2809,7 @@ function failureAlert(run, rows) {
     ? `<button class="button button--primary" type="button" id="resume-run">从断点重新启动</button>`
     : `<button class="button button--secondary" type="button" id="resume-run" disabled aria-describedby="resume-note">从断点重新启动</button><button class="button button--primary" type="button" id="restart-run">重新启动</button>`;
   return `<div class="alert" id="run-failure" role="alert">
-    <div class="alert-copy"><b>任务失败：${escapeHtml(where)}</b><div class="why">已完成 ${done} 个角色${who ? `，${escapeHtml(who)}出错后进程退出` : ""}，没有写出报告。${reason ? `原因：<code>${escapeHtml(reason)}</code>` : ""}</div></div>
+    <div class="alert-copy"><b>任务失败：${where}</b><div class="why">已完成 ${done} 个角色${who ? `，${escapeHtml(who)}出错后进程退出` : ""}，<br class="notice-break">没有写出报告。${failureReasonHtml(reason)}</div></div>
     <div class="alert-actions"><div class="alert-buttons"><button class="button button--secondary" type="button" id="show-error-log">查看错误日志</button>${restart}</div>${canRestart && !saved ? `<span class="alert-note" id="resume-note">本次未保存断点，只能重新启动</span>` : ""}</div>
   </div>`;
 }
@@ -2362,7 +2822,7 @@ function runMetaLine(run) {
 function statusSubline(run) {
   const selections = run.selections || {};
   const depth = (state.catalog?.depths || []).find((item) => String(item.value) === String(selections.research_depth))?.zh;
-  return [runTicker(run), runDate(run) ? `分析日期 ${runDate(run)}` : "", depth ? `研究深度 ${depth}` : ""].filter(Boolean).join(" · ");
+  return [runTicker(run), runDate(run) ? `${runDateLabel(run.kind)} ${runDate(run)}` : "", depth ? `研究深度 ${depth}` : ""].filter(Boolean).join(" · ");
 }
 
 function clockOf(stamp) {
@@ -2379,7 +2839,7 @@ function detailHead(run, actions) {
   const when = run.status === "queued" ? (run.queued_at ? `${clockOf(run.queued_at)} 提交` : "")
     : (run.started_at ? `开始于 ${clockOf(run.started_at)}` : "");
   const sub = [run.framework_name || "", depthZh(run) ? `研究深度 ${depthZh(run)}` : "", when].filter(Boolean).join(" · ");
-  return `<div class="dhd" id="run-detail-head"><div><div class="ttl">${escapeHtml([runTicker(run), runDate(run)].filter(Boolean).join(" · "))}</div>${sub ? `<p class="sub">${escapeHtml(sub)}</p>` : ""}</div><div class="act">${actions}</div></div>`;
+  return `<div class="dhd" id="run-detail-head"><div><div class="ttl">${escapeHtml([runTicker(run), runDate(run)].filter(Boolean).join(" · "))}</div><p class="sub" id="run-kind">${runKindHtml(run.kind)}</p>${sub ? `<p class="sub">${escapeHtml(sub)}</p>` : ""}</div><div class="act">${actions}</div></div>`;
 }
 
 function queuedDetailHtml(run, data) {
@@ -2402,14 +2862,16 @@ function analysisStatusHtml(run, data, options = {}) {
     ${heading("status", "查看状态", statusSubline(run), actions)}`}
     ${failureAlert(run, rows)}
     ${runSummaryCards(run, rows)}
-    ${rows.length ? `<section class="status-block"><h2 class="section-title">团队进度</h2>${pipelineHtml(rows, run)}</section>` : `<p class="notice">等待进度。</p>`}
+    ${unknownRunNote(run)}
+    ${missingEndNote(run)}
+    ${rows.length ? `<section class="status-block"><h2 class="section-title">团队进度</h2>${unrecordedRoleNote(rows, run)}${pipelineHtml(rows, run)}</section>${unknownRoleNote(rows)}` : `<p class="notice" id="waiting-progress">${rolesUnrecorded(run, rows) ? unrecordedProgressHtml() : "等待进度。"}</p>`}
     <section class="status-block"><h2 class="section-title">最近动态</h2>${feedHtml(progress.timeline)}</section>
     ${data.result?.present ? resultPanel(data.result) : ""}
-    ${completionNote(progress)}
+    ${completionNote(progress, run)}
     <details class="disclosure" id="run-technical-details"><summary>技术信息与完整日志</summary>
       ${failureMessage}
       ${statusArgvLine(data.argv_line)}
-      ${run.detail ? `<p class="notice">${escapeHtml(run.detail)}</p>` : ""}
+      ${runDetailNote(run)}
       ${progress.stats ? statsNote(progress) : ""}
       ${progress.wall_time ? wallNote(progress) : ""}
       ${currentReportPanel(run, progress)}
@@ -2430,10 +2892,54 @@ function runIdOf(value) {
   return typeof value === "string" && value.trim() ? value : "";
 }
 
-async function restartRun(resume, button, runId) {
+function restartToastKind(result) {
+  const status = result && result.status;
+  if (status === "running") return "ok";
+  if (status === "queued" || status === "starting" || status === "stopping") return "wait";
+  return "unknown";
+}
+
+function restartNotice(result, resume) {
+  const status = result && result.status;
+  const zh = result && result.zh ? String(result.zh) : "";
+  if (status === "queued") return zh || "已加入队列，还没有重新启动。";
+  if (status === "starting") return resume ? "任务正在启动，还没有从断点进入运行。" : (zh || "任务正在启动，还没有进入运行。");
+  if (status === "running") return resume ? "已从断点重新启动，已完成的角色不会再调用模型" : (zh || "已重新启动任务");
+  if (status === "stopping") return "任务正在停止，不把它写成已重新启动。";
+  if (status === "stopped") return "任务已停止，不把它写成已重新启动。";
+  if (status === "finished" || status === "completed") return "任务已经结束，不把它写成已重新启动。";
+  if (status === "failed") return zh || "任务失败，不把它写成已重新启动。";
+  if (status === "cancelled") return "任务已取消，不把它写成已重新启动。";
+  if (status === "idle") return "没有仍在运行的任务，不把它写成已重新启动。";
+  if (status) return "重新启动结果状态未知，不把它写成已启动。";
+  return resume
+    ? "任务状态未知，不把它写成已提交或已从断点重新启动。"
+    : "任务状态未知，不把它写成已提交或已重新启动。";
+}
+
+function restartRefusal(sourceRun, message) {
+  const value = String(message || "");
+  const kind = sourceRun && sourceRun.kind;
+  if (kind === "backtest" && value.includes("分析") && !value.includes("不能按分析重新启动")) {
+    return "这是回测，不能按分析重新启动。没有启动。";
+  }
+  if (kind && kind !== "analysis" && kind !== "backtest" && value.includes("分析") && !value.includes("不把它写成分析重新启动")) {
+    return "任务类型未知，不把它写成分析重新启动。没有启动。";
+  }
+  return value;
+}
+
+function restartRefusalHtml(text) {
+  const value = String(text || "");
+  const safe = escapeHtml(value);
+  if (!value.includes("不能按分析重新启动") && !value.includes("不把它写成分析重新启动")) return safe;
+  return safe.replaceAll("，", "，<br class=\"notice-break\">").replaceAll("。", "。<br class=\"notice-break\">").replace(/<br class="notice-break">$/, "");
+}
+
+async function restartRun(resume, button, runId, sourceRun) {
   const id = runIdOf(runId);
   if (!id) {
-    pageEl.insertAdjacentHTML("afterbegin", `<p class="error-banner" role="alert">${escapeHtml(RUN_ID_MISSING)}</p>`);
+    pageEl.insertAdjacentHTML("afterbegin", `<p class="error-banner" role="alert">${punctBreakHtml(RUN_ID_MISSING)}</p>`);
     return;
   }
   if (button) { button.disabled = true; button.textContent = resume ? "正在从断点启动…" : "正在重新启动…"; }
@@ -2445,18 +2951,19 @@ async function restartRun(resume, button, runId) {
       state.selectedRunId = result.id;
       if (state.runDetailOpen) setStatusRoute(result.id);
     }
-    showToast(resume ? "已从断点重新启动，已完成的角色不会再调用模型" : (result.zh || "已重新启动任务"));
+    showToast(restartNotice(result, resume), restartToastKind(result));
     await renderRuns();
   } catch (error) {
     if (button?.isConnected) { button.disabled = false; button.textContent = resume ? "从断点重新启动" : "重新启动"; }
-    pageEl.insertAdjacentHTML("afterbegin", `<p class="error-banner" role="alert">${escapeHtml(error.message)}</p>`);
+    const sentence = restartRefusal(sourceRun, error.message);
+    pageEl.insertAdjacentHTML("afterbegin", `<p class="error-banner" role="alert" id="restart-refused">${restartRefusalHtml(sentence)}</p>`);
   }
 }
 
 // ---- RUN-004: several runs at once (Proto mock.html -v4: multi / multifail / multidetail / queued)
 
-const RUN_FILTERS = [["all", "全部"], ["running", "运行中"], ["queued", "排队中"], ["failed", "失败"], ["finished", "已完成"]];
-const LIVE_RUN = ["starting", "running", "stopping"];
+const RUN_FILTERS = [["all", "全部"], ["running", "运行中"], ["queued", "排队中"], ["failed", "失败"], ["finished", "已结束"]];
+
 
 // 查看状态 is always the list + 任务详情, whatever the number of runs (PM ruling, WEBUI-006 item 3).
 function runListItems(run, data, runs) {
@@ -2478,7 +2985,9 @@ function runListCounts(data, runs) {
 function emptyRunsHtml(data) {
   const limits = data.limits || {};
   const rule = limits.max_running ? `最多同时运行 ${limits.max_running} 个，其余自动排队。` : "";
-  const body = `<div class="runs-empty" id="runs-empty"><b>还没有分析任务</b><p>启动分析后，任务会出现在这里。${rule}</p><button class="button button--primary" type="button" id="start-analysis-from-runs">启动分析</button></div>`;
+  const lead = "启动分析或回测后，任务会出现在这里。";
+  const ruleHtml = rule ? `<br class="notice-break">${escapeHtml(rule)}` : "";
+  const body = `<div class="runs-empty" id="runs-empty"><b>还没有任务</b><p>${escapeHtml(lead)}${ruleHtml}</p><button class="button button--primary" type="button" id="start-analysis-from-runs">启动分析</button></div>`;
   if (narrowRuns()) return `<div class="cards" id="run-list" role="list">${body}</div>`;
   return `<div class="tl" id="run-list" role="list"><div class="tr th" aria-hidden="true"><span>标的</span><span>工具</span><span>状态</span><span>进度</span><span>当前团队</span><span>开始时间</span><span></span></div>${body}</div>`;
 }
@@ -2488,7 +2997,7 @@ function narrowRuns() {
 }
 
 function runFilterMatch(item, filter) {
-  if (filter === "running") return LIVE_RUN.includes(item.status);
+  if (filter === "running") return item.status === "running";
   if (filter === "finished") return ["finished", "completed"].includes(item.status);
   if (filter === "all") return true;
   return item.status === filter;
@@ -2498,14 +3007,26 @@ function runsHeadline(data) {
   const counts = data.counts || {};
   const limits = data.limits || {};
   const caps = limits.max_running ? `（最多同时运行 ${limits.max_running} 个，最多排队 ${limits.max_queued} 个）` : "";
-  return `${counts.running || 0} 个运行中 · ${counts.queued || 0} 个排队中${caps}`;
+  const parts = [`${counts.running || 0} 个运行中`];
+  if (counts.starting) parts.push(`${counts.starting} 个启动中`);
+  if (counts.stopping) parts.push(`${counts.stopping} 个停止中`);
+  parts.push(`${counts.queued || 0} 个排队中`);
+  return parts.join(" · ") + caps;
+}
+
+function runsHeadlineHtml(data) {
+  const text = runsHeadline(data);
+  const index = text.indexOf("（最多同时运行");
+  if (index < 0) return escapeHtml(text);
+  const cap = escapeHtml(text.slice(index)).replace("，", "，<br class=\"notice-break\">");
+  return `${escapeHtml(text.slice(0, index))}<br class="notice-break">${cap}`;
 }
 
 // W43: the list holds the newest runs only; say so when some were left out.
 function runsCapNote(data) {
   const listing = data.listing || {};
   if (!listing.truncated) return "";
-  return `<p class="notice runs-cap" id="runs-cap">只显示最近 ${Number(listing.shown) || 0} 个任务（共 ${Number(listing.total) || 0} 个）；上方计数包含全部任务。</p>`;
+  return `<p class="notice runs-cap" id="runs-cap">只显示最近 ${Number(listing.shown) || 0} 个任务（共 ${Number(listing.total) || 0} 个）；<br class="notice-break">上方计数包含全部任务。</p>`;
 }
 
 function runFilterTabs(data) {
@@ -2516,15 +3037,23 @@ function runFilterTabs(data) {
 }
 
 function runBar(item) {
+  if (item && (item.unrecorded || item.blank)) {
+    return `<div class="pg run-unrecorded"><span>没有记录</span></div>`;
+  }
   const total = Number(item.total) || 0;
   const done = Number(item.done) || 0;
-  const tone = item.status === "failed" ? " bar--err" : ["finished", "completed"].includes(item.status) ? " bar--ok" : item.status === "queued" ? " bar--wait" : "";
+  const tone = item.status === "failed" ? " bar--err" : item.status === "completed" ? " bar--ok" : item.status === "queued" ? " bar--wait" : "";
   return `<div class="pg"><div class="bar${tone}" role="progressbar" aria-label="角色进度" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${done}"><i style="width:${total ? Math.round((done / total) * 100) : 0}%"></i></div><span>${done}/${total}</span></div>`;
 }
 
+function unrecordedListNote(items) {
+  if (!(items || []).some((item) => item && item.unrecorded)) return "";
+  return `<p class="notice" id="unrecorded-list">${narrowBreakHtml("日志里没有角色的已结束任务，不写成完成数。")}</p>`;
+}
+
 function runListPill(item) {
-  const label = ({finished: "已完成", completed: "已完成"})[item.status] || runStatusLabel(item.status);
-  const key = ({running: "run", starting: "run", stopping: "run", failed: "err", finished: "ok", completed: "ok"})[item.status] || "wait";
+  const label = item.status === "completed" ? "已完成" : runStatusLabel(item.status);
+  const key = ({running: "run", starting: "run", stopping: "run", failed: "err", completed: "ok"})[item.status] || "wait";
   return `<span class="pill ${key}">${escapeHtml(label)}</span>`;
 }
 
@@ -2538,26 +3067,40 @@ function cancelButton(item) {
 
 function runTable(items, selected) {
   return `<div class="tl" id="run-list" role="list"><div class="tr th" aria-hidden="true"><span>标的</span><span>工具</span><span>状态</span><span>进度</span><span>当前团队</span><span>开始时间</span><span></span></div>${items.map((item) =>
-    `<div class="tr${item.id === selected ? " on" : ""}" role="listitem button" tabindex="0" data-run-id="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}"${item.id === selected ? ' aria-current="true"' : ""}><div class="tk">${escapeHtml(item.ticker || "—")}<small>分析日期 ${escapeHtml(item.date || "—")}</small></div><span class="fwc"${frameworkTitle(item)}>${escapeHtml(item.framework_name || "—")}</span><span>${runListPill(item)}</span>${runBar(item)}<span${item.status === "queued" ? ' class="mu"' : ""}>${escapeHtml(item.team_zh || "—")}</span><span class="mu">${escapeHtml(runWhen(item))}</span>${item.status === "queued" ? cancelButton(item) : '<span class="chev" aria-hidden="true">›</span>'}</div>`).join("") || '<p class="notice tl-empty">这个分类下没有任务。</p>'}</div>`;
+    `<div class="tr${item.id === selected ? " on" : ""}" role="listitem button" tabindex="0" data-run-id="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}"${item.id === selected ? ' aria-current="true"' : ""}><div class="tk">${escapeHtml(item.ticker || "—")}<small>${runDateHtml(item)} ${escapeHtml(item.date || "—")}</small></div><span class="fwc"${frameworkTitle(item)}>${escapeHtml(item.framework_name || "—")}</span><span>${runListPill(item)}</span>${runBar(item)}<span${item.status === "queued" ? ' class="mu"' : ""}>${escapeHtml(item.team_zh || "—")}</span><span class="mu">${escapeHtml(runWhen(item))}</span>${item.status === "queued" ? cancelButton(item) : '<span class="chev" aria-hidden="true">›</span>'}</div>`).join("") || '<p class="notice tl-empty">这个分类下没有任务。</p>'}</div>`;
+}
+
+function cardMeta(parts) {
+  // Break after the separator on a narrow card, so a line neither starts with 「·」 nor splits a word.
+  return parts.filter(Boolean).map((part) => escapeHtml(part)).join(" · <br class=\"notice-break\">");
 }
 
 function runCards(items, selected) {
   return `<div class="cards" id="run-list" role="list">${items.map((item) =>
-    `<div class="tc${item.id === selected ? " on" : ""}" role="listitem button" tabindex="0" data-run-id="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}"><div class="a"><span class="tk">${escapeHtml(item.ticker || "—")}</span><span>${runListPill(item)}${item.status === "queued" ? cancelButton(item) : ""}</span></div><div class="b">${escapeHtml([item.framework_name, item.date, item.team_zh, `开始 ${runWhen(item)}`].filter(Boolean).join(" · "))}</div>${runBar(item)}</div>`).join("") || '<p class="notice">这个分类下没有任务。</p>'}</div>`;
+    `<div class="tc${item.id === selected ? " on" : ""}" role="listitem button" tabindex="0" data-run-id="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}"><div class="a"><span class="tk">${escapeHtml(item.ticker || "—")}</span><span>${runListPill(item)}${item.status === "queued" ? cancelButton(item) : ""}</span></div><div class="b">${cardMeta([item.framework_name, item.date, item.team_zh, `开始 ${runWhen(item)}`])}</div>${runBar(item)}</div>`).join("") || '<p class="notice">这个分类下没有任务。</p>'}</div>`;
 }
 
 function runDetailHtml(run, data) {
   if (run.kind === "backtest") {
     const active = ["starting", "running", "stopping"].includes(run.status);
-    const actions = `${run.selections ? `<button class="button button--secondary" type="button" id="restart-run">重新启动</button>` : ""}${active ? `<button class="button button--danger" type="button" id="stop-run">停止任务</button>` : ""}`;
+    const queued = run.status === "queued";
+    const ended = ["failed", "finished", "stopped", "cancelled", "completed"].includes(run.status);
+    const unknown = runStatusLabel(run.status) === "状态未知";
+    const idle = run.status === "idle";
+    const restart = !active && !queued && !ended && !unknown && !idle && run.selections
+      ? `<button class="button button--secondary" type="button" id="restart-run">重新启动</button>` : "";
+    const stop = active ? `<button class="button button--danger" type="button" id="stop-run">停止任务</button>` : "";
+    const cancel = queued
+      ? `<button class="button button--danger-outline" type="button" id="cancel-queued" data-run-id="${escapeHtml(run.id)}">取消排队</button>` : "";
+    const actions = `${restart}${stop}${cancel}`;
     return `${detailHead(run, actions)}
     ${taskSummary(run, data.progress)}
-    ${run.error || ["failed", "stopped"].includes(run.status) ? `<p class="notice" id="run-status-line">${escapeHtml(statusLine(run, data.status_sentence))}</p>` : ""}
-    ${progressTable(data.progress)}
+    ${run.error || ["failed", "stopped"].includes(run.status) ? `<p class="notice" id="run-status-line">${statusLineHtml(run)}</p>` : ""}
+    ${progressTable(data.progress, run)}
     ${backtestProgress(data.progress)}
     ${currentReportPanel(run, data.progress)}
     ${resultPanel(data.result)}
-    ${completionNote(data.progress)}
+    ${completionNote(data.progress, run)}
     ${nextStepPanel(run, data.result, data.progress)}
     ${runTechnicalDetails(run, data)}`;
   }
@@ -2577,13 +3120,13 @@ function frameworkTitle(item) {
 
 function runListPage(run, data, runs) {
   const items = runs.filter((item) => runFilterMatch(item, state.runFilter || "all"));
-  const head = heading("status", "查看状态", runsHeadline(data), '<button class="button button--secondary" type="button" id="refresh-run">刷新</button>');
+  const head = heading("status", "查看状态", runsHeadlineHtml(data), '<button class="button button--secondary" type="button" id="refresh-run">刷新</button>', {html: true});
   if (!run) return `${noticesHtml()}${head}${runFilterTabs(data)}${emptyRunsHtml(data)}`;
   if (state.runDetailOpen) {
     return `${noticesHtml()}${stopRefusedHtml(run)}<button type="button" class="back" id="runs-back">‹ 全部任务</button><div id="run-detail">${runDetailHtml(run, data)}</div>`;
   }
   const lastOpened = state.selectedRunId || "";
-  return `${noticesHtml()}${head}${runFilterTabs(data)}${runsCapNote(data)}${narrowRuns() ? runCards(items, lastOpened) : runTable(items, lastOpened)}`;
+  return `${noticesHtml()}${head}${runFilterTabs(data)}${runsCapNote(data)}${unrecordedListNote(items)}${narrowRuns() ? runCards(items, lastOpened) : runTable(items, lastOpened)}`;
 }
 
 // The run detail has its own address so a refresh stays on it and back returns to the list.
@@ -2663,6 +3206,34 @@ window.addEventListener("popstate", () => {
   }
 });
 
+function stopNotice(result) {
+  const status = result && result.status;
+  const zh = result && result.zh ? String(result.zh) : "";
+  const detail = result && result.detail ? String(result.detail) : "";
+  if (status === "stopped") {
+    const kind = result && result.kind;
+    const saidAnalysis = /分析/.test(zh + detail);
+    if (kind === "backtest" && saidAnalysis) return "回测已停止，不是正常完成。不把它写成分析。";
+    if (kind !== "analysis" && kind !== "backtest" && saidAnalysis) return "任务已停止，不是正常完成。不把它写成分析。";
+    return zh || detail || "任务已停止。不是正常完成。";
+  }
+  if (status === "cancelled") return zh || detail || "已取消排队。这个任务没有启动。";
+  if (status === "stopping") return zh || detail || "任务正在停止，不把它写成已停止。";
+  if (status === "starting") return zh || detail || "任务还在启动，不把它写成已停止。";
+  if (status === "idle") return zh || detail || "没有仍在运行的任务，不把它写成已停止。";
+  if (status) return zh || detail || "停止结果不是已停止，不把它写成已停止。";
+  return "停止结果状态未知，不把它写成已停止。";
+}
+
+function cancelNotice(result) {
+  const status = result && result.status;
+  const zh = result && result.zh ? String(result.zh) : "";
+  const detail = result && result.detail ? String(result.detail) : "";
+  if (status === "cancelled") return zh || detail || "已取消排队。这个任务没有启动。";
+  if (status) return zh || detail || "取消结果不是已取消，不把它写成已取消排队。";
+  return "取消结果状态未知，不把它写成已取消排队。";
+}
+
 async function cancelQueuedRun(runId, button) {
   const id = runIdOf(runId);
   if (!id) {
@@ -2674,7 +3245,7 @@ async function cancelQueuedRun(runId, button) {
   try {
     state.stopRefused = null;   // W76: a new action replaces the old refusal
     const result = await api("/api/runs/cancel", { method: "POST", body: JSON.stringify({id}) });
-    rememberNotice(result.zh || result.detail || "已取消排队。");
+    rememberNotice(cancelNotice(result));
   } catch (error) {
     rememberNotice(error.message);
   }
@@ -2772,11 +3343,11 @@ async function renderRuns() {
     const path = document.querySelector("#log-path");
     api(`/api/logs?lines=${encodeURIComponent(lines)}${run?.id ? `&id=${encodeURIComponent(run.id)}` : ""}`).then((log) => {
       if (!view?.isConnected) return;
-      if (path) path.textContent = logPathNotice(log);
-      if (view) view.textContent = (log.lines || []).join("\n") || run.detail || "日志还是空的。";
+      if (path) path.innerHTML = logPathHtml(logPathNotice(log));
+      if (view) view.textContent = (log.lines || []).join("\n") || shownRunDetail(run) || "日志还是空的。";
     }).catch((error) => {
       if (!view?.isConnected) return;
-      if (path) path.textContent = error.message;
+      if (path) path.innerHTML = logPathHtml(error.message);
       if (view) view.textContent = error.message;
     });
   };
@@ -2798,8 +3369,8 @@ async function renderRuns() {
     updatedLogInput.setSelectionRange(logFocus.start, logFocus.end);
   }
   document.querySelector("#refresh-run")?.addEventListener("click", renderRuns);
-  document.querySelector("#restart-run")?.addEventListener("click", (event) => restartRun(false, event.currentTarget, run?.id));
-  document.querySelector("#resume-run")?.addEventListener("click", (event) => restartRun(true, event.currentTarget, run?.id));
+  document.querySelector("#restart-run")?.addEventListener("click", (event) => restartRun(false, event.currentTarget, run?.id, run));
+  document.querySelector("#resume-run")?.addEventListener("click", (event) => restartRun(true, event.currentTarget, run?.id, run));
   document.querySelector("#open-run-report")?.addEventListener("click", () => {
     state.reportFocus = data.result?.html || null;
     showPage("reports");
@@ -2811,7 +3382,7 @@ async function renderRuns() {
     if (log && !log.open) log.open = true;
     (document.querySelector("#failure-message") || log)?.scrollIntoView({block: "start", behavior: "smooth"});
   });
-  document.querySelector("#stop-run")?.addEventListener("click", (event) => confirmAction("停止当前分析？", "会停止当前任务，已产生的结果是否保留取决于任务进度。", async () => {
+  document.querySelector("#stop-run")?.addEventListener("click", (event) => confirmAction(run && run.kind === "backtest" ? "停止当前回测？" : run && run.kind === "analysis" ? "停止当前分析？" : "停止当前任务？", "会停止当前任务，已产生的结果是否保留取决于任务进度。", async () => {
     const id = runIdOf(run?.id);
     if (!id) {
       rememberNotice(RUN_ID_MISSING);
@@ -2832,7 +3403,7 @@ async function renderRuns() {
       return;
     }
     state.stopRefused = null;
-    rememberNotice(result.zh || result.detail || "任务已停止。");
+    rememberNotice(stopNotice(result));
     await renderRuns();
   }, event.currentTarget));
   bindRunList();
@@ -2853,14 +3424,21 @@ async function renderRuns() {
   }
 }
 
-function completionNote(progress) {
+function completionNote(progress, run) {
   if (!progress || !progress.complete) return "";
-  return `<p class="notice">分析已完成。</p>`;
+  if (run && run.kind === "backtest") return `<p class="notice" id="completion-note">${punctBreakHtml("日志里有分析完成句。这不表示整次回测已完成。")}</p>`;
+  if (!run || run.kind !== "analysis") return `<p class="notice" id="completion-note">${escapeHtml("日志里有完成句，但任务类型未知，不把它写成分析已完成。").replaceAll("，", "，<br class=\"notice-break\">")}</p>`;
+  const done = run && (run.status === "finished" || run.status === "completed");
+  if (!done) {
+    const label = run ? runStatusLabel(run.status) : "状态未知";
+    return `<p class="notice" id="completion-note">日志里有完成句，<br class="notice-break">但任务状态是${escapeHtml(label)}，<br class="notice-break">不把它写成分析已完成。</p>`;
+  }
+  return `<p class="notice" id="completion-note">分析已完成。</p>`;
 }
 
 function reviewNote(rating, sentence) {
   if (!sentence && rating !== "REVIEW") return "";
-  return `<p class="notice">需要复核：未能从最终决定读出可交易评级。请查看决定内容后自行判断，或重新运行分析。</p>`;
+  return `<p class="notice" id="review-note">需要复核：<br class="notice-break">未能从最终决定读出可交易评级。<br class="notice-break">请查看决定内容后自行判断，<br class="notice-break">或重新运行分析。</p>`;
 }
 
 function shownReport(result) {
@@ -2879,16 +3457,28 @@ function shownReport(result) {
   return `<details class="disclosure"><summary>查看完整分析报告</summary><section class="panel"><h2>完整报告</h2>${empty}${blocks}</section></details>`;
 }
 
+function resultNoteHtml(note) {
+  const value = String(note || "还没有结果。启动或停止都不表示任务已经完成。");
+  const safe = escapeHtml(value);
+  if (value !== "没有结果文件。进程结束并写出结果后才会出现。启动不等于完成。") return safe;
+  return safe.replaceAll("。", "。<br class=\"notice-break\">").replace(/<br class="notice-break">$/, "");
+}
+
 function resultPanel(result) {
   if (!result || !result.present) {
-    return `<section class="panel" id="run-result"><h2>结果</h2><p class="notice">${escapeHtml(result?.note || "结果将在任务完成后显示。")}</p></section>`;
+    return `<section class="panel" id="run-result"><h2>结果</h2><p class="notice">${resultNoteHtml(result?.note)}</p></section>`;
   }
   if (result.kind === "backtest") {
     const text = result.text || "";
     return `<section class="panel" id="run-result"><h2>回测结果</h2>${text ? `<pre class="log-view">${escapeHtml(text)}</pre>` : `<p class="notice">结果文件为空。</p>`}</section>`;
   }
+  if (result.kind && result.kind !== "analysis") {
+    return `<section class="panel" id="run-result"><h2>结果</h2><p class="notice" id="unknown-result-kind">结果类型未知，不把它写成分析结果。</p></section>`;
+  }
   const decision = result.decision || "—";
-  const rating = result.rating || "—";
+  const review = Boolean(reviewNote(result.rating, result.review));
+  const rating = review ? "需复核" : (result.rating ? ratingInfo(result.rating).zh : "—");
+  const ratingLabel = review ? "复核" : "评级";
   const logName = logSentence("message_tool_log");
   const toolLog = result.message_tool_log
     ? `<details class="disclosure"><summary>查看消息与工具日志</summary><p class="notice">日志文件：${escapeHtml(result.message_tool_log)}</p><button class="button button--small button--secondary" type="button" id="load-message-log" data-log="${escapeHtml(result.message_tool_log)}">读取日志</button><pre class="log-view" id="message-tool-log"></pre></details>`
@@ -2902,21 +3492,26 @@ function resultPanel(result) {
   const reportMeta = result.report || result.saved_to
     ? `<details class="disclosure"><summary>查看文件信息</summary><p class="notice">${result.report ? `报告文件：${escapeHtml(result.report)}` : ""}${result.saved_to ? `<br>保存位置：${escapeHtml(result.saved_to)}` : ""}</p></details>`
     : "";
-  return `<section class="panel" id="run-result"><h2>分析结果</h2>${reviewNote(result.rating, result.review)}<div class="metric-grid"><div class="metric-card"><span class="metric-label">决定</span><p class="metric-detail">${escapeHtml(decision)}</p></div><div class="metric-card"><span class="metric-label">评级</span><strong>${escapeHtml(rating)}</strong></div></div>${saveNotice(result)}${html}${shownReport(result)}${toolLog}${reportMeta}</section>`;
+  return `<section class="panel" id="run-result"><h2>分析结果</h2>${reviewNote(result.rating, result.review)}<div class="metric-grid"><div class="metric-card"><span class="metric-label">决定</span><p class="metric-detail">${escapeHtml(decision)}</p></div><div class="metric-card"><span class="metric-label">${ratingLabel}</span><strong>${escapeHtml(rating)}</strong></div></div>${saveNotice(result)}${html}${shownReport(result)}${toolLog}${reportMeta}</section>`;
 }
 
 function saveNotice(result) {
+  if (!result) return "";
   if (result.save_error) {
-    return `<p class="error-banner">保存报告失败：${escapeHtml(result.save_error)}</p>`;
+    return `<p class="error-banner" id="save-notice">保存报告失败：${escapeHtml(result.save_error)}</p>`;
   }
   if (result.saved === false) {
-    return `<p class="notice">本次未保存报告。</p>`;
+    return `<p class="notice" id="save-notice">本次未保存报告。</p>`;
   }
   const lines = Array.isArray(result.save_lines) && result.save_lines.length
     ? result.save_lines
     : fallbackSaveLines(result);
+  const details = lines.length
+    ? `<details class="disclosure"><summary>查看保存信息</summary><pre class="log-view">${escapeHtml(lines.join("\n"))}</pre></details>`
+    : "";
+  if (result.saved === true) return `<p class="notice" id="save-notice">报告已保存。</p>${details}`;
   if (!lines.length) return "";
-  return `<p class="notice">报告已保存。</p><details class="disclosure"><summary>查看保存信息</summary><pre class="log-view">${escapeHtml(lines.join("\n"))}</pre></details>`;
+  return `<p class="notice" id="save-notice">保存结果未知，不把它写成已保存。</p>${details}`;
 }
 
 function fallbackSaveLines(result) {
@@ -3005,14 +3600,33 @@ function progressHeaders() {
 
 function progressTechnicalDetails(progress) {
   if (!progress?.agents?.length) return "";
-  return `<details class="disclosure"><summary>查看进度来源</summary><p class="notice">详细列：${escapeHtml(displaySentence("progress_columns"))}。状态：${escapeHtml(progressStatusLine())}。</p>${progressTeamMap()}</details>`;
+  return `<details class="disclosure"><summary>查看进度来源</summary><p class="notice" id="progress-source-note">详细列：${escapeHtml(displaySentence("progress_columns"))}。<br class="notice-break">状态：${escapeHtml(progressStatusLine())}。</p>${progressTeamMap()}</details>`;
 }
 
-function progressTable(progress) {
+function progressRowLabel(row, run) {
+  if (row && row.status && !knownAgentStatus(row.status)) return "状态未知";
+  if (row.status === "in_progress" && run && !workStillLive(run)) {
+    return run.status === "stopping" ? "停止中" : "未写完";
+  }
+  if (row.status === "pending" && progressNotLive(run)) return "未记录";
+  return row.status_zh || "";
+}
+
+function unrecordedRoleNote(rows, run) {
+  if (!progressNotLive(run) || !(rows || []).some((row) => row && row.status === "pending")) return "";
+  const text = "日志里没有这些角色，不把它们写成等待。";
+  return `<p class="notice" id="unrecorded-roles">${escapeHtml(text).replace("，", "，<br class=\"notice-break\">")}</p>`;
+}
+
+function progressTable(progress, run) {
   const rows = progress?.agents || [];
   if (!rows.length) return "";
-  return `<section class="panel"><h2>进度</h2><div class="table-wrap"><table class="data-table"><thead><tr>${progressHeaders()}</tr></thead><tbody>
-    ${rows.map((row) => `<tr><td><strong>${escapeHtml(row.team_zh)}</strong></td><td>${escapeHtml(row.zh)}</td><td><span class="status-badge ${runStatusClass(row.status === "completed" ? "completed" : row.status === "error" ? "failed" : row.status === "in_progress" ? "running" : "idle")}">${escapeHtml(row.status_zh)}</span></td></tr>`).join("")}
+  return `<section class="panel"><h2>进度</h2>${unknownRoleNote(rows)}${unrecordedRoleNote(rows, run)}<div class="table-wrap"><table class="data-table progress-table"><thead><tr>${progressHeaders()}</tr></thead><tbody>
+    ${rows.map((row) => {
+      const live = row.status === "in_progress" && workStillLive(run);
+      const badge = runStatusClass(row.status === "completed" ? "completed" : row.status === "error" ? "failed" : live ? "running" : "idle");
+      return `<tr><td><strong>${escapeHtml(row.team_zh)}</strong></td><td>${escapeHtml(row.zh)}</td><td><span class="status-badge ${badge}">${escapeHtml(progressRowLabel(row, run))}</span></td></tr>`;
+    }).join("")}
   </tbody></table></div></section>`;
 }
 
@@ -3020,6 +3634,10 @@ function showAgentMap() {
   const rows = (state.catalog && state.catalog.show_agents) || [];
   if (!rows.length) return "";
   return `<details class="disclosure"><summary>查看报告角色映射</summary><section class="panel"><h2>完整报告角色</h2><ul class="command-map">${rows.map((row) => `<li><span>${escapeHtml(row.heading_zh)} · ${escapeHtml(row.zh)}</span><code>${escapeHtml(row.heading)} / ${escapeHtml(row.agent)} / ${escapeHtml(row.file)}</code></li>`).join("")}</ul></section></details>`;
+}
+
+function logWaitingHtml() {
+  return escapeHtml(logPathNotice(null)).replace("。", "。<br class=\"notice-break\">").replace("打印", "<br class=\"notice-break\">打印");
 }
 
 function logPathNotice(log) {
@@ -3031,8 +3649,12 @@ function logPathNotice(log) {
   return parts.join("\n");
 }
 
+function logPathHtml(text) {
+  return String(text || "").split("\n").map((line) => punctBreakHtml(line)).join("<br>");
+}
+
 function logTailPanel() {
-  return `<details class="disclosure" id="report-log-details"><summary>查看运行日志</summary><section class="panel"><h2>日志</h2><div class="field"><label for="report-log-lines">显示日志行数</label><input id="report-log-lines" value="40"></div><p class="notice" id="report-log-path">${escapeHtml(logPathNotice(null))}</p><pre class="log-view" id="report-log">展开后读取日志。</pre>${logsHelpNote()}</section></details>`;
+  return `<details class="disclosure" id="report-log-details"><summary>查看运行日志</summary><section class="panel"><h2>日志</h2><div class="field"><label for="report-log-lines">显示日志行数</label><input id="report-log-lines" value="40"></div><p class="notice" id="report-log-path">${logWaitingHtml()}</p><pre class="log-view" id="report-log">展开后读取日志。</pre>${logsHelpNote()}</section></details>`;
 }
 
 function bindLogTail() {
@@ -3041,12 +3663,12 @@ function bindLogTail() {
     api(`/api/logs?lines=${encodeURIComponent(lines)}`).then((log) => {
       const view = document.querySelector("#report-log");
       const path = document.querySelector("#report-log-path");
-      if (path) path.textContent = logPathNotice(log);
+      if (path) path.innerHTML = logPathHtml(logPathNotice(log));
       if (view) view.textContent = (log.lines || []).join("\n") || "日志还是空的。";
     }).catch((error) => {
       const path = document.querySelector("#report-log-path");
       const view = document.querySelector("#report-log");
-      if (path) path.textContent = error.message;
+      if (path) path.innerHTML = logPathHtml(error.message);
       if (view) view.textContent = error.message;
     });
   };
@@ -3090,10 +3712,16 @@ function reportDepth(row) {
   return depth ? `${depth.zh}深度` : `${row.debate_rounds} 轮辩论`;
 }
 
+function reportListMark(row) {
+  if (row && row.has_decision === true) return ratingPill(row.rating);
+  if (row && row.has_decision === false) return `<span class="pill wait">无结论</span>`;
+  return `<span class="pill wait" title="没有决定标记，不把它写成评级">不写成评级</span>`;
+}
+
 function reportListRow(row, selected) {
   const sub = [reportDate(row), reportDepth(row)].filter(Boolean).join(" · ");
   return `<li><button class="ri${selected ? " on" : ""}" type="button" data-report="${escapeHtml(row.html)}" aria-current="${selected ? "true" : "false"}">
-    <span class="a"><span>${escapeHtml(row.ticker || row.name)}</span>${ratingPill(row.rating)}</span>
+    <span class="a"><span>${escapeHtml(row.ticker || row.name)}</span>${reportListMark(row)}</span>
     <span class="b">${escapeHtml(sub || row.name)}</span></button></li>`;
 }
 
@@ -3221,20 +3849,39 @@ function tabBody(tab) {
   return tab.items.map((item) => `${tab.single ? "" : `<h3 class="md-role">${escapeHtml(item.zh || item.agent)}</h3>`}${renderMarkdown(item.text)}`).join("");
 }
 
+function portfolioDecisionText(outline) {
+  return (outline?.sections || []).find((section) => section.folder === "5_portfolio")?.items?.[0]?.text || "";
+}
+
+function reportHasDecision(outline) {
+  return Boolean(decisionSummary(portfolioDecisionText(outline)));
+}
+
+function reportDecisionHtml(outline, rating) {
+  const summary = decisionSummary(portfolioDecisionText(outline));
+  if (summary) {
+    const info = ratingInfo(rating);
+    return `<div class="decision"><div class="decision-rating"><div class="k">组合经理结论</div><div class="big big--${info.tone}">${escapeHtml(info.zh)}</div></div><div class="decision-text">${escapeHtml(summary)}</div></div>`;
+  }
+  const header = rating
+    ? `报告头写着 ${escapeHtml(rating)}，<br class="notice-break">不把它当成组合经理结论。`
+    : "没有报告头评级。";
+  return `<div class="decision"><div class="decision-rating"><div class="k">没有组合经理结论</div><div class="big big--wait big--empty">—</div></div><div class="decision-text">这份报告没有组合经理的结论段落。<br class="notice-break">${header}</div></div>`;
+}
+
 function reportDetailHtml(row, outline) {
   markdownLinkBase = String(row?.html || "").replace(/[\\/][^\\/]*$/, "");
   const tabs = reportTabs(outline);
   state.reportTab = tabs.some((tab) => tab.key === state.reportTab) ? state.reportTab : tabs[0]?.key;
-  const decisionText = (outline.sections || []).find((section) => section.folder === "5_portfolio")?.items?.[0]?.text || "";
   const rating = outline.rating || row.rating;
-  const info = ratingInfo(rating);
+  const hasDecision = reportHasDecision(outline);
   const finished = row.generated ? `完成于 ${String(row.generated).slice(11, 16)}` : "";
   const models = [row.quick_model ? `快 ${row.quick_model}` : "", row.deep_model ? `深 ${row.deep_model}` : ""].filter(Boolean).join(" · ");
   const sub = [finished, reportDepth(row), models].filter(Boolean).join(" · ");
   const downloads = `${row.markdown ? `<a class="button button--secondary" href="${reportDownloadHref(row.markdown)}" download="${escapeHtml(reportFileName(row.markdown))}">下载 Markdown</a>` : ""}<a class="button button--secondary" href="${reportDownloadHref(row.html)}" download="${escapeHtml(reportFileName(row.html))}">下载 HTML</a>`;
   return `<div class="rc-head"><div class="rc-title"><h2 id="report-title">${escapeHtml(row.ticker || row.name)} · ${escapeHtml(reportDate(row) || "—")}</h2>${sub ? `<p class="page-description">${escapeHtml(sub)}</p>` : ""}</div><div class="rc-actions">${downloads}</div></div>
-    ${reviewNote(rating)}
-    <div class="decision"><div class="decision-rating"><div class="k">组合经理结论</div><div class="big big--${info.tone}">${escapeHtml(info.zh)}</div></div><div class="decision-text">${escapeHtml(decisionSummary(decisionText) || "这份报告没有组合经理的结论段落。")}</div></div>
+    ${hasDecision ? reviewNote(rating) : ""}
+    ${reportDecisionHtml(outline, rating)}
     ${tabs.length ? `<div class="tabs" role="tablist" aria-label="报告分段">${tabs.map((tab) => `<button class="tab${tab.key === state.reportTab ? " on" : ""}" type="button" role="tab" id="tab-${escapeHtml(tab.key)}" data-tab="${escapeHtml(tab.key)}" aria-selected="${tab.key === state.reportTab}" aria-controls="report-body" tabindex="${tab.key === state.reportTab ? "0" : "-1"}">${escapeHtml(tab.label)}</button>`).join("")}</div>
     <div class="report-body md" id="report-body" role="tabpanel" aria-labelledby="tab-${escapeHtml(state.reportTab)}" tabindex="0">${tabBody(tabs.find((tab) => tab.key === state.reportTab))}</div>` : `<p class="notice">这份报告没有可显示的分段。</p>`}`;
 }
@@ -3253,6 +3900,8 @@ async function showReport(path) {
   try {
     const outline = await api(`/api/reports/outline?path=${encodeURIComponent(path)}`);
     if (state.page !== "reports" || state.reportFocus !== path) return;
+    row.has_decision = reportHasDecision(outline);
+    paintReportList();
     const paint = () => {
       host.innerHTML = reportDetailHtml(row, outline);
       const tabButtons = [...host.querySelectorAll("[data-tab]")];
@@ -3333,7 +3982,7 @@ function liveTitleLabel(title) {
 
 function liveSectionTable(rows) {
   if (!rows.length) return "";
-  return `<details class="disclosure" id="live-sections"><summary>查看分析过程中的分段（${escapeHtml(rows.length)}）</summary><section class="panel"><h2>命令行分段文件</h2><p class="notice">这些文件可能在任务结束后仍留在磁盘上；有文件不等于分析正在进行。</p><div class="table-wrap"><table class="data-table"><thead><tr><th>标的</th><th>日期</th><th>文件</th><th>标题</th></tr></thead><tbody>
+  return `<details class="disclosure" id="live-sections"><summary>查看分析过程中的分段（${escapeHtml(rows.length)}）</summary><section class="panel"><h2>命令行分段文件</h2><p class="notice" id="live-file-note">这些文件可能在任务结束后<br class="notice-break">仍留在磁盘上；<br class="notice-break">有文件不等于分析正在进行。</p><div class="table-wrap"><table class="data-table"><thead><tr><th>标的</th><th>日期</th><th>文件</th><th>标题</th></tr></thead><tbody>
     ${rows.map((row) => `<tr><td><strong>${escapeHtml(row.ticker)}</strong></td><td>${escapeHtml(row.date)}</td><td><button class="button button--small button--secondary" type="button" data-live="${escapeHtml(row.path)}">${escapeHtml(row.file)}</button></td><td>${liveTitleLabel(row.title)}</td></tr>`).join("")}
   </tbody></table></div><pre class="log-view" id="live-section"></pre></section></details>`;
 }
@@ -3363,7 +4012,11 @@ async function showOutline(path, host) {
     const header = (data.header || []).length
       ? `<details class="disclosure"><summary>查看报告元信息</summary><ul class="command-map">${data.header.map((line) => `<li><code>${escapeHtml(line)}</code></li>`).join("")}</ul></details>`
       : "";
-    host.innerHTML = `${reviewNote(data.rating)}<p class="notice">${escapeHtml(data.name)}${data.rating ? ` · 评级 ${escapeHtml(data.rating)}` : ""}</p>${header}` + data.sections.map((section) => `
+    const hasDecision = reportHasDecision(data);
+    const ratingNote = hasDecision
+      ? (data.rating ? ` · 评级 ${escapeHtml(data.rating)}` : "")
+      : (data.rating ? ` · 报告头 ${escapeHtml(data.rating)}，没有组合经理结论` : " · 没有组合经理结论");
+    host.innerHTML = `${hasDecision ? reviewNote(data.rating) : ""}<p class="notice">${escapeHtml(data.name)}${ratingNote}</p>${header}` + data.sections.map((section) => `
       <section class="panel"><h2>${escapeHtml(section.zh)}</h2>
       ${section.items.map((item) => `<h3>${escapeHtml(item.zh)}</h3><pre class="log-view">${escapeHtml(item.text)}</pre>`).join("")}
       </section>`).join("");
@@ -3388,9 +4041,43 @@ function ensureBacktest() {
   return state.backtest;
 }
 
+function backtestKeepsFundamentals(asset) {
+  return asset === "stock";
+}
+
+function keepBacktestAnalysts(asset, analysts) {
+  const items = Array.isArray(analysts) ? analysts : [];
+  if (backtestKeepsFundamentals(asset)) return items;
+  return items.filter((item) => item !== "fundamentals");
+}
+
 function backtestAnalystChoices() {
   const asset = ensureBacktest().asset_type;
-  return (state.catalog.analysts || []).filter((item) => (asset !== "crypto" && asset !== "commodity") || item.value !== "fundamentals");
+  return (state.catalog.analysts || []).filter((item) => backtestKeepsFundamentals(asset) || item.value !== "fundamentals");
+}
+
+function backtestStartZh(zh) {
+  const value = String(zh || "");
+  if (value.includes("后台启动失败") && (value.includes("不等于分析完成") || value.includes("写成分析完成"))) {
+    return "后台启动失败。进程启动不等于回测完成。";
+  }
+  if (value.includes("不等于分析完成") || value.includes("写成分析完成")) return "";
+  return value;
+}
+
+function backtestNotice(result) {
+  const status = result && result.status;
+  const zh = backtestStartZh(result && result.zh);
+  if (status === "queued") return zh || "已加入队列，回测还没有启动。";
+  if (status === "starting") return "回测正在启动，还没有进入运行。";
+  if (status === "running") return "回测已在后台运行。进程启动不等于回测完成。";
+  if (status === "stopping") return "回测正在停止，不把它写成仍在启动，也还不是已结束。";
+  if (status === "finished" || status === "completed") return "回测已经结束，不把它写成仍在启动。";
+  if (status === "failed") return zh || "回测没有启动成功，不把它写成已启动。";
+  if (status === "stopped") return "回测已停止，不是仍在启动。";
+  if (status === "cancelled") return "回测已取消，没有进入运行。";
+  if (status) return zh || "回测状态未知，不把它写成已启动。";
+  return "回测状态未知，不把它写成已提交或已启动。";
 }
 
 function backtestPayload() {
@@ -3405,6 +4092,7 @@ function backtestPayload() {
   if (!book.start || !book.end) throw new Error("请选择回测的开始日期和结束日期。");
   if (book.start > book.end) throw new Error("结束日期不能早于开始日期。");
   if (!Number.isInteger(book.every) || book.every < 1) throw new Error("分析间隔需填写大于 0 的整数天数。");
+  book.analysts = keepBacktestAnalysts(book.asset_type, book.analysts);
   if (!book.analysts.length) throw new Error("请至少选择一个分析维度。");
   syncBacktestModels();
   return {
@@ -3433,6 +4121,17 @@ function syncBacktestModels() {
 }
 
 
+function knownBacktestAsset(asset) {
+  return asset === "stock" || asset === "crypto" || asset === "commodity";
+}
+
+function backtestAssetHint(asset) {
+  if (asset === "crypto") return "加密资产不使用基本面分析。";
+  if (asset === "commodity") return "贵金属/商品期货不使用基本面分析。";
+  if (asset === "stock") return "默认使用全部分析维度。";
+  return "资产类型未知，不把它写成股票。";
+}
+
 function backtestAnalystNote(asset) {
   if (asset === "crypto") {
     return `加密资产没有基本面分析师。命令行：${state.catalog?.confirmation_sentences?.unavailable_crypto || ""}。`;
@@ -3440,7 +4139,15 @@ function backtestAnalystNote(asset) {
   if (asset === "commodity") {
     return "贵金属/商品期货没有基本面分析师（没有公司财报）。";
   }
-  return "当前不是 crypto。命令行不会打印加密资产不可用那句。";
+  if (asset === "stock") return "当前是股票。命令行不会打印加密资产不可用那句。";
+  return backtestAnalystHint(asset);
+}
+
+function backtestAnalystHint(asset) {
+  if (asset === "crypto") return "加密资产不使用基本面分析。";
+  if (asset === "commodity") return "贵金属/商品期货不使用基本面分析。";
+  if (asset === "stock") return "默认使用全部分析维度。";
+  return "资产类型未知，不把它写成股票，也不提供基本面分析师。";
 }
 
 
@@ -3456,29 +4163,32 @@ function backtestMissingNote() {
 
 function renderBacktest() {
   const book = ensureBacktest();
+  book.analysts = keepBacktestAnalysts(book.asset_type, book.analysts);
   const analysts = backtestAnalystChoices();
+  const analystHint = backtestAnalystHint(book.asset_type);
+  const analystHintHtml = analystHint.includes("不把它写成") ? narrowBreakHtml(analystHint) : escapeHtml(analystHint);
   pageEl.innerHTML = `
-    ${heading("", "回测", "在历史日期上重复分析，评估过往判断。结果不包含成交、滑点和手续费。")}
+    ${heading("", "回测", "在历史日期上重复分析，<br class=\"notice-break\">评估过往判断。<br class=\"notice-break\">结果不包含成交、<br class=\"notice-break\">滑点和手续费。", "", {html: true})}
     <section class="panel"><h2>设置回测范围</h2>
     <form class="form-grid" id="backtest-form">
       <div class="field field--wide"><label for="bt-tickers">标的代码</label><input id="bt-tickers" value="${escapeHtml(book.tickers)}" placeholder="例如 NVDA,AAPL"><p class="form-hint">多个标的用英文逗号分隔。</p></div>
       <div class="field"><label for="bt-start">开始日期</label><input id="bt-start" type="date" value="${escapeHtml(book.start)}"></div>
       <div class="field"><label for="bt-end">结束日期</label><input id="bt-end" type="date" value="${escapeHtml(book.end)}"></div>
-      <div class="field"><label>资产类型</label><div class="choice-row" id="bt-asset"></div></div>
+      <div class="field"><label>资产类型</label><div class="choice-row" id="bt-asset"></div>${knownBacktestAsset(book.asset_type) ? "" : `<p class="form-hint" id="bt-asset-hint">${backtestAssetHint(book.asset_type).includes("不把它写成") ? narrowBreakHtml(backtestAssetHint(book.asset_type)) : escapeHtml(backtestAssetHint(book.asset_type))}</p>`}</div>
       <div class="field"><label for="bt-every">每隔多少天分析一次</label><input id="bt-every" type="number" min="1" step="1" value="${escapeHtml(book.every)}"><p class="form-hint">间隔越小，分析次数越多，耗时和模型用量越高。</p></div>
       <details class="disclosure field--wide"><summary>分析维度与模型</summary>
-        <div class="field"><label>分析维度</label><div class="choice-row" id="bt-analysts"></div><p class="form-hint">${book.asset_type === "crypto" ? "加密资产不使用基本面分析。" : book.asset_type === "commodity" ? "贵金属/商品期货不使用基本面分析。" : "默认使用全部分析维度。"}</p></div>
+        <div class="field"><label>分析维度</label><p class="form-hint" id="bt-analyst-hint">${analystHintHtml}</p><div class="choice-row" id="bt-analysts"></div></div>
         <div class="model-settings-grid">${["quick", "deep"].map((tier) => `<section class="panel"><h3>${tier === "quick" ? "快模型" : "深模型"}</h3><div class="field"><label>供应商</label><div id="${tier}-providers"></div><input id="${tier}-provider" type="hidden" value="${escapeHtml(state.form[`${tier}_think_provider`] || "")}"></div><div class="field"><label>模型</label><div class="choice-row" id="${tier}-models"></div></div><details><summary>手动填写模型 ID</summary><input id="${tier}-model" value="${escapeHtml(state.form[`${tier}_think_llm`] || "")}" aria-label="${tier === "quick" ? "快模型" : "深模型"} ID"></details></section>`).join("")}</div>
         <div class="field" id="model-effort"></div>
       </details>
-      <p class="notice field--wide" id="backtest-model-summary">当前模型：${escapeHtml(state.form.quick_think_llm || "快模型未选择")} / ${escapeHtml(state.form.deep_think_llm || "深模型未选择")}。可展开上方设置更改。</p>
+      <p class="notice field--wide" id="backtest-model-summary">当前模型：${escapeHtml(state.form.quick_think_llm || "快模型未选择")} / ${escapeHtml(state.form.deep_think_llm || "深模型未选择")}。<br class="notice-break">可展开上方设置更改。</p>
       <details class="disclosure field--wide"><summary>持仓与继续上次回测</summary>
         <div class="field"><label for="bt-portfolio">持仓（可选）</label>${filePicker("bt-portfolio-file", "选择回测持仓 JSON 文件")}<textarea id="bt-portfolio" placeholder="${escapeHtml(placeholder("portfolio"))}">${escapeHtml(book.portfolio)}</textarea><p class="form-hint">持仓在整个回测期间保持不变。</p></div>
         <div class="field"><label for="bt-run">已有回测编号（可选）</label><input id="bt-run" value="${escapeHtml(book.run_id)}" placeholder="留空创建新回测"><p class="form-hint">也可以从下方历史记录中选择。</p></div>
       </details>
     </form>
     <div class="form-actions"><button class="button button--secondary" type="button" id="check-backtest">预估分析次数</button><button class="button button--primary" type="button" id="start-backtest">启动回测</button></div>
-    <p class="notice" role="status" aria-live="polite" id="backtest-result">先预估分析次数，再决定是否启动。回测不排队：运行名额已满或有任务排队时不会启动。</p></section>
+    <p class="notice" role="status" aria-live="polite" id="backtest-result">先预估分析次数，<br class="notice-break">再决定是否启动。<br class="notice-break">回测不排队：<br class="notice-break">运行名额已满或有任务排队时不会启动。</p></section>
     <section class="panel"><h2>历史回测</h2><div id="sweep-list"></div></section>`;
   bindTier("quick");
   bindTier("deep");
@@ -3493,9 +4203,9 @@ function renderBacktest() {
     book.portfolio = document.querySelector("#bt-portfolio").value;
     syncBacktestModels();
     book.asset_type = value;
-    if (value === "crypto" || value === "commodity") book.analysts = book.analysts.filter((item) => item !== "fundamentals");
+    book.analysts = keepBacktestAnalysts(value, book.analysts);
     renderBacktest();
-  });
+  }, false, knownBacktestAsset(book.asset_type) ? {} : {allowEmpty: true, emptyLabel: "资产类型未知"});
   fillChoices("#bt-analysts", analysts, book.analysts, (value, pressed) => {
     const set = new Set(book.analysts);
     pressed ? set.add(value) : set.delete(value);
@@ -3505,16 +4215,12 @@ function renderBacktest() {
     try {
       const payload = backtestPayload();
       const result = await api("/api/backtests", { method: "POST", body: JSON.stringify(payload) });
-      rememberNotice("回测已启动，可在这里跟踪进度。");
+      rememberNotice(backtestNotice(result));
       showPage("runs");
     } catch (error) {
       // W44: a refused backtest shows the console's own reason (slots full or a
       // queue waiting; backtests never queue), styled as an error, not a status.
-      const out = document.querySelector("#backtest-result");
-      out.className = "error-banner";
-      out.setAttribute("role", "alert");
-      out.textContent = error.message;
-      out.scrollIntoView?.({block: "nearest", behavior: "smooth"});   // W44: in view, not below the fold
+      showBacktestStartError(error.message);
     }
   });
   bindPortfolioFile("#bt-portfolio-file", "#bt-portfolio");
@@ -3522,16 +4228,45 @@ function renderBacktest() {
     try {
       const payload = backtestPayload();
       const result = await api("/api/backtests/validate", { method: "POST", body: JSON.stringify(payload) });
-      const empty = result.cells ? "尚未启动；确认后点击「启动回测」。" : "所选范围没有可分析的日期，请调整日期。";
       const out = document.querySelector("#backtest-result");
       out.className = "notice";
       out.setAttribute("role", "status");
-      out.textContent = `共 ${result.cells} 次分析。${empty}`;
+      const count = Number(result.cells) || 0;
+      if (count) {
+        out.innerHTML = `共 ${count} 次分析。<br class="notice-break">尚未启动；<br class="notice-break">确认后点击「启动回测」。`;
+      } else {
+        out.innerHTML = punctBreakHtml(`共 ${count} 次分析。所选范围没有可分析的日期，请调整日期。`);
+      }
     } catch (error) {
       document.querySelector("#backtest-result").textContent = error.message;
     }
   });
   loadSweeps();
+}
+
+function backtestStartFailure(message) {
+  const value = String(message || "");
+  const old = "控制台没能启动分析。";
+  if (value.startsWith(old)) return "控制台没能启动回测。" + value.slice(old.length);
+  return value;
+}
+
+function backtestStartFailureHtml(message) {
+  const shown = backtestStartFailure(message);
+  const safe = escapeHtml(shown);
+  if (!shown.startsWith("控制台没能启动回测。")) return safe;
+  return safe.replace("。", "。<br class=\"notice-break\">");
+}
+
+function showBacktestStartError(message) {
+  const out = document.querySelector("#backtest-result");
+  if (!out) return;
+  out.className = "error-banner";
+  out.setAttribute("role", "alert");
+  const shown = backtestStartFailure(message);
+  if (shown.startsWith("控制台没能启动回测。")) out.innerHTML = backtestStartFailureHtml(shown);
+  else out.textContent = shown;
+  out.scrollIntoView?.({block: "nearest", behavior: "smooth"});
 }
 
 function sweepSelectionText(row) {
@@ -3565,10 +4300,33 @@ async function loadSweeps() {
 }
 
 
+function credentialFillHtml(text) {
+  const safe = escapeHtml(text);
+  if (!String(text).includes("无需在此填写")) return safe;
+  return safe.replace("。", "。<br class=\"notice-break\">");
+}
+
+function configKnown(item) {
+  return Boolean(item) && (item.configured === true || item.configured === false);
+}
+
+function configLabel(item) {
+  if (!configKnown(item)) return "配置状态未知";
+  return item.configured === true ? "已配置" : "未配置";
+}
+
+function configSentence(item) {
+  if (!configKnown(item)) return "配置状态未知，不把它写成未配置。";
+  return item.configured === true ? "已配置。" : "未配置。";
+}
+
 function keyStatusText(keys) {
   const rows = keys || [];
-  const configured = rows.filter((item) => item.configured).length;
   if (!rows.length) return "暂无 API Key 配置项。";
+  const configured = rows.filter((item) => item.configured === true).length;
+  const unknown = rows.some((item) => !configKnown(item));
+  if (unknown && !configured) return "配置状态未知，不把它写成未配置。";
+  if (unknown) return `已有 ${configured} 个供应商配置了 API Key。另有配置状态未知，不把它写成未配置。`;
   if (!configured) return "尚未配置 API Key。使用订阅账户时无需填写。";
   return `已有 ${configured} 个供应商配置了 API Key，尚未验证服务可用性。`;
 }
@@ -3594,6 +4352,10 @@ function loginSentenceList() {
 }
 
 
+function planNoteHtml(note) {
+  return escapeHtml(note).replace("的句子", "的<br class=\"notice-break\">句子").replace("同一句", "<br class=\"notice-break\">同一句").replace(/[。，]/g, (mark) => `${mark}<br class="notice-break">`).replace(/<br class="notice-break">$/, "");
+}
+
 function planErrorNote() {
   const note = state.catalog?.plan_note || "";
   const errors = state.catalog?.plan_errors || {};
@@ -3602,7 +4364,7 @@ function planErrorNote() {
     return sentence ? `<pre class="log-view" data-plan-error="${escapeHtml(key)}">${escapeHtml(sentence)}</pre>` : "";
   }).join("");
   if (!note && !blocks) return "";
-  return `<section class="panel" id="plan-errors"><h2>订阅参数 <span>plan</span></h2><p class="notice">${escapeHtml(note)}</p>${blocks}</section>`;
+  return `<section class="panel" id="plan-errors"><h2>订阅参数 <span>plan</span></h2><p class="notice" id="plan-note">${planNoteHtml(note)}</p>${blocks}</section>`;
 }
 
 function authPlanFilters() {
@@ -3635,30 +4397,51 @@ function authProviderName(provider) {
   return authProviderMeta(provider).zh || provider;
 }
 
+function narrowBreakHtml(text) {
+  return escapeHtml(text).replace("，", "，<br class=\"notice-break\">");
+}
+
 function setAuthCardFeedback(provider, message, error = false) {
   state.authCardMessages ||= {};
   const displayMessage = error ? accountFailureText(message) : message;
   state.authCardMessages[provider] = {message: displayMessage, error};
   const feedback = document.querySelector(`[data-auth-feedback="${provider}"]`);
   if (!feedback) return;
-  feedback.textContent = displayMessage;
+  feedback.innerHTML = narrowBreakHtml(displayMessage);
   feedback.classList.toggle("account-provider-feedback--error", error);
 }
 
 // One wording for account state on every page: the topbar, the account cards and the wizard.
+function accountSignInKnown(item) {
+  return Boolean(item) && (item.signed_in === true || item.signed_in === false);
+}
+
 function accountStateLabel(item) {
-  if (!item) return "未登录";
-  if (item.read_error) return "状态读取失败";
-  return item.signed_in ? "已登录" : "未登录";
+  if (item && item.read_error) return "状态读取失败";
+  if (!item || !accountSignInKnown(item)) return "登录状态未知";
+  return item.signed_in === true ? "已登录" : "未登录";
+}
+
+function accountStateDetail(item) {
+  if (item && item.read_error) return "状态读取失败";
+  if (!item || !accountSignInKnown(item)) return "登录状态未知，不把它写成未登录。";
+  if (item.signed_in === true) return item.account || "已登录";
+  return "未登录";
 }
 
 function identityText(accounts) {
-  const signed = (accounts || []).filter((item) => item.signed_in && !item.read_error);
-  if (!signed.length) return {name: "模型服务未登录", title: "还没有登录任何模型服务订阅"};
-  return {
-    name: `模型服务：${signed.map((item) => authProviderName(item.provider)).join(" · ")}`,
-    title: signed.map((item) => `${authProviderName(item.provider)}：${item.account}`).join("\n"),
-  };
+  const rows = accounts || [];
+  const signed = rows.filter((item) => item.signed_in === true && !item.read_error);
+  if (signed.length) {
+    return {
+      name: `模型服务：${signed.map((item) => authProviderName(item.provider)).join(" · ")}`,
+      title: signed.map((item) => `${authProviderName(item.provider)}：${item.account}`).join("\n"),
+    };
+  }
+  if (rows.some((item) => !item.read_error && !accountSignInKnown(item))) {
+    return {name: "登录状态未知", title: "登录状态未知，不把它写成未登录"};
+  }
+  return {name: "模型服务未登录", title: "还没有登录任何模型服务订阅"};
 }
 
 function setIdentity(accounts) {
@@ -3666,13 +4449,16 @@ function setIdentity(accounts) {
   if (!host) return;
   const text = identityText(accounts);
   host.textContent = text.name;
-  host.title = text.title;
+  host.title = [text.name, text.title].filter(Boolean).join("\n");
 }
 
 function accountProviderCard(item) {
   const meta = authProviderMeta(item.provider);
-  const signed = Boolean(item.signed_in);
+  const signed = item.signed_in === true && !item.read_error;
+  const unknown = !item.read_error && !accountSignInKnown(item);
   const readError = Boolean(item.read_error);
+  const detail = accountStateDetail(item);
+  const detailHtml = detail.includes("不把它写成") ? narrowBreakHtml(detail) : escapeHtml(detail);
   const feedback = state.authCardMessages?.[item.provider] || {
     message: readError ? "无法读取本机登录状态，请刷新状态或重新登录。" : signed ? "已有本机登录记录。" : "",
     error: readError,
@@ -3686,7 +4472,7 @@ function accountProviderCard(item) {
         </div>
         <span class="status-badge ${readError ? "status-badge--error" : signed ? "status-badge--success" : "status-badge--muted"}">${accountStateLabel(item)}</span>
       </div>
-      <p class="account-provider-account"><strong>${signed && !readError ? "当前账户" : "账户状态"}</strong> ${escapeHtml(signed && !readError ? item.account : accountStateLabel(item))}</p>
+      <p class="account-provider-account"><strong>${signed && !readError ? "当前账户" : "账户状态"}</strong> ${signed && !readError ? escapeHtml(item.account || detail) : detailHtml}</p>
       <div class="inline-actions account-provider-actions">
         <button class="button button--small button--primary" type="button" data-login="${escapeHtml(item.provider)}">登录</button>
         <button class="button button--small button--secondary" type="button" data-logout="${escapeHtml(item.provider)}" ${signed ? "" : "disabled"}>退出</button>
@@ -3696,7 +4482,7 @@ function accountProviderCard(item) {
         <summary>查看登录详情</summary>
         <p class="account-provider-meta">${escapeHtml(meta.cli || item.cli || item.provider)}</p>
         ${item.plan_use ? `<p class="account-provider-meta">${escapeHtml(item.plan_use)}</p>` : ""}
-        <p class="account-provider-meta">登录状态只读取本机材料，页面打开时不会联网校验。</p>
+        <p class="account-provider-meta">登录状态只读取本机材料，<br class="notice-break">页面打开时不会联网校验。</p>
       </details>
     </div>
   </article>`;
@@ -3724,7 +4510,7 @@ async function renderAccounts() {
       ${heading("auth-status", "账户", "账户状态暂时无法读取。请检查服务是否运行后重试。")}
       <section class="panel" id="account-load-error">
         <h2>账户状态读取失败</h2>
-        <p class="error-banner">${escapeHtml(accountFailureText(error.message))}</p>
+        <p class="error-banner">${punctBreakHtml(accountFailureText(error.message))}</p>
         <button class="button button--secondary" type="button" id="retry-auth">重新加载</button>
       </section>`;
     document.querySelector("#retry-auth").addEventListener("click", renderAccounts);
@@ -3735,14 +4521,17 @@ async function renderAccounts() {
   state.auth = auth;
   const initialKey = initialKeyProvider(config.keys);
   const credentialRows = [...(config.data_env || []), ...(config.cloud_env || [])];
-  const configuredCredentials = credentialRows.filter((item) => item.configured).length;
-  const credentialSummary = credentialRows.length
-    ? `可选凭据已配置 ${configuredCredentials} 项。默认数据来源无需在此填写。`
-    : "数据来源凭据：暂无可配置项。";
+  const configuredCredentials = credentialRows.filter((item) => item.configured === true).length;
+  const unknownCredentials = credentialRows.some((item) => !configKnown(item));
+  const credentialSummary = !credentialRows.length
+    ? "数据来源凭据：暂无可配置项。"
+    : unknownCredentials
+      ? `配置状态未知，不把它写成未配置。已确认配置 ${configuredCredentials} 项。`
+      : `可选凭据已配置 ${configuredCredentials} 项。默认数据来源无需在此填写。`;
   setIdentity(identity.accounts);
   pageEl.innerHTML = `
-    ${heading("account", "账户", "管理订阅登录和 API Key。本页显示本机配置状态，密钥不会回显。",
-      `<button class="button button--secondary" type="button" id="refresh-auth">刷新状态</button>`)}
+    ${heading("account", "账户", "管理订阅登录和 API Key。<br class=\"notice-break\">本页显示本机配置状态，<br class=\"notice-break\">密钥不会回显。",
+      `<button class="button button--secondary" type="button" id="refresh-auth">刷新状态</button>`, {html: true})}
     ${authPlanFilters()}
     <section class="subscription-section" aria-labelledby="subscription-heading">
       <div class="subsection-heading">
@@ -3759,7 +4548,7 @@ async function renderAccounts() {
       <div class="subsection-heading">
         <div>
           <h2 id="key-heading">API Key</h2>
-          <p id="key-status" class="notice">${keyStatusText(config.keys)}</p>
+          <p id="key-status" class="notice">${punctBreakHtml(keyStatusText(config.keys))}</p>
         </div>
       </div>
       <form class="form-grid" id="key-form">
@@ -3769,21 +4558,21 @@ async function renderAccounts() {
       </form>
       <details class="disclosure account-details" id="key-details">
         <summary>查看密钥配置项</summary>
-        <p class="notice">页面不会展示密钥内容。以下仅用于确认供应商与保存项。</p>
-        <ul class="command-map">${(config.keys || []).map((item) => `<li><span>${escapeHtml(authProviderName(item.provider))}</span><code>${escapeHtml(item.env_var || "")}</code><span>${item.configured ? "已配置" : "未配置"}</span></li>`).join("")}</ul>
+        <p class="notice" id="key-secret-note">页面不会展示密钥内容。<br class="notice-break">以下仅用于确认供应商与保存项。</p>
+        <ul class="command-map">${(config.keys || []).map((item) => `<li><span>${escapeHtml(authProviderName(item.provider))}</span><code>${escapeHtml(item.env_var || "")}</code><span>${escapeHtml(configLabel(item))}</span></li>`).join("")}</ul>
       </details>
     </section>
     <section class="panel account-data-credentials" aria-labelledby="data-credentials-heading">
       <div class="subsection-heading">
         <div>
           <h2 id="data-credentials-heading">可选数据服务</h2>
-          <p class="notice">${escapeHtml(credentialSummary)}</p>
+          <p class="notice" id="credential-summary">${credentialSummary.includes("不把它写成") ? narrowBreakHtml(credentialSummary) : credentialFillHtml(credentialSummary)}</p>
         </div>
       </div>
       <details class="disclosure account-details" id="data-env-details">
         <summary>配置数据来源凭据</summary>
         <form class="form-grid" id="data-env-form">
-          <p class="notice field--wide">这些可选凭据只写入本机配置，内容不会回显。</p>
+          <p class="notice field--wide" id="data-env-local-note">这些可选凭据只写入本机配置，<br class="notice-break">内容不会回显。</p>
           ${envFields(state.catalog?.data_env, config.data_env)}
           ${envFields(state.catalog?.cloud_env, config.cloud_env)}
           <div class="form-actions field--wide"><button class="button button--primary" type="submit">保存数据凭据</button></div>
@@ -3795,16 +4584,16 @@ async function renderAccounts() {
     ${updatesSection()}
     <details class="disclosure account-details" id="login-help"${chatgptWaiting ? " open" : ""}>
       <summary>登录辅助</summary>
-      <p class="notice">如果登录窗口没有自动完成，可在这里查看提示并提交地址。</p>
+      <p class="notice" id="login-help-note">如果登录窗口没有自动完成，<br class="notice-break">可在这里查看提示并提交地址。</p>
       <pre class="log-view" id="login-log">${escapeHtml((login.messages || []).join("\n") || "登录提示会显示在这里。")}</pre>
       <form class="form-grid" id="paste-form">
-        <div class="field field--wide"><label for="paste-url" id="paste-label">${escapeHtml(pasteLoginNote(login))}</label><input id="paste-url" placeholder="${escapeHtml(placeholder("login_paste"))}" ${chatgptWaiting ? "" : "disabled"}></div>
+        <div class="field field--wide"><label for="paste-url" id="paste-label">${punctBreakHtml(pasteLoginNote(login))}</label><input id="paste-url" placeholder="${escapeHtml(placeholder("login_paste"))}" ${chatgptWaiting ? "" : "disabled"}></div>
         <div class="form-actions field--wide"><button class="button button--secondary" type="submit" ${chatgptWaiting ? "" : "disabled"}>提交粘贴地址</button></div>
       </form>
     </details>
     <details class="disclosure account-details" id="account-cli-details">
       <summary>查看诊断与命令行说明</summary>
-      <p class="notice" id="auth-invocation">当前筛选：${escapeHtml(auth.cli || "auth-status")}。状态只读取本机登录材料，页面打开时不会联网校验。</p>
+      <p class="notice" id="auth-invocation">当前筛选：${escapeHtml(auth.cli || "auth-status")}。<br class="notice-break">状态只读取本机登录材料，<br class="notice-break">页面打开时不会联网校验。</p>
       ${commandMap([{ cli: "login", zh: "登录订阅" }, { cli: "logout", zh: "退出登录" }, { cli: "auth-status", zh: "登录状态" }, ...(state.catalog.data_env || []).map((item) => ({cli: item.cli, zh: item.zh})), ...(state.catalog.cloud_env || []).map((item) => ({cli: item.cli, zh: item.zh}))])}
       ${flagTable(state.catalog?.subscription_commands || [])}
       ${loginSentenceList()}
@@ -3831,7 +4620,7 @@ async function renderAccounts() {
   const selectedKey = initialKey?.provider || "";
   const keyItems = (config.keys || []).map((item) => {
     const meta = known.get(item.provider) || {key: item.provider, zh: item.provider};
-    return {value: item.provider, zh: `${meta.zh || item.provider} · ${item.configured ? "已配置" : "未配置"}`};
+    return {value: item.provider, zh: `${meta.zh || item.provider} · ${configLabel(item)}`};
   });
   if (keyItems.length) {
     mountSelect(keyHost, keyItems, selectedKey, (value) => {
@@ -3849,14 +4638,45 @@ async function renderAccounts() {
   bindUpdates();
 }
 
+function envNoteHtml(note) {
+  const text = String(note || "");
+  const marker = "留空则使用项目占位地址";
+  const index = text.indexOf(marker);
+  // 1440 still splits 项目, and notice-break is hidden from 701px up, so this break stays visible.
+  if (index >= 0) return `${escapeHtml(text.slice(0, index))}<br>${escapeHtml(text.slice(index))}`;
+  if (text.includes("页面的推理地址也会传给 Azure")) {
+    return escapeHtml(text).replace("。页面的推理地址", "。<br class=\"notice-break\">页面的推理地址");
+  }
+  if (text.includes("Bedrock 客户端先读这个变量")) {
+    return escapeHtml(text).replace("Bedrock 客户端", "Bedrock <br class=\"notice-break\">客户端");
+  }
+  return escapeHtml(text);
+}
+
 function envFields(items, statusRows) {
   return (items || []).map((item) => {
     const status = (statusRows || []).find((row) => row.env === item.env);
-    const configured = status && status.configured ? "已配置。" : "未配置。";
+    const sentence = configSentence(status);
+    const sentenceHtml = sentence.includes("不把它写成") ? narrowBreakHtml(sentence) : escapeHtml(sentence);
     const inputType = item.masked ? "password" : "text";
-    const placeholder = status && status.configured ? "已配置。留空不修改，页面不回显。" : "写入本机 .env，页面不回显。";
-    return `<div class="field field--wide"><label for="env-${escapeHtml(item.env)}">${escapeHtml(item.zh)} ${escapeHtml(item.cli)}。${escapeHtml(item.note)} ${configured}</label><input id="env-${escapeHtml(item.env)}" type="${inputType}" autocomplete="off" placeholder="${placeholder}"></div>`;
+    const placeholder = !configKnown(status)
+      ? "配置状态未知，不把它写成未配置。页面不回显。"
+      : status.configured === true ? "已配置。留空不修改，页面不回显。" : "写入本机 .env，页面不回显。";
+    const statusGap = item.env === "OPENAI_API_VERSION" || item.env === "AWS_DEFAULT_REGION" ? " <br class=\"notice-break\">" : item.env === "AWS_REGION" || item.env === "AWS_BEARER_TOKEN_BEDROCK" ? " <br>" : " ";
+    return `<div class="field field--wide"><label for="env-${escapeHtml(item.env)}">${escapeHtml(item.zh)} ${escapeHtml(item.cli)}。${envNoteHtml(item.note)}${statusGap}${sentenceHtml}</label><input id="env-${escapeHtml(item.env)}" type="${inputType}" autocomplete="off" placeholder="${escapeHtml(placeholder)}"></div>`;
   }).join("");
+}
+
+function dataEnvSaveNotice(saved, unknown) {
+  if (unknown.length && !saved.length) return "保存结果未知，不把它写成已保存。内容不会回显。";
+  if (unknown.length) return `已保存 ${saved.length} 项。另有 ${unknown.length} 项结果未知，不把它写成已保存。内容不会回显。`;
+  return `已保存 ${saved.length} 项数据来源凭据。内容不会回显。`;
+}
+
+function dataEnvSaveDetail(names) {
+  const shown = names.filter((name) => typeof name === "string" && name);
+  if (!shown.length) return "";
+  return `<details class="disclosure account-details"><summary>查看保存详情</summary><p class="notice">${escapeHtml(shown.join("、"))}</p></details>`;
 }
 
 async function saveDataEnv(event) {
@@ -3871,21 +4691,22 @@ async function saveDataEnv(event) {
   button.disabled = true;
   button.textContent = "正在保存";
   const saved = [];
+  const unknown = [];
   try {
     for (const input of fields) {
       const env = input.id.slice(4);
       const result = await api("/api/data-env", { method: "POST", body: JSON.stringify({ env, value: input.value }) });
       input.value = "";
-      saved.push(result.env_var);
+      if (result && result.saved === true) saved.push(typeof result.env_var === "string" && result.env_var ? result.env_var : env);
+      else unknown.push(env);
     }
     await renderAccounts();
-    const detail = saved.length ? `<details class="disclosure account-details"><summary>查看保存详情</summary><p class="notice">${escapeHtml(saved.join("、"))}</p></details>` : "";
-    pageEl.insertAdjacentHTML("afterbegin", `<p class="notice">已保存 ${saved.length} 项数据来源凭据。内容不会回显。</p>${detail}`);
+    pageEl.insertAdjacentHTML("afterbegin", `<p class="notice" id="data-env-note">${narrowBreakHtml(dataEnvSaveNotice(saved, unknown))}</p>${dataEnvSaveDetail(saved)}`);
   } catch (error) {
     const savedNote = saved.length ? `已保存 ${saved.join("、")}。` : "";
     await renderAccounts();
-    const detail = savedNote ? `<details class="disclosure account-details"><summary>查看已保存项目</summary><p class="notice">${escapeHtml(savedNote)}</p></details>` : "";
-    pageEl.insertAdjacentHTML("afterbegin", `<p class="error-banner">${escapeHtml(savedNote + accountFailureText(error.message))}</p>${detail}`);
+    const detail = dataEnvSaveDetail(saved);
+    pageEl.insertAdjacentHTML("afterbegin", `<p class="error-banner">${punctBreakHtml(savedNote + accountFailureText(error.message))}</p>${detail}`);
   }
 }
 
@@ -3896,7 +4717,24 @@ function updateLoginInputs(login) {
   if (input) input.disabled = !enabled;
   if (submit) submit.disabled = !enabled;
   const label = document.querySelector("#paste-label");
-  if (label) label.textContent = enabled ? "如果浏览器未自动完成登录，请粘贴授权完成后的回调地址。" : "ChatGPT 登录等待授权时，可在这里提交回调地址。";
+  if (label) label.innerHTML = punctBreakHtml(enabled ? "如果浏览器未自动完成登录，请粘贴授权完成后的回调地址。" : "ChatGPT 登录等待授权时，可在这里提交回调地址。");
+}
+
+function loginStartNotice(label, data) {
+  const status = data && data.status;
+  if (status === "waiting") return `${label} 登录已启动，请完成浏览器授权。`;
+  if (status === "signed_in") return data.zh || `${label} 登录返回已登录，不把它写成仍在启动。`;
+  if (status === "failed") return data.error || data.zh || `${label} 登录没有启动成功，不把它写成已启动。`;
+  return `${label} 登录请求已返回，不把它写成已启动。`;
+}
+
+function loginEndNotice(label, current) {
+  const status = current && current.status;
+  const zh = current && current.zh ? String(current.zh) : "";
+  if (status === "signed_in") return zh || `${label} 已登录。`;
+  if (status === "failed") return (current && current.error) || zh || `${label} 登录没有完成，不把它写成已结束。`;
+  if (status === "idle") return zh || `${label} 登录流程已结束，不把它写成已完成。`;
+  return `${label} 登录状态未知，不把它写成已结束或已完成。`;
 }
 
 async function beginLogin(provider) {
@@ -3922,12 +4760,17 @@ async function beginLogin(provider) {
     if (log) log.textContent = error.message;
     return;
   }
-  if (button) button.textContent = "等待授权";
-  setAuthCardFeedback(provider, `${label} 登录已启动，请完成浏览器授权。`);
+  const waiting = data && data.status === "waiting";
+  if (button) {
+    button.disabled = waiting;
+    button.textContent = waiting ? "等待授权" : originalLabel;
+  }
+  setAuthCardFeedback(provider, loginStartNotice(label, data), Boolean(data && data.status === "failed"));
   const help = document.querySelector("#login-help");
-  if (help) help.open = true;
+  if (help) help.open = waiting;
   updateLoginInputs({...data, provider});
-  if (log) log.textContent = "正在等待登录提示…";
+  if (log) log.textContent = waiting ? "正在等待登录提示…" : (data.zh || data.error || "登录没有进入等待授权。");
+  if (!waiting) return;
   const timer = setInterval(async () => {
     let current;
     try {
@@ -3955,18 +4798,39 @@ async function beginLogin(provider) {
       if (state.page !== "accounts") return;
       const cli = current.cli ? `对应命令行：${current.cli}` : "";
       const sentence = [current.zh, cli].filter(Boolean).join(" ");
+      const knownEnd = ["signed_in", "failed", "idle"].includes(current.status);
+      const ended = loginEndNotice(label, current);
+      const shown = knownEnd ? sentence : "";
       await renderAccounts();
-      setAuthCardFeedback(provider, current.error || sentence || `${label} 登录流程已结束。`, Boolean(current.error));
+      setAuthCardFeedback(provider, current.error || shown || ended, Boolean(current.error));
       if (current.error) {
-        pageEl.insertAdjacentHTML("afterbegin", `<p class="error-banner">${escapeHtml(accountFailureText(current.error))}</p>`);
-      } else if (sentence) {
-        const detail = current.cli ? `<details class="disclosure account-details"><summary>查看登录详情</summary><p class="notice">${escapeHtml(sentence)}</p></details>` : "";
-        pageEl.insertAdjacentHTML("afterbegin", `<p class="notice">${escapeHtml(current.zh || `${label} 登录已完成。`)}</p>${detail}`);
+        pageEl.insertAdjacentHTML("afterbegin", `<p class="error-banner">${punctBreakHtml(accountFailureText(current.error))}</p>`);
+      } else {
+        const detail = knownEnd && current.cli ? `<details class="disclosure account-details"><summary>查看登录详情</summary><p class="notice">${escapeHtml(shown)}</p></details>` : "";
+        pageEl.insertAdjacentHTML("afterbegin", `<p class="notice" id="login-end-note">${narrowBreakHtml(ended)}</p>${detail}`);
       }
     }
   }, 1000);
   const currentLog = document.querySelector("#login-log");
   if (data.url && currentLog) currentLog.textContent = data.url;
+}
+
+// Missing outcome is not a sign-out. Do not trust a zh that claims one.
+// null is the server's "not signed in" outcome and may keep its own zh.
+function logoutNotice(label, result) {
+  const record = result && typeof result === "object" ? result : {};
+  const hasOutcome = Object.prototype.hasOwnProperty.call(record, "outcome");
+  const outcome = hasOutcome ? record.outcome : undefined;
+  const zh = typeof record.zh === "string" ? record.zh : "";
+  if (outcome === "revoked" || outcome === "forgotten") return zh || `${label} 已退出。`;
+  if (!hasOutcome || outcome === "") return "退出结果未知，不把它写成已退出。";
+  return zh || "本来就没有登录，不把它写成已退出。";
+}
+
+function logoutDetail(result, sentence) {
+  const cli = result && typeof result.cli === "string" ? result.cli : "";
+  if (!cli) return "";
+  return `<details class="disclosure account-details"><summary>查看退出详情</summary><p class="notice">${escapeHtml(sentence)} 对应命令行：${escapeHtml(cli)}</p></details>`;
 }
 
 async function logout(provider) {
@@ -3986,14 +4850,29 @@ async function logout(provider) {
       button.textContent = "退出";
     }
     setAuthCardFeedback(provider, error.message, true);
-    pageEl.insertAdjacentHTML("afterbegin", `<p class="error-banner">${escapeHtml(accountFailureText(error.message))}</p>`);
+    pageEl.insertAdjacentHTML("afterbegin", `<p class="error-banner">${punctBreakHtml(accountFailureText(error.message))}</p>`);
     return;
   }
   if (state.page !== "accounts") return;
   await renderAccounts();
-  setAuthCardFeedback(provider, result.zh || `${label} 已退出。`);
-  const detail = result.cli ? `<details class="disclosure account-details"><summary>查看退出详情</summary><p class="notice">${escapeHtml(result.zh)} 对应命令行：${escapeHtml(result.cli)}</p></details>` : "";
-  pageEl.insertAdjacentHTML("afterbegin", `<p class="notice">${escapeHtml(result.zh || `${label} 已退出。`)}</p>${detail}`);
+  const sentence = logoutNotice(label, result);
+  setAuthCardFeedback(provider, sentence);
+  pageEl.insertAdjacentHTML("afterbegin", `<p class="notice" id="logout-note">${narrowBreakHtml(sentence)}</p>${logoutDetail(result, sentence)}`);
+}
+
+// A missing saved flag is not a skip. Do not treat a truthy zh as either outcome.
+function keySaveNotice(provider, result) {
+  const label = authProviderName(provider);
+  const saved = result && typeof result === "object" ? result.saved : undefined;
+  if (saved === true) return `已保存 ${label} 的 API Key。密钥不会回显。`;
+  if (saved === false) return `已跳过，没有写入 ${label} 的 API Key。密钥不会回显。`;
+  return "保存结果未知，不把它写成已保存或已跳过。密钥不会回显。";
+}
+
+function keySaveDetail(result, sentence) {
+  const cli = result && typeof result.cli === "string" ? result.cli : "";
+  if (!cli) return "";
+  return `<details class="disclosure account-details"><summary>查看保存详情</summary><p class="notice">${escapeHtml(sentence)} 对应命令行：${escapeHtml(cli)}</p></details>`;
 }
 
 async function saveKey(event) {
@@ -4002,21 +4881,20 @@ async function saveKey(event) {
   const key = document.querySelector("#key-value").value;
   try {
     const result = await api("/api/keys", { method: "POST", body: JSON.stringify({ provider, key }) });
-    const verb = result.saved ? "已保存" : "已跳过，没有写入";
-    const sentence = `${verb} ${authProviderName(provider)} 的 API Key。密钥不会回显。`;
-    const detail = result.cli ? `<details class="disclosure account-details"><summary>查看保存详情</summary><p class="notice">${escapeHtml(result.cli)}</p></details>` : "";
+    const sentence = keySaveNotice(provider, result);
+    const detail = keySaveDetail(result, sentence);
     await renderAccounts();
-    pageEl.insertAdjacentHTML("afterbegin", `<p class="notice">${escapeHtml(sentence)}</p>${detail}`);
+    pageEl.insertAdjacentHTML("afterbegin", `<p class="notice" id="key-save-note">${narrowBreakHtml(sentence)}</p>${detail}`);
   } catch (error) {
-    pageEl.insertAdjacentHTML("afterbegin", `<p class="error-banner">${escapeHtml(accountFailureText(error.message))}</p>`);
+    pageEl.insertAdjacentHTML("afterbegin", `<p class="error-banner">${punctBreakHtml(accountFailureText(error.message))}</p>`);
   }
 }
 
 function renderModels() {
   const providers = state.catalog.providers || [];
   pageEl.innerHTML = `
-    ${heading("login", "模型", "两层可以分别选择已登录的订阅。快模型不是数据源，Grok 不会代替 yfinance 或 SEC。Grok 没有独立思考强度。")}
-    <p class="notice">这里列出命令行供应商表里的全部供应商，不只订阅。下面的思考强度写入同一次分析，和启动分析「模型选择」一步是同一组字段。</p>
+    ${heading("login", "模型", "两层可以分别选择已登录的订阅。<br class=\"notice-break\">快模型不是数据源，<br class=\"notice-break\">Grok 不会代替 yfinance 或 SEC。<br class=\"notice-break\">Grok 没有独立思考强度。", "", {html: true})}
+    <p class="notice" id="model-source-note">这里列出命令行供应商表里的全部供应商，<br class="notice-break">不只订阅。<br class="notice-break">下面的思考强度写入同一次分析，<br class="notice-break">和启动分析「模型选择」一步是同一组字段。</p>
     <div class="provider-grid">${providers.map((item) =>
       `<button class="provider-card" type="button" data-provider="${escapeHtml(item.key)}">${providerMark(item)}${providerText(item)}</button>`).join("")}</div>
     <div id="model-effort"></div>
@@ -4047,9 +4925,9 @@ function showModelEffort(extra) {
 
 async function loadModels(provider) {
   const host = document.querySelector("#model-list");
-  host.textContent = provider === "azure"
+  host.innerHTML = punctBreakHtml(provider === "azure"
     ? `Azure 没有模型列表。命令行提问：${pickerPrompt("azure_quick")} 和 ${pickerPrompt("azure_deep")}。空值校验：${pickerPrompt("azure_required")}`
-    : `正在读取快模型和深模型。列表失败时仍可手填，对应 ${pickerPrompt("custom_choice")}。`;
+    : `正在读取快模型和深模型。列表失败时仍可手填，对应 ${pickerPrompt("custom_choice")}。`);
   try {
     const [quick, deep] = await Promise.all(["quick", "deep"].map((mode) => api(`/api/models?provider=${encodeURIComponent(provider)}&mode=${mode}`)));
     host.innerHTML = [quick, deep].map((data) => modelTable(provider, data)).join("") + customModelRow(provider);
@@ -4067,20 +4945,21 @@ async function loadModels(provider) {
 }
 
 function modelTable(provider, data) {
-  const warning = data.cli ? `<p class="notice">${escapeHtml(data.detail || "模型列表没有读到。")} 对应命令行：${escapeHtml(data.cli)}</p>` : "";
+  const detail = data.detail || "";
+  const warning = data.cli ? `<p class="notice" id="model-list-warning">${punctBreakHtml(detail || "模型列表没有读到。")} <br class="notice-break">对应命令行：${escapeHtml(data.cli)}</p>` : "";
   const rows = (data.models || []).map((item) => `<tr><td><strong>${escapeHtml(item.zh)}</strong></td><td><code>${escapeHtml(item.id)}</code></td><td><button class="button button--small button--secondary" type="button" data-use="${escapeHtml(data.mode)}" data-id="${escapeHtml(item.id)}">用于这一层</button></td></tr>`).join("");
-  const empty = data.detail || `没有可选模型。可在下方手填 ${pickerPrompt("custom_choice")}。`;
-  return `<section class="panel">${warning}<h2>${escapeHtml(data.title || data.mode)}</h2>${rows ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>模型</th><th>ID</th><th>用于</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<p class="notice">${escapeHtml(empty)}</p>`}</section>`;
+  const empty = detail || `没有可选模型。可在下方手填 ${pickerPrompt("custom_choice")}。`;
+  return `<section class="panel">${warning}<h2>${escapeHtml(data.title || data.mode)}</h2>${rows ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>模型</th><th>ID</th><th>用于</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<p class="notice" id="model-list-empty">${punctBreakHtml(empty)}</p>`}</section>`;
 }
 
 function customModelRow(provider) {
   if (provider === "azure") {
-    return `<div class="field field--wide"><label for="custom-model-id">Azure 部署名。快模型命令行提问：${escapeHtml(pickerPrompt("azure_quick"))}。深模型：${escapeHtml(pickerPrompt("azure_deep"))}。空值校验：${escapeHtml(pickerPrompt("azure_required"))}</label><input id="custom-model-id" placeholder="${escapeHtml(pickerPrompt("azure_required"))}" aria-label="${escapeHtml(pickerPrompt("azure_quick"))}"><div class="choice-row"><button class="button button--secondary" type="button" data-use="quick" data-custom="true">用作快模型</button><button class="button button--secondary" type="button" data-use="deep" data-custom="true">用作深模型</button></div></div>`;
+    return `<div class="field field--wide"><label for="custom-model-id">Azure 部署名。<br class="notice-break">快模型命令行提问：${escapeHtml(pickerPrompt("azure_quick"))}。<br class="notice-break">深模型：${escapeHtml(pickerPrompt("azure_deep"))}。<br class="notice-break">空值校验：${escapeHtml(pickerPrompt("azure_required"))}</label><input id="custom-model-id" placeholder="${escapeHtml(pickerPrompt("azure_required"))}" aria-label="${escapeHtml(pickerPrompt("azure_quick"))}"><div class="choice-row"><button class="button button--secondary" type="button" data-use="quick" data-custom="true">用作快模型</button><button class="button button--secondary" type="button" data-use="deep" data-custom="true">用作深模型</button></div></div>`;
   }
   if (provider === "openrouter") {
-    return `<div class="field field--wide"><label for="custom-model-id">OpenRouter 模型 ID。命令行提问：${escapeHtml(pickerPrompt("openrouter_id"))}。空值校验：${escapeHtml(pickerPrompt("model_id_required"))}</label><input id="custom-model-id" placeholder="${escapeHtml(placeholder("openrouter_id"))}" aria-label="${escapeHtml(pickerPrompt("openrouter_id"))}"><div class="choice-row"><button class="button button--secondary" type="button" data-use="quick" data-custom="true">用作快模型</button><button class="button button--secondary" type="button" data-use="deep" data-custom="true">用作深模型</button></div></div>`;
+    return `<div class="field field--wide"><label for="custom-model-id">OpenRouter 模型 ID。<br class="notice-break">命令行提问：${escapeHtml(pickerPrompt("openrouter_id"))}。<br class="notice-break">空值校验：${escapeHtml(pickerPrompt("model_id_required"))}</label><input id="custom-model-id" placeholder="${escapeHtml(placeholder("openrouter_id"))}" aria-label="${escapeHtml(pickerPrompt("openrouter_id"))}"><div class="choice-row"><button class="button button--secondary" type="button" data-use="quick" data-custom="true">用作快模型</button><button class="button button--secondary" type="button" data-use="deep" data-custom="true">用作深模型</button></div></div>`;
   }
-  return `<div class="field field--wide"><label for="custom-model-id">${escapeHtml(pickerPrompt("custom_choice"))}。命令行提问：${escapeHtml(pickerPrompt("model_id"))}。空值校验：${escapeHtml(pickerPrompt("model_id_required"))}。列表失败或选择自定义时手填。</label><input id="custom-model-id" placeholder="${escapeHtml(pickerPrompt("model_id"))}"><div class="choice-row"><button class="button button--secondary" type="button" data-use="quick" data-custom="true">用作快模型</button><button class="button button--secondary" type="button" data-use="deep" data-custom="true">用作深模型</button></div></div>`;
+  return `<div class="field field--wide"><label for="custom-model-id">${escapeHtml(pickerPrompt("custom_choice"))}。<br class="notice-break">命令行提问：${escapeHtml(pickerPrompt("model_id"))}。<br class="notice-break">空值校验：${escapeHtml(pickerPrompt("model_id_required"))}。<br class="notice-break">列表失败或选择自定义时手填。</label><input id="custom-model-id" placeholder="${escapeHtml(pickerPrompt("model_id"))}"><div class="choice-row"><button class="button button--secondary" type="button" data-use="quick" data-custom="true">用作快模型</button><button class="button button--secondary" type="button" data-use="deep" data-custom="true">用作深模型</button></div></div>`;
 }
 
 function modelIdRequired(provider) {
@@ -4098,7 +4977,7 @@ function bindModelUses(host, provider) {
         note.className = "error-banner";
         host.append(note);
       }
-      note.textContent = `模型 ID 为空。对应命令行：${modelIdRequired(provider)} 页面没有这一问的取消。`;
+      note.innerHTML = `模型 ID 为空。<br class="notice-break">对应命令行：${escapeHtml(modelIdRequired(provider))}<br class="notice-break">页面没有这一问的取消。`;
       return;
     }
     host.querySelector("#model-id-note")?.remove();
@@ -4145,7 +5024,7 @@ function renderModelChoices(list, data, tier) {
     const empty = data.provider === "azure"
       ? ["请输入 Azure 部署名称。", data.detail].filter(Boolean).join("\n")
       : [warning, "没有可选模型，请展开下方设置手动填写模型 ID。"].filter(Boolean).join("\n");
-    list.textContent = empty;
+    list.innerHTML = String(empty).split("\n").map((line) => punctBreakHtml(line)).join("<br>");
     return;
   }
   const picked = modelSelectState(tier, data.models);
@@ -4173,6 +5052,13 @@ function queryText() {
   return Array.isArray(value) ? value.join("\n") : (value || "");
 }
 
+function refusalNoteHtml(text) {
+  let html = escapeHtml(text).replace(/[。，]/g, (mark) => `${mark}<br class="notice-break">`).replace(/<br class="notice-break">$/, "");
+  html = html.replace("订阅不接受", "<br class=\"notice-break\">订阅不接受");
+  if (String(text).includes("日志会写")) html = html.replace("日志会写 ", "日志会写<br class=\"notice-break\">");
+  return html;
+}
+
 function chatgptRefusalNote() {
   const called = calledTierProviders();
   if (!called.some((item) => item === "chatgpt")) return "当前快模型和深模型都不是 ChatGPT 订阅，这两项会照常发送。";
@@ -4193,6 +5079,10 @@ function gpt5TemperatureNote() {
   return `所选模型 ${models.join("、")} 属于 gpt-5 系列推理模型（非 chat 版）：temperature 只接受 1，填写其他值会被直接去掉，不会生效。`;
 }
 
+function gpt5TemperatureHtml(text) {
+  return punctBreakHtml(text).replace("属于", "<br class=\"notice-break\">属于").replace("temperature", "<br class=\"notice-break\">temperature");
+}
+
 // WEBUI-005: one labelled input for a setting the CLI reads from the environment or the run config.
 function settingInput(id, field, options = {}) {
   const row = envRow(field) || configKeyRows().find((item) => item.field === field) || {};
@@ -4200,7 +5090,7 @@ function settingInput(id, field, options = {}) {
   const value = options.value ?? envFieldValue(field);
   const note = locked ? envFieldNote(field, "") : (options.note ?? row.note ?? "");
   const label = options.label || row.zh || field;
-  return `<div class="field${options.wide ? " field--wide" : ""}"><label for="${id}">${escapeHtml(label)} <code class="field-code">${escapeHtml(row.cli || field)}</code></label><input id="${id}" value="${escapeHtml(value ?? "")}" placeholder="${escapeHtml(options.placeholder || row.placeholder || "留空沿用默认")}" ${locked ? "readonly" : ""}>${note ? `<p class="form-hint">${escapeHtml(note)}</p>` : ""}</div>`;
+  return `<div class="field${options.wide ? " field--wide" : ""}"><label for="${id}">${escapeHtml(label)} <code class="field-code">${escapeHtml(row.cli || field)}</code></label><input id="${id}" value="${escapeHtml(value ?? "")}" placeholder="${escapeHtml(options.placeholder || row.placeholder || "留空沿用默认")}" ${locked ? "readonly" : ""}>${note ? `<p class="form-hint">${punctBreakHtml(note)}</p>` : ""}</div>`;
 }
 
 function inputValue(id) {
@@ -4224,13 +5114,23 @@ async function saveConfigPart(payload, feedback, button, doneText) {
   if (button) { button.disabled = true; button.dataset.label = button.textContent; button.textContent = "正在保存"; }
   if (feedback) { feedback.className = "notice field--wide"; feedback.textContent = "正在写入本机控制台配置。"; }
   try {
-    await api("/api/config", { method: "POST", body: JSON.stringify(clean) });
+    const result = await api("/api/config", { method: "POST", body: JSON.stringify(clean) });
+    if (!result || result.saved !== true) {
+      if (feedback) {
+        feedback.className = "notice field--wide";
+        feedback.innerHTML = narrowBreakHtml("保存结果未知，不把它写成已保存。");
+      }
+      return false;
+    }
     Object.assign(state.form, clean);
     if (Array.isArray(clean.global_news_queries) && !clean.global_news_queries.length) state.form.global_news_queries = null;
-    if (feedback) feedback.textContent = doneText;
+    if (feedback) {
+      feedback.className = "notice field--wide";
+      feedback.textContent = doneText;
+    }
     return true;
   } catch (error) {
-    if (feedback) { feedback.className = "error-banner field--wide"; feedback.textContent = error.message; }
+    if (feedback) { feedback.className = "error-banner field--wide"; feedback.innerHTML = punctBreakHtml(error.message); }
     return false;
   } finally {
     if (button) { button.disabled = false; button.textContent = button.dataset.label || "保存"; }
@@ -4240,11 +5140,11 @@ async function saveConfigPart(payload, feedback, button, doneText) {
 // WEBUI-005: the old 运行参数 page is split. Model knobs live here, data sources live in 账户.
 function modelAdvancedSection() {
   return `<details class="disclosure" id="model-advanced"><summary>高级设置</summary>
-    <p class="form-hint">保存在本机控制台配置里，下一次分析生效。留空沿用默认。</p>
+    <p class="form-hint" id="model-advanced-hint">保存在本机控制台配置里，<br class="notice-break">下一次分析生效。<br class="notice-break">留空沿用默认。</p>
     <form id="model-advanced-form" class="form-grid">
       ${settingInput("set-temperature", "temperature", {note: ""})}
       ${settingInput("set-tokens", "max_tokens", {note: ""})}
-      <p class="notice field--wide" id="model-refusal-note">${escapeHtml(chatgptRefusalNote())}</p>${gpt5TemperatureNote() ? `<p class="notice field--wide" id="gpt5-temperature-note">${escapeHtml(gpt5TemperatureNote())}</p>` : ""}
+      <p class="notice field--wide" id="model-refusal-note">${refusalNoteHtml(chatgptRefusalNote())}</p>${gpt5TemperatureNote() ? `<p class="notice field--wide" id="gpt5-temperature-note">${gpt5TemperatureHtml(gpt5TemperatureNote())}</p>` : ""}
       ${settingInput("set-tools", "max_tool_rounds", {note: "每个分析师最多调用工具的轮数。"})}
       ${settingInput("set-risk-rounds", "max_risk_discuss_rounds", {value: riskRoundValue(), locked: riskRoundLocked(), note: riskRoundNote(), placeholder: "留空"})}
       ${settingInput("set-quick-url", "quick_think_backend_url", {value: tierUrlValue("quick"), locked: tierUrlLocked("quick"), note: tierUrlNote("quick"), placeholder: "留空沿用供应商默认", wide: true})}
@@ -4281,7 +5181,7 @@ function dataSourceSection() {
   const keyRows = configKeyRows().filter((item) => DATA_KEY_FIELDS.includes(item.field));
   return `<section class="panel account-data-sources" aria-labelledby="data-sources-heading">
       <div class="subsection-heading"><div><h2 id="data-sources-heading">数据来源</h2>
-      <p class="notice">行情、新闻和基本面从哪里取。留空沿用默认来源，保存在本机控制台配置里。</p></div></div>
+      <p class="notice" id="data-source-note">行情、新闻和基本面从哪里取。<br class="notice-break">留空沿用默认来源，<br class="notice-break">保存在本机控制台配置里。</p></div></div>
       <details class="disclosure account-details" id="data-sources-details"><summary>调整数据来源</summary>
       <form id="data-sources-form" class="form-grid">
         ${vendorFields()}
@@ -4319,11 +5219,19 @@ function bindDataSources() {
   });
 }
 
+function logsHelpHtml(row) {
+  const text = `${row.zh}。${row.when}`;
+  const safe = escapeHtml(text);
+  if (row.key === "logs_help") return safe.replace("就打印", "就<br class=\"notice-break\">打印").replace(/[。，]/g, (mark) => `${mark}<br class="notice-break">`).replace(/<br class="notice-break">$/, "");
+  if (row.key === "logs_lines_integer" || row.key === "logs_usage") return safe.replace(/[。，]/g, (mark) => `${mark}<br class="notice-break">`).replace(/<br class="notice-break">$/, "");
+  return safe;
+}
+
 function logsHelpNote() {
   const keys = ["logs_help", "logs_lines_integer", "logs_usage"];
   const rows = ((state.catalog && state.catalog.launcher_conditional) || []).filter((item) => keys.includes(item.key));
   if (!rows.length) return "";
-  return rows.map((row) => `<p class="notice">${escapeHtml(row.zh)}。${escapeHtml(row.when)}</p><pre class="log-view" data-logs="${escapeHtml(row.key)}">${escapeHtml(row.cli)}</pre>`).join("");
+  return rows.map((row) => `<p class="notice"${row.key === "logs_help" ? " id=\"logs-help-note\"" : row.key === "logs_lines_integer" ? " id=\"logs-integer-note\"" : row.key === "logs_usage" ? " id=\"logs-usage-note\"" : ""}>${logsHelpHtml(row)}</p><pre class="log-view" data-logs="${escapeHtml(row.key)}">${escapeHtml(row.cli)}</pre>`).join("");
 }
 
 function vendorFields() {
@@ -4361,7 +5269,7 @@ function toolFields() {
   const saved = state.form.tool_vendors || {};
   return (state.catalog.tools || []).map((item) => {
     const value = saved[item.method] || "";
-    return `<div class="field field--wide"><label for="tool-${escapeHtml(item.method)}">${escapeHtml(item.zh)} tool_vendors.${escapeHtml(item.method)}。留空沿用类别链。</label><div id="tool-select-${escapeHtml(item.method)}"></div><input id="tool-${escapeHtml(item.method)}" type="hidden" value="${escapeHtml(value)}"></div>`;
+    return `<div class="field field--wide"><label for="tool-${escapeHtml(item.method)}">${escapeHtml(item.zh)} tool_vendors.${escapeHtml(item.method)}。<br class="notice-break">留空沿用类别链。</label><div id="tool-select-${escapeHtml(item.method)}"></div><input id="tool-${escapeHtml(item.method)}" type="hidden" value="${escapeHtml(value)}"></div>`;
   }).join("");
 }
 
@@ -4447,9 +5355,20 @@ function openLayer(html, options = {}) {
   if (start) start.focus();
 }
 
+function confirmBodyHtml(body) {
+  const text = String(body || "");
+  if (text.includes("服务端授权")) {
+    return escapeHtml(text).replace(/[。，]/g, (mark) => `${mark}<br class="notice-break">`).replace(/<br class="notice-break">$/, "");
+  }
+  if (text.includes("是否保留")) {
+    return escapeHtml(text).replace("，", "，<br class=\"notice-break\">").replace("是否保留取决于", "是否保留<br class=\"notice-break\">取决于");
+  }
+  return escapeHtml(text);
+}
+
 function confirmAction(title, body, onYes, trigger) {
   openLayer(`<div class="confirm-dialog-layer" role="presentation"><div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-body">
-    <h2 id="confirm-title">${escapeHtml(title)}</h2><p id="confirm-body">${escapeHtml(body)}</p>
+    <h2 id="confirm-title">${escapeHtml(title)}</h2><p id="confirm-body">${confirmBodyHtml(body)}</p>
     <div class="confirm-dialog-actions"><button class="button button--secondary" type="button" id="confirm-cancel">取消</button><button class="button button--danger" type="button" id="confirm-yes">确认</button></div>
   </div></div>`, {focus: "#confirm-cancel", trigger});
   document.querySelector("#confirm-cancel").addEventListener("click", () => closeLayer());
@@ -4510,9 +5429,24 @@ document.querySelector("#create-analysis").addEventListener("click", () => {
 document.querySelector("#collapse-sidebar").addEventListener("click", () => {
   document.querySelector("#app-shell").classList.toggle("app-shell--collapsed");
 });
-if (window.matchMedia("(max-width: 700px)").matches) {
-  document.querySelector("#app-shell").classList.add("app-shell--collapsed");
-}
+const narrowShell = window.matchMedia("(max-width: 700px)");
+const collapseNarrowShell = () => {
+  const shell = document.querySelector("#app-shell");
+  if (!shell) return;
+  if (narrowShell.matches) {
+    if (!shell.classList.contains("app-shell--collapsed")) {
+      shell.dataset.narrowCollapsed = "1";
+      shell.classList.add("app-shell--collapsed");
+    }
+    return;
+  }
+  if (shell.dataset.narrowCollapsed === "1") {
+    shell.classList.remove("app-shell--collapsed");
+    delete shell.dataset.narrowCollapsed;
+  }
+};
+collapseNarrowShell();
+narrowShell.addEventListener("change", collapseNarrowShell);
 function closeSearch() {
   document.querySelector("#command-search-menu")?.remove();
 }
@@ -4610,8 +5544,7 @@ Promise.all([api("/api/catalog"), api("/api/auth/status"), api("/api/config"), a
 // drawn with the open-source Lightweight Charts library bundled under /vendor/
 // (Apache-2.0). Realtime ticks are a separate batch (V2-KLINE-RT).
 const KLINE_ASSETS = [["stock", "股票"], ["crypto", "加密货币"], ["commodity", "贵金属/商品期货"]];
-const KLINE_TFS = [["1D", "日线"], ["1W", "周线"], ["1M", "月线"]];
-const KLINE_PROVIDER = { okx: "OKX", coinbase: "Coinbase", yahoo: "Yahoo Finance" };
+const KLINE_TFS = [["1D", "日线"], ["1W", "周线"], ["1M", "月线"], ["1H", "小时"], ["5m", "5分钟"]];
 const KLINE_DEFAULT = { stock: "NVDA", crypto: "BTC-USDT", commodity: "XAUUSD" };
 let klineLibPromise = null;
 let klineChart = null;
@@ -4621,6 +5554,7 @@ function removeKlineCharts() {
   for (const c of [klineChart, klineVolChart]) { if (c) { try { c.remove(); } catch (_) { /* detached */ } } }
   klineChart = null;
   klineVolChart = null;
+  klineScaleLock = 0;
   const vol = document.querySelector("#kline-vol");
   if (vol) vol.innerHTML = "";
 }
@@ -4644,16 +5578,679 @@ function klineState() {
   return state.kline;
 }
 
+
+function klineSpan(label) {
+  return label || "区间";
+}
+
+function klineChangeText(close, open, label) {
+  const base = Number(open);
+  const last = Number(close);
+  const span = klineSpan(label);
+  if (!Number.isFinite(base) || base <= 0 || !Number.isFinite(last) || last <= 0) return `—（${span}）`;
+  const change = (last / base - 1) * 100;
+  return `${change >= 0 ? "+" : ""}${change.toFixed(2)}%（${span}）`;
+}
+
+
+function klineUsableBar(bar) {
+  if (!bar) return false;
+  return ["open", "high", "low", "close"].every((key) => {
+    const n = Number(bar[key]);
+    return Number.isFinite(n) && n > 0;
+  });
+}
+
 function klinePrice(n) {
+  if (!Number.isFinite(n) || n <= 0) return "—";
+  return Math.abs(n) >= 1000 ? n.toFixed(1) : Math.abs(n) >= 1 ? n.toFixed(2) : n.toPrecision(4);
+}
+
+function klineOhlcHtml(priceText, fixed, note) {
+  const body = escapeHtml(priceText);
+  if (!fixed) return body;
+  return `${body}  ·  <br class="notice-break">${escapeHtml(note || "源数据不一致，已修正高低价")}`;
+}
+
+
+function watchShownPrice(value) {
+  const n = Number(value);
+  if (value == null || !Number.isFinite(n) || n <= 0) return "—";
+  return escapeHtml(watchPrice(n));
+}
+
+function watchPrice(value) {
+  const n = Number(value);
   if (!Number.isFinite(n)) return "—";
   return Math.abs(n) >= 1000 ? n.toFixed(1) : Math.abs(n) >= 1 ? n.toFixed(2) : n.toPrecision(4);
+}
+
+function watchWhen(value) {
+  const date = new Date(value || "");
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+const WATCH_TRIGGER_LABELS = new Set(["已启动", "只打开向导，未启动", "已检查，未启动", "未检查", "状态未知"]);
+
+function watchTriggerStatus(item) {
+  const label = item && typeof item.status_label === "string" ? item.status_label : "";
+  if (WATCH_TRIGGER_LABELS.has(label)) return label;
+  // A stored label that is not one of these is not evidence of unchecked or checked.
+  if (label) return "状态未知";
+  if (item && item.kind === "explicit") return "只打开向导，未启动";
+  if (item && item.checked === true && item.started === true && item.run_id) return "已启动";
+  if (item && item.checked === true) return "已检查，未启动";
+  if (item && item.checked === false) return "未检查";
+  return "状态未知";
+}
+
+function watchTriggerStatusMissing(item) {
+  if (!item || typeof item !== "object") return true;
+  if (typeof item.status_label === "string" && item.status_label) return false;
+  if (item.kind === "explicit") return false;
+  if (item.checked === true || item.checked === false) return false;
+  return true;
+}
+
+function watchTriggerLabelUnknown(item) {
+  const label = item && item.status_label;
+  return typeof label === "string" && label !== "" && !WATCH_TRIGGER_LABELS.has(label);
+}
+
+function watchVisibleTriggers(data) {
+  if (Array.isArray(data.visible_triggers)) return data.visible_triggers;
+  const rows = data.triggers || [];
+  const recent = rows.slice(-5);
+  const ids = new Set(recent.map((item) => item.id));
+  const sticky = rows.filter((item) => item.checked && item.id && !ids.has(item.id));
+  return sticky.concat(recent).reverse();
+}
+
+function watchTriggerText(item) {
+  const kind = {price: "价格", decision: "决定", explicit: "去分析"}[item.kind] || item.kind || "";
+  if (item.kind === "explicit") return "去分析";
+  const oldValue = item.old_value == null ? item.old_price : item.old_value;
+  const newValue = item.new_value == null ? item.new_price : item.new_value;
+  const shown = item.kind === "price"
+    ? `${watchShownPrice(oldValue)} → ${watchShownPrice(newValue)}`
+    : `${oldValue ?? "—"} → ${newValue ?? "—"}`;
+  return `${kind} ${shown}`;
+}
+
+
+
+
+function compareLabel(run) {
+  const name = run.ticker || run.id || "";
+  const date = run.date || "";
+  const id = run.ticker && run.id && run.id !== run.ticker ? run.id : "";
+  return [name, date, id].filter(Boolean).join(" ");
+}
+
+function compareRatingLine(item) {
+  if (item && item.rating_label) return item.rating_label;
+  if (item && item.source === "structured") return `评级 ${item.rating || "—"}`;
+  if (item && item.rating) return `记录里有 ${item.rating}，但不把它当成结构化评级。`;
+  return "没有结构化评级。";
+}
+
+function compareSummaryLine(item) {
+  if (item && item.source === "structured") return item.summary || "没有摘要。";
+  return "";
+}
+
+function compareCard(item, extra = "") {
+  const quotes = (item.evidence || []).map((quote) => `<li>${punctBreakHtml(quote)}</li>`).join("");
+  const evidence = quotes ? `<ul class="compare-quotes">${quotes}</ul>` : `<p class="form-hint">${punctBreakHtml(item.evidence_note || "没有结构化证据引用，不从正文猜测。")}</p>`;
+  const sections = (item.sections || []).map((section) => `<p><strong>${escapeHtml(section.heading || "")}</strong> ${punctBreakHtml(section.text || "")}</p>`).join("");
+  const title = item.ticker || item.id || "";
+  const meta = [item.date, item.ticker && item.id && item.id !== item.ticker ? item.id : ""].filter(Boolean).join(" · ");
+  const summary = compareSummaryLine(item);
+  const summaryHtml = summary ? `<p>${punctBreakHtml(summary)}</p>` : "";
+  return `<article class="compare-card${extra}"><header><strong>${escapeHtml(title)}</strong><span>${escapeHtml(meta)}</span></header><p>${punctBreakHtml(compareRatingLine(item))}</p>${summaryHtml}${evidence}${sections}</article>`;
+}
+
+async function renderCompare() {
+  pageEl.innerHTML = `${heading("", "对比", "并排看运行的评级和证据。<br class=\"notice-break\">左右是同一次时只显示一张卡片。<br class=\"notice-break\">回放只用左侧保存的提示词版本。", "", {html: true})}
+    <section class="panel">
+      <h2>选择左右运行</h2>
+      <form id="compare-form" class="compare-form">
+        <div id="compare-left" aria-label="左侧运行"></div>
+        <div id="compare-right" aria-label="右侧运行"></div>
+        <button class="button button--primary" type="submit">对比</button>
+      </form>
+      <p class="error-banner" id="compare-error" hidden></p>
+      <p class="form-hint" id="compare-note" hidden></p>
+      <div id="compare-grid" class="compare-grid"></div>
+      <div id="compare-replay"></div>
+    </section>`;
+  const error = document.querySelector("#compare-error");
+  const showError = (message) => { error.hidden = !message; error.textContent = message || ""; };
+  try {
+    const data = await api("/api/compare");
+    const runs = data.runs || [];
+    const items = runs.map((run) => ({value: run.id, zh: compareLabel(run)}));
+    state.compareLeft = runs[0]?.id || "";
+    state.compareRight = (runs[1] || runs[0])?.id || "";
+    if (items.length) {
+      mountSelect(document.querySelector("#compare-left"), items, state.compareLeft, (value) => { state.compareLeft = value; });
+      mountSelect(document.querySelector("#compare-right"), items, state.compareRight, (value) => { state.compareRight = value; });
+    }
+    const paint = async () => {
+      const left = state.compareLeft;
+      const right = state.compareRight;
+      if (!left || !right) return;
+      const pair = await api(`/api/compare?left=${encodeURIComponent(left)}&right=${encodeURIComponent(right)}`);
+      const relation = pair.same_run ? "左右是同一次运行，不是两次不同结果。" : pair.same_ticker ? "这是同一代码的两次运行。" : "";
+      const note = document.querySelector("#compare-note");
+      if (note) {
+        note.hidden = !relation;
+        note.textContent = relation;
+      }
+      const cards = pair.same_run ? compareCard(pair.left, " compare-card--solo") : compareCard(pair.left) + compareCard(pair.right);
+      document.querySelector("#compare-grid").innerHTML = cards;
+      const replay = await api(`/api/compare/replay?id=${encodeURIComponent(left)}`);
+      state.compareReplay = replay;
+      state.compareStep = 0;
+      paintReplay();
+    };
+    document.querySelector("#compare-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try { showError(""); await paint(); } catch (err) { showError(err.message); }
+    });
+    if (runs.length >= 1) await paint();
+    else document.querySelector("#compare-grid").innerHTML = `<p class="form-hint">还没有可对比的运行。</p>`;
+  } catch (err) {
+    showError(err.message);
+  }
+}
+
+function promptTitle(item) {
+  return item.zh || "未登记角色";
+}
+
+function shortVersion(item) {
+  const hash = String(item.sha256 || "");
+  return hash ? hash.slice(0, 12) : "无版本号";
+}
+
+function paintReplay() {
+  const box = document.querySelector("#compare-replay");
+  const replay = state.compareReplay;
+  if (!box || !replay) return;
+  const steps = replay.steps || [];
+  const index = Math.min(state.compareStep || 0, Math.max(steps.length - 1, 0));
+  const step = steps[index];
+  const saved = replay.prompts || [];
+  const matched = step ? saved.filter((item) => item.agent && item.agent === step.agent) : [];
+  const savedMatch = matched.filter((item) => item.saved);
+  const stepNoteHtml = !step ? "" : savedMatch.length
+    ? `这一步使用保存的${escapeHtml(savedMatch.map(promptTitle).join("、"))}<br class="notice-break">提示词。`
+    : punctBreakHtml(matched.length ? "这一步没有保存提示词正文。" : "这一步没有单独保存的提示词版本。");
+  const prompts = saved.map((item) => {
+    const current = Boolean(step && item.saved && item.agent && item.agent === step.agent);
+    const stateText = !item.saved
+      ? "没有保存提示词正文"
+      : item.changed == null
+        ? "当前源码没有这个角色，回放仍用保存版本"
+        : item.changed
+          ? "当前源码已变化，回放仍用保存版本"
+          : "与保存版本一致";
+    return `<li class="compare-prompt${current ? " compare-prompt--current" : ""}"><span class="compare-version">${escapeHtml(promptTitle(item))} · 版本 ${escapeHtml(shortVersion(item))}</span><span>${current ? "这一步使用。" : ""}${punctBreakHtml(stateText)}</span></li>`;
+  }).join("");
+  const stepText = step ? `${step.time || ""} ${step.zh || step.agent} ${step.status_zh || ""}`.trim() : "还没有可回放的步骤。";
+  box.innerHTML = `<h3>回放左侧运行</h3><p class="form-hint">${punctBreakHtml(replay.note || "")}</p><p class="compare-step">${escapeHtml(stepText)}</p><p class="compare-step-note">${stepNoteHtml}</p><p class="inline-actions"><button class="button button--secondary button--small" type="button" id="compare-prev">上一步</button><button class="button button--secondary button--small" type="button" id="compare-next">下一步</button></p><h3 class="compare-saved-title">已保存的提示词版本</h3><ul class="compare-prompts">${prompts || "<li>没有保存的提示词版本。</li>"}</ul>`;
+  document.querySelector("#compare-prev")?.addEventListener("click", () => { state.compareStep = Math.max(0, index - 1); paintReplay(); });
+  document.querySelector("#compare-next")?.addEventListener("click", () => { state.compareStep = Math.min(steps.length - 1, index + 1); paintReplay(); });
+}
+
+function costBillingLabel(role) {
+  if (role.billing === "subscription") return "订阅";
+  if (role.billing === "api") return "API";
+  return "计费方式未知";
+}
+
+function costTierLabel(role) {
+  if (role && role.tier === "deep") return "深模型";
+  if (role && role.tier === "quick") return "快模型";
+  return "模型层级未知，不把它写成快模型";
+}
+
+function costTierHtml(role) {
+  const label = costTierLabel(role);
+  const labelHtml = label.includes("不把它写成") ? narrowBreakHtml(label) : escapeHtml(label);
+  const parts = [
+    `${role.provider || "—"} / ${role.model || "—"}`,
+    costEffortLabel(role),
+    costBillingLabel(role),
+  ];
+  const detail = parts.map((item) => escapeHtml(item)).join("<br class=\"notice-break\"> · ");
+  const gap = label.includes("不把它写成") ? "<br class=\"notice-break\"> " : " ";
+  return `<span class="cost-tier">${labelHtml}${gap}<span class="cost-tier-detail">${detail}</span></span>`;
+}
+
+function costApiLine(text) {
+  const value = text || "";
+  if (!value || value.includes("API") || value.includes("合计") || value.includes("无法核对") || value.includes("价格未知")) return value;
+  return `API ${value}`;
+}
+
+function costEffortLabel(role) {
+  if (role && role.effort_label) return role.effort_label;
+  if (role && role.effort) return role.effort;
+  if (role && role.effort_field) return "强度未设置";
+  return "强度未知，不写成无独立强度";
+}
+
+function costTokens(row) {
+  if (row.prompt_count == null || row.completion_count == null) return row.usage_label || "用量未知，不写成未调用";
+  return `提示 ${row.prompt_count} · 完成 ${row.completion_count}`;
+}
+
+function costMissingLabel(roles) {
+  const missing = (roles || []).filter((role) => role.prompt_count == null);
+  const labels = [...new Set(missing.map((role) => role.usage_label || "用量未知，不写成未调用"))];
+  if (labels.length === 1) return labels[0];
+  return labels.length ? "未列入合计" : "未调用";
+}
+
+async function renderCost() {
+  pageEl.innerHTML = `${heading("", "费用", "按这次运行冻结的角色模型统计。<br class=\"notice-break\">订阅和 API 分开，<br class=\"notice-break\">没有单价不估算。", "", {html: true})}
+    <section class="panel">
+      <h2>运行费用</h2>
+      <p class="form-hint" id="cost-rule"></p>
+      <p class="error-banner" id="cost-error" hidden></p>
+      <div id="cost-list"></div>
+    </section>`;
+  try {
+    state.cost = await api("/api/cost");
+    const rule = document.querySelector("#cost-rule");
+    if (rule) rule.innerHTML = "单价来自本机 cost-prices.json，<br class=\"notice-break\">不是供应商账单。<br class=\"notice-break\">429 记为限流，<br class=\"notice-break\">不是预算超限。<br class=\"notice-break\">没有结构化字段时记为未知。<br class=\"notice-break\">本机调用时限不是供应商预算。";
+    const box = document.querySelector("#cost-list");
+    const cards = (state.cost.runs || []).map((run) => {
+      const roles = run.roles || [];
+      const counted = roles.filter((role) => role.prompt_count != null);
+      const missing = roles.length - counted.length;
+      const tiers = [];
+      for (const role of roles) {
+        if (tiers.some((item) => item.tier === role.tier && item.provider === role.provider && item.model === role.model)) continue;
+        tiers.push(role);
+      }
+      const tierHtml = tiers.map(costTierHtml).join("");
+      const lines = counted.map((role) => `<li><span class="cost-role">${escapeHtml(role.zh || role.role)}</span><span class="cost-tokens">${escapeHtml(costTokens(role))}</span><span>${escapeHtml(role.cost_text || "")}</span></li>`).join("");
+      const rest = missing ? `<li><span class="cost-role">其余 ${missing} 个角色</span><span class="cost-tokens">${escapeHtml(costMissingLabel(roles))}</span></li>` : "";
+      const sub = run.subscription_text ? `<p class="form-hint">${escapeHtml(run.subscription_text)}</p>` : "";
+      const health = run.health_text ? `<p class="cost-health">${punctBreakHtml(run.health_text)}</p>` : "";
+      return `<article class="cost-card"><header><strong>${escapeHtml(run.ticker || run.id || "未命名")}</strong><span>${escapeHtml(run.date || "")}</span></header><div class="cost-tiers">${tierHtml}</div><p class="cost-api">${escapeHtml(costApiLine(run.api_text))}</p>${health}${sub}<p class="form-hint">${punctBreakHtml(run.match_text || "")}</p><ul class="cost-roles">${lines}${rest}</ul></article>`;
+    }).join("");
+    box.innerHTML = cards || `<p class="form-hint">还没有分析记录。</p>`;
+  } catch (error) {
+    const el = document.querySelector("#cost-error");
+    if (el) { el.hidden = false; el.textContent = error.message; }
+  }
+}
+
+function schedError(message) {
+  const el = document.querySelector("#sched-error");
+  if (!el) return;
+  el.hidden = !message;
+  el.textContent = message || "";
+}
+
+async function schedAct(path, body) {
+  try {
+    schedError("");
+    state.schedule = await api(path, { method: "POST", body: JSON.stringify(body) });
+    paintSchedule();
+    return true;
+  } catch (error) {
+    schedError(error.message);
+    return false;
+  }
+}
+
+function knownScheduleMode(mode) {
+  return mode === "off" || mode === "auto" || mode === "observe";
+}
+
+function scheduleModeLabel(data) {
+  const mode = data && data.mode;
+  if (!mode || !knownScheduleMode(mode)) return "状态未知";
+  const label = data && data.mode_label;
+  if (label && label !== mode) return label;
+  if (mode === "off") return "关闭";
+  if (mode === "auto") return "自动";
+  if (mode === "observe") return "观察";
+  return "状态未知";
+}
+
+function scheduleBreakHtml(text) {
+  return escapeHtml(text).replace(/[。，；]/g, (mark) => `${mark}<br class="notice-break">`).replace(/<br class="notice-break">$/, "");
+}
+
+function schedulePageDescription(data) {
+  const mode = data && data.mode;
+  const tail = "去分析只打开向导。提醒先写入，再显示在本页。";
+  if (!mode || !knownScheduleMode(mode)) return "当前规则状态未知，不把它写成观察模式或已启用。到点不会自动启动。";
+  if (mode === "off") return `规则已关闭。到点不会启动分析。${tail}`;
+  if (mode === "auto") return `到点会检查规则。没有运行编号不算已启动。${tail}`;
+  if (mode === "observe") return `到点只记录触发。观察模式不会自动启动分析。${tail}`;
+  return "当前规则状态未知，不把它写成观察模式或已启用。到点不会自动启动。";
+}
+
+function scheduleRuleText(data) {
+  const version = (data && data.rule_version) || "";
+  const mode = data && data.mode;
+  const label = scheduleModeLabel(data);
+  const head = `规则 ${version} · ${label}`.trim();
+  if (!mode || !knownScheduleMode(mode)) return `${head}。当前规则状态未知，不把它写成观察模式或已启用。到点不会自动启动。`;
+  if (mode === "off") return `${head}。规则已关闭，到点不会启动。`;
+  if (mode === "auto") return `${head}。到点会检查规则。没有运行编号不算已启动。`;
+  if (mode === "observe") return `${head}。到点只记录触发，不会自动启动分析。`;
+  return `${head}。当前规则状态未知，不把它写成观察模式或已启用。到点不会自动启动。`;
+}
+
+function reminderStatusLabel(item) {
+  const known = {pending: "待发送", sent: "已发送", dropped: "已丢弃"};
+  if (item && known[item.status]) return known[item.status];
+  return "状态未知";
+}
+
+function reminderRetryText(item) {
+  if (!item || item.status !== "pending" || !item.system_problem) return "";
+  return " 发送失败，仍会重试。";
+}
+
+function scheduleItemKnown(item) {
+  return item && (item.status === "active" || item.status === "paused");
+}
+
+function scheduleShownLabel(item) {
+  if (!scheduleItemKnown(item)) return "状态未知";
+  if (item.status === "paused") return item.status_label && item.status_label !== item.status ? item.status_label : "已暂停";
+  if (!item.status_label) return "状态未知";
+  return item.status_label;
+}
+
+function scheduleMissingLabelNote(item) {
+  if (!item || item.status !== "active" || item.status_label) return "";
+  return "定时状态未知，不把它写成观察中。";
+}
+
+function scheduleDueNote(item) {
+  const related = item && item.latest_due || null;
+  if (!scheduleItemKnown(item) && !related) return "定时状态未知，不把它写成观察中，也不写成可以暂停。";
+  if (item && item.due_note) return item.due_note;
+  const check = item && item.latest_check || null;
+  const when = related && related.slot ? `${String(related.slot).slice(5)} ${related.at || ""}`.trim() : "";
+  if (!related) return item && item.status === "paused" ? "已暂停。暂停期间的到点不会补记。" : "还没有到点触发。";
+  if (!check) return `${when} 已到点，还没有检查结果。`.trim();
+  const runId = String(check.run_id || "").trim();
+  const started = check.started === true && Boolean(runId) && (check.result === "admitted" || check.result === "manual");
+  if (started) return `${when} 已启动`.trim();
+  if (check.result === "would_accept") return `${when} 到点会接受，未启动`.trim();
+  if (check.result === "discarded") return `${when} 规则已变化，未按旧版本启动`.trim();
+  if (check.result === "refused") return `${when} 规则已关闭，未启动`.trim();
+  if (check.result === "manual") return `${when} 去分析只打开向导，未启动`.trim();
+  if (check.result === "admitted") return `${when} 已检查，未启动`.trim();
+  return `${when} 检查结果未知，不把它写成未启动或已启动。`.trim();
+}
+
+function scheduleCardMeta(item) {
+  const when = `每天 ${item.at || ""}`.trim();
+  const label = scheduleShownLabel(item);
+  const asset = String(item && item.asset_label || "").trim();
+  if (!asset) return `资产类型未知，不把它写成股票 · ${when} · ${label}`;
+  return [asset, when, label].filter(Boolean).join(" · ");
+}
+
+function paintSchedule() {
+  const list = document.querySelector("#sched-list");
+  const reminders = document.querySelector("#sched-reminders");
+  if (!list || !reminders) return;
+  const data = state.schedule || { schedules: [], reminders: [], checks: [], rule_version: "" };
+  const rule = document.querySelector("#sched-rule");
+  if (rule) rule.innerHTML = scheduleBreakHtml(scheduleRuleText(data));
+  const description = document.querySelector("#page .page-description");
+  if (description) {
+    description.id = "sched-mode-note";
+    description.innerHTML = scheduleBreakHtml(schedulePageDescription(data));
+  }
+  const cards = (data.schedules || []).map((item) => {
+    const note = [scheduleDueNote(item), scheduleMissingLabelNote(item)].filter(Boolean).join(" ");
+    const known = scheduleItemKnown(item);
+    const pause = item.status === "paused" ? "继续" : "暂停";
+    const path = item.status === "paused" ? "/api/schedule/resume" : "/api/schedule/pause";
+    const pauseButton = known ? `<button class="button button--secondary button--small" type="button" data-sched-pause="${escapeHtml(item.id)}" data-sched-path="${path}">${pause}</button>` : "";
+    const meta = scheduleCardMeta(item);
+    const metaHtml = meta.startsWith("资产类型未知") ? narrowBreakHtml(meta) : escapeHtml(meta);
+    return `<article class="schedule-card"><div><strong class="schedule-symbol">${escapeHtml(item.symbol)}</strong><span class="cell-secondary">${metaHtml}</span><span class="cell-secondary">${scheduleBreakHtml(note)}</span></div><div class="schedule-actions">${pauseButton}<button class="button button--secondary button--small" type="button" data-sched-manual="${escapeHtml(item.id)}" data-sched-symbol="${escapeHtml(item.symbol)}">去分析</button><button class="button button--secondary button--small" type="button" data-sched-remove="${escapeHtml(item.id)}">移除</button></div></article>`;
+  }).join("");
+  list.innerHTML = cards || `<p class="form-hint">还没有定时。</p>`;
+  const rows = (data.reminders || []).map((item) => {
+    const body = `${item.body || ""}${reminderRetryText(item)}`;
+    return `<li><span class="schedule-reminder-main">${scheduleBreakHtml(body)}</span><span class="status-badge status-badge--muted">${escapeHtml(reminderStatusLabel(item))}</span></li>`;
+  }).join("");
+  reminders.innerHTML = `<ul class="schedule-reminders">${rows || "<li>还没有提醒。</li>"}</ul>`;
+  list.querySelectorAll("[data-sched-pause]").forEach((button) => button.addEventListener("click", () => schedAct(button.dataset.schedPath, { id: button.dataset.schedPause })));
+  list.querySelectorAll("[data-sched-remove]").forEach((button) => button.addEventListener("click", () => schedAct("/api/schedule/remove", { id: button.dataset.schedRemove })));
+  list.querySelectorAll("[data-sched-manual]").forEach((button) => button.addEventListener("click", async () => {
+    const symbol = button.dataset.schedSymbol;
+    try {
+      schedError("");
+      await api("/api/schedule/manual", { method: "POST", body: JSON.stringify({ id: button.dataset.schedManual }) });
+    } catch (error) {
+      schedError(error.message);
+      return;
+    }
+    state.form.ticker = symbol;
+    state.form.asset_type = "";
+    if (!state.frameworks) await loadFrameworks();
+    showPage("analyze", { framework: "tradingagents" });
+  }));
+}
+
+async function renderSchedule() {
+  pageEl.innerHTML = `${heading("", "定时", punctBreakHtml("到点只记录触发。观察模式不会自动启动分析。去分析只打开向导。提醒先写入，再显示在本页。"), "", {html: true})}
+    <section class="panel">
+      <h2>每天定时</h2>
+      <p class="form-hint" id="sched-rule">观察模式不会自动启动分析。</p>
+      <form id="sched-form" class="schedule-form">
+        <label class="visually-hidden" for="sched-symbol">代码</label>
+        <input id="sched-symbol" aria-label="定时代码" placeholder="代码，如 600519 或 BTC-USDT" autocomplete="off">
+        <label class="visually-hidden" for="sched-at">每天时间</label>
+        <input id="sched-at" type="time" value="09:30" aria-label="每天时间">
+        <button class="button button--primary" type="submit">添加</button>
+      </form>
+      <p class="error-banner" id="sched-error" hidden></p>
+      <div id="sched-list"></div>
+    </section>
+    <section class="panel">
+      <h2>提醒</h2>
+      <div id="sched-reminders"></div>
+    </section>`;
+  document.querySelector("#sched-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const input = document.querySelector("#sched-symbol");
+    const at = document.querySelector("#sched-at");
+    const ok = await schedAct("/api/schedule", { symbol: input.value, at: at.value });
+    if (ok && input) input.value = "";
+  });
+  await schedAct("/api/schedule/tick", {});
+}
+
+async function renderWatchlist() {
+  pageEl.innerHTML = `${heading("", "自选", punctBreakHtml("股票、加密货币和贵金属。价格或决定变化只记录触发。观察模式不会自动启动分析。"), "", {html: true})}
+    <section class="panel">
+      <h2>自选列表</h2>
+      <p class="form-hint" id="watch-rule">${punctBreakHtml("打开 K 线不消耗触发。未检查表示还没有规则检查；已检查并不表示已启动。")}</p>
+      <form id="watch-form" class="watch-form">
+        <label class="visually-hidden" for="watch-symbol">自选代码</label>
+        <input id="watch-symbol" aria-label="自选代码" placeholder="代码，如 600519、BTC-USDT 或 XAUUSD" autocomplete="off">
+        <button class="button button--primary" type="submit">加入</button>
+        <button class="button button--secondary" type="button" id="watch-refresh" disabled>刷新价格</button>
+      </form>
+      <p class="error-banner" id="watch-error" hidden></p>
+      <div id="watch-table"></div>
+    </section>`;
+  document.querySelector("#watch-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const input = document.querySelector("#watch-symbol");
+    const ok = await watchAct("/api/watchlist", { symbol: input.value });
+    if (ok && input) input.value = "";
+  });
+  document.querySelector("#watch-refresh").addEventListener("click", refreshWatchPrices);
+  await loadWatchTable();
+}
+
+function watchError(message) {
+  const el = document.querySelector("#watch-error");
+  if (!el) return;
+  el.hidden = !message;
+  el.textContent = message || "";
+}
+
+async function watchAct(path, body) {
+  try {
+    watchError("");
+    state.watchlist = await api(path, { method: "POST", body: JSON.stringify(body) });
+    paintWatchTable();
+    return true;
+  } catch (error) {
+    watchError(error.message);
+    return false;
+  }
+}
+
+async function loadWatchTable() {
+  try {
+    state.watchlist = await api("/api/watchlist");
+    paintWatchTable();
+  } catch (error) {
+    watchError(error.message);
+  } finally {
+    const button = document.querySelector("#watch-refresh");
+    if (button) button.disabled = false;
+  }
+}
+
+function knownWatchMode(mode) {
+  return mode === "auto" || mode === "observe";
+}
+
+function watchModeLabel(data) {
+  const mode = data && data.mode;
+  if (!mode || !knownWatchMode(mode)) return "状态未知";
+  const label = data && data.mode_label;
+  if (label && label !== mode) return label;
+  if (mode === "auto") return "自动";
+  if (mode === "observe") return "观察";
+  return "状态未知";
+}
+
+function watchPageDescription(data) {
+  const mode = data && data.mode;
+  if (!mode || !knownWatchMode(mode)) return "当前规则状态未知，不把它写成观察模式。打开 K 线不消耗触发。";
+  if (mode === "auto") return "价格或决定变化只记录触发。自动模式本页也不调用模型。打开 K 线不消耗触发。";
+  if (mode === "observe") return "价格或决定变化只记录触发。观察模式不会自动启动分析。打开 K 线不消耗触发。";
+  return "当前规则状态未知，不把它写成观察模式。打开 K 线不消耗触发。";
+}
+
+function watchRuleText(data) {
+  const version = (data && data.rule_version) || "";
+  const mode = data && data.mode;
+  const label = watchModeLabel(data);
+  const head = `规则 ${version} · ${label}`.trim();
+  if (!mode || !knownWatchMode(mode)) return `${head}。当前规则状态未知，不把它写成观察模式。未检查并不表示已启动。`;
+  if (mode === "auto") return `${head}。本页不调用模型。未检查并不表示已启动。`;
+  if (mode === "observe") return `${head}。打开 K 线不消耗触发。未检查表示还没有规则检查；已检查并不表示已启动。`;
+  return `${head}。当前规则状态未知，不把它写成观察模式。未检查并不表示已启动。`;
+}
+
+function watchBreakHtml(text) {
+  return escapeHtml(text).replace(/[。；]/g, (mark) => `${mark}<br class="notice-break">`);
+}
+
+function paintWatchTable() {
+  const box = document.querySelector("#watch-table");
+  if (!box) return;
+  const data = state.watchlist || { items: [], triggers: [], rule_version: "" };
+  const rule = document.querySelector("#watch-rule");
+  if (rule) rule.innerHTML = watchBreakHtml(watchRuleText(data));
+  const description = document.querySelector("#page .page-description");
+  if (description) {
+    description.id = "watch-mode-note";
+    description.innerHTML = watchBreakHtml(watchPageDescription(data));
+  }
+  const rows = (data.items || []).map((item) => {
+    const decision = item.last_decision ? `<span class="cell-secondary watch-decision">决定 ${escapeHtml(item.last_decision)}</span>` : "";
+    const stopped = item.enabled === false || item.enabled_label === "已停用";
+    const badge = stopped ? `<span class="status-badge status-badge--muted">${escapeHtml(item.enabled_label || "已停用")}</span>` : "";
+    const asset = knownKlineAsset(item.asset_type) ? item.asset_type : "";
+    const assetAttr = asset ? ` data-watch-asset="${escapeHtml(asset)}"` : "";
+    return `<tr><td><strong class="watch-symbol">${escapeHtml(item.symbol)}</strong><span class="cell-secondary">${escapeHtml(item.asset_label || "")}</span>${badge}</td><td><span class="watch-price">${watchShownPrice(item.last_price)}</span>${decision}</td><td><div class="watch-actions"><button class="button button--secondary button--small" type="button" data-watch-kline="${escapeHtml(item.symbol)}"${assetAttr}>打开K线</button><button class="button button--secondary button--small" type="button" data-watch-analyze="${escapeHtml(item.symbol)}">去分析</button><button class="button button--secondary button--small" type="button" data-watch-remove="${escapeHtml(item.symbol)}">移除</button></div></td></tr>`;
+  }).join("");
+  const visibleTriggers = watchVisibleTriggers(data);
+  const missingTrigger = visibleTriggers.some((item) => watchTriggerStatusMissing(item) || watchTriggerLabelUnknown(item))
+    ? `<p class="notice" id="watch-trigger-note">${narrowBreakHtml("触发状态未知，不把它写成未检查。")}</p>`
+    : "";
+  const triggers = visibleTriggers.map((item) => `<li><span class="watch-trigger-main"><span class="watch-symbol">${escapeHtml(item.symbol)}</span> <span class="watch-change">${escapeHtml(watchTriggerText(item))}</span> <span class="watch-when">${escapeHtml(watchWhen(item.created_at))}</span></span><span class="status-badge status-badge--muted">${escapeHtml(watchTriggerStatus(item))}</span></li>`).join("");
+  box.innerHTML = `<div class="watch-table"><table class="data-table"><thead><tr><th>代码</th><th>最近价格</th><th>操作</th></tr></thead><tbody>${rows || `<tr><td colspan="3">还没有自选。</td></tr>`}</tbody></table></div>${missingTrigger}<h3>触发</h3><ul class="watch-triggers">${triggers || "<li>还没有触发。</li>"}</ul>`;
+  box.querySelectorAll("[data-watch-remove]").forEach((button) => button.addEventListener("click", () => watchAct("/api/watchlist/remove", { symbol: button.dataset.watchRemove })));
+  box.querySelectorAll("[data-watch-kline]").forEach((button) => button.addEventListener("click", async () => {
+    const symbol = button.dataset.watchKline;
+    if (!await watchAct("/api/watchlist/kline", { symbol })) return;
+    if (!state.kline) state.kline = { symbol, asset: "", tf: "1D" };
+    state.kline.symbol = symbol;
+    state.kline.asset = knownKlineAsset(button.dataset.watchAsset) ? button.dataset.watchAsset : "";
+    showPage("kline");
+  }));
+  box.querySelectorAll("[data-watch-analyze]").forEach((button) => button.addEventListener("click", async () => {
+    const symbol = button.dataset.watchAnalyze;
+    if (!await watchAct("/api/watchlist/analyze", { symbol })) return;
+    state.form.ticker = symbol;
+    state.form.asset_type = "";
+    if (!state.frameworks) await loadFrameworks();
+    showPage("analyze", { framework: "tradingagents" });
+  }));
+}
+
+async function refreshWatchPrices() {
+  const button = document.querySelector("#watch-refresh");
+  if (!state.watchlist) await loadWatchTable();
+  const items = (state.watchlist && state.watchlist.items) || [];
+  if (!items.length) {
+    watchError("还没有可刷新的自选。");
+    return;
+  }
+  if (button) button.disabled = true;
+  const quotes = {};
+  const errors = [];
+  try {
+    for (const item of items) {
+      try {
+        const latest = await api(`/api/kline/latest?symbol=${encodeURIComponent(item.symbol)}`);
+        const close = latest.bar && latest.bar.close;
+        if (Number.isFinite(close) && close > 0) quotes[item.symbol] = close;
+        else errors.push(`${item.symbol} 没有最新价。`);
+      } catch (error) {
+        errors.push(`${item.symbol}：${error.message}`);
+      }
+    }
+    await watchAct("/api/watchlist/refresh", { quotes });
+    if (errors.length) watchError(errors.join(" "));
+  } finally {
+    if (button) button.disabled = false;
+  }
 }
 
 function renderKline() {
   const ks = klineState();
   const seg = (id, items, current, attr) => `<div class="seg" id="${id}" role="group">${items.map(([value, label]) => `<button type="button" class="seg-item${value === current ? " on" : ""}" data-${attr}="${value}">${escapeHtml(label)}</button>`).join("")}</div>`;
   pageEl.innerHTML = `
-    ${heading("", "K 线行情", "近 1 年行情走势。股票与贵金属/商品期货沿用分析所用的数据源；加密货币优先 OKX，其次 Coinbase。")}
+    ${heading("", "K 线行情", "日线请求近 1 年，<br class=\"notice-break\">短周期更短，<br class=\"notice-break\">图上区间以实际K线为准。<br class=\"notice-break\">股票与贵金属沿用分析数据源；<br class=\"notice-break\">加密货币优先 OKX，<br class=\"notice-break\">其次 Coinbase。<br class=\"notice-break\">北交所仅新浪。", "", {html: true})}
     <section class="panel kline-bar">
       <form id="kline-form" class="kline-controls" autocomplete="off">
         <span class="kline-search"><input id="kline-symbol" value="${escapeHtml(ks.symbol)}" aria-label="标的代码或名称" placeholder="代码或名称，如 600519、贵州茅台、AAPL" role="combobox" aria-autocomplete="list" aria-controls="kline-suggest" aria-expanded="false"><ul class="kline-suggest" id="kline-suggest" role="listbox" hidden></ul></span>
@@ -4667,7 +6264,7 @@ function renderKline() {
       <div class="kline-head"><b id="kline-name">${escapeHtml(ks.symbol)}</b><span class="kline-tag kline-tag--future" id="kline-future" hidden></span><span class="kline-price" id="kline-price">—</span><span class="kline-change" id="kline-change"></span></div>
       <div class="kline-ohlc" id="kline-ohlc"></div>
       <div class="kline-chart-wrap"><div class="kline-chart" id="kline-chart"></div><div class="kline-vol" id="kline-vol"></div><p class="kline-status" id="kline-status" role="status">正在加载…</p><div class="kline-stale" id="kline-stale" role="status" hidden></div></div>
-      <div class="kline-foot"><span id="kline-note">展示近 1 年日线。</span><span class="kline-adjnote" id="kline-adjnote" hidden></span><span class="kline-live" id="kline-live" hidden></span><span>图表：Lightweight Charts（开源组件，<a href="/vendor/lightweight-charts.LICENSE.txt" target="_blank" rel="noopener">Apache-2.0 许可证</a>）</span></div>
+      <div class="kline-foot"><span id="kline-note">等待行情。</span><span class="kline-adjnote" id="kline-adjnote" hidden></span><span class="kline-live" id="kline-live" hidden></span><span>图表：Lightweight Charts（开源组件，<br class="notice-break"><a href="/vendor/lightweight-charts.LICENSE.txt" target="_blank" rel="noopener">Apache-2.0 许可证</a>）</span></div>
     </section>`;
   const form = document.querySelector("#kline-form");
   const input = document.querySelector("#kline-symbol");
@@ -4729,7 +6326,7 @@ async function loadKline() {
     ks.loading = null;
     clearKlineChart(ks.symbol);
     const box = document.querySelector("#kline-status");
-    if (box) { box.hidden = false; box.textContent = klineErrorText(error.message); box.classList.add("error-banner"); }
+    if (box) { box.hidden = false; box.innerHTML = klineStatusHtml(klineErrorText(error.message)); box.classList.add("error-banner"); }
     return;
   }
   if (state.page !== "kline" || ks.token !== token) return;
@@ -4742,10 +6339,26 @@ async function loadKline() {
 }
 
 // Never show raw vendor exception class names (e.g. VendorUnavailableError).
+function klineStatusHtml(text) {
+  let html = punctBreakHtml(text);
+  // The unsupported-code sentence is one line after punctuation breaks. At 326px
+  // the clause before 北交所 still splits 沪市 and 深市, so break before those words.
+  html = html.replace("沪市", "<br class=\"notice-break\">沪市");
+  html = html.replace("深市", "<br class=\"notice-break\">深市");
+  html = html.replace("北交所", "<br class=\"notice-break\">北交所");
+  html = html.replace("已切换为", "<br class=\"notice-break\">已切换为");
+  html = html.replace("（代码格式正确", "<br class=\"notice-break\">（代码格式正确");
+  return html.replace(/^(?:<br class="notice-break">)+/, "");
+}
+
 function klineErrorText(message) {
-  const text = String(message || "");
-  if (/[A-Z][a-z]+(Error|Exception)\b/.test(text)) return "行情源暂时连不上，请稍后再试。";
-  return text || "没有拿到行情数据。";
+  const text = String(message || "").trim();
+  if (!text) return "没有拿到行情数据。";
+  // Vendor class names and browser network failures stay in Chinese.
+  if (/[A-Z][a-z]+(Error|Exception)\b/.test(text) || /failed to fetch|networkerror|load failed|network request failed/i.test(text)) {
+    return "行情源暂时连不上，请稍后再试。";
+  }
+  return text;
 }
 
 // V2-UI-FIX-1: when the input no longer matches the chart that is drawn, keep
@@ -4768,9 +6381,11 @@ function clearKlineChart(symbol) {
   set("#kline-change", "");
   set("#kline-ohlc", "");
   const future = document.querySelector("#kline-future");
-  if (future) future.hidden = true;
+  if (future) { future.hidden = true; future.textContent = ""; }
   const live = document.querySelector("#kline-live");
-  if (live) live.hidden = true;
+  if (live) { live.hidden = true; live.textContent = ""; }
+  const note = document.querySelector("#kline-note");
+  if (note) note.textContent = "没有拿到行情。";
   markKlineStale();
 }
 
@@ -4785,8 +6400,9 @@ function markKlineStale() {
   const stale = loading || (Boolean(ks.loaded) && typed.toUpperCase() !== String(ks.loaded).toUpperCase());
   card.classList.toggle("kline-card--stale", stale);
   badge.hidden = !stale;
-  badge.textContent = loading ? `加载中：${ks.loading}…（下图仍是 ${ks.loaded}，未更新）`
+  const staleText = loading ? `加载中：${ks.loading}…（下图仍是 ${ks.loaded}，未更新）`
     : stale ? `未更新：当前仍是 ${ks.loaded}，点「查询」或按回车查看 ${typed || "新代码"}` : "";
+  badge.innerHTML = staleText ? klineStaleHtml(staleText) : "";
   if (stale) stopKlineRt(); else if (ks.loaded && klineRt.candles && !klineRt.timer) startKlineRt();
 }
 
@@ -4817,7 +6433,7 @@ function queueKlineSuggest(value) {
     if (!list) return;
     const hint = !results.length && data && data.hint ? data.hint : "";
     list.innerHTML = results.map((r) => `<li role="option"><button type="button" data-symbol="${escapeHtml(r.symbol)}"><b>${escapeHtml(r.symbol)}</b><span>${escapeHtml(r.name || "")}</span><small>${escapeHtml(r.exchange || "")}</small></button></li>`).join("")
-      + (hint ? `<li class="kline-suggest-hint" id="kline-suggest-hint" role="status">${escapeHtml(hint)}</li>` : "");
+      + (hint ? `<li class="kline-suggest-hint" id="kline-suggest-hint" role="status">${punctBreakHtml(hint)}</li>` : "");
     const open = Boolean(results.length || hint);
     list.hidden = !open;
     document.querySelector("#kline-symbol").setAttribute("aria-expanded", String(Boolean(results.length)));
@@ -4825,41 +6441,219 @@ function queueKlineSuggest(value) {
 }
 
 // Same right-scale width on price and volume panes so crosshair verticals line up.
+// minimumWidth is only a floor: a wide last-price label (BTC) grows the price
+// scale past 72 while the volume scale stays at 72, so the last volume bar
+// sticks out past the candle. After layout, both floors move to the wider one.
 const KLINE_SCALE_W = 72;
+let klineScaleLock = 0;
+
+function klineRightScale(chart) {
+  if (!chart || typeof chart.priceScale !== "function") return null;
+  try {
+    const scale = chart.priceScale("right");
+    if (!scale || typeof scale.width !== "function" || typeof scale.applyOptions !== "function") return null;
+    return scale;
+  } catch (_) {
+    return null;
+  }
+}
+
+function syncKlineScales() {
+  const price = klineRightScale(klineChart);
+  const vol = klineRightScale(klineVolChart);
+  if (!price || !vol) return;
+  const priceW = Math.ceil(Number(price.width()) || 0);
+  const volW = Math.ceil(Number(vol.width()) || 0);
+  if (priceW < 1 || volW < 1) return;
+  const width = Math.max(KLINE_SCALE_W, priceW, volW);
+  if (priceW === volW) {
+    klineScaleLock = width;
+    return;
+  }
+  if (klineScaleLock === width) return;
+  klineScaleLock = width;
+  price.applyOptions({ minimumWidth: width });
+  vol.applyOptions({ minimumWidth: width });
+  const timeScale = klineChart.timeScale && klineChart.timeScale();
+  const range = timeScale && timeScale.getVisibleLogicalRange && timeScale.getVisibleLogicalRange();
+  const volScale = klineVolChart.timeScale && klineVolChart.timeScale();
+  if (range && volScale && volScale.setVisibleLogicalRange) {
+    try { volScale.setVisibleLogicalRange(range); } catch (_) { /* range not ready */ }
+  }
+}
+
+function scheduleKlineScaleSync() {
+  syncKlineScales();
+  // A second pass after layout. Do not use setTimeout: the page's poll tests
+  // replace it and would treat the retry as a quote timer.
+  if (typeof window.requestAnimationFrame !== "function") return;
+  window.requestAnimationFrame(() => window.requestAnimationFrame(syncKlineScales));
+}
+
+function klineFreshnessText(data) {
+  const note = data && typeof data.freshness_note === "string" ? data.freshness_note.trim() : "";
+  return note;
+}
+
+function paintKlineNote(text) {
+  const note = document.querySelector("#kline-note");
+  if (note) note.innerHTML = punctBreakHtml(text);
+}
+
+function appendKlineNote(extra) {
+  const note = document.querySelector("#kline-note");
+  if (!note || !extra || note.textContent.includes(extra)) return;
+  paintKlineNote(`${note.textContent} ${extra}`.trim());
+}
+
+function appendKlineFreshness(data) {
+  const extra = klineFreshnessText(data);
+  appendKlineNote(extra);
+  return extra;
+}
+
+function klineStaleNote(data) {
+  if (data && data.stale_bar === true) return "最新一根已经过去一段时间，不据此判断是否开市。";
+  return "";
+}
+
+function klineDelayedFlag(data) {
+  if (data && data.delayed != null) return Boolean(data.delayed);
+  return klineRt.delayed;
+}
+
+function knownKlineAsset(asset) {
+  return asset === "stock" || asset === "crypto" || asset === "commodity";
+}
+
+function klineLiveText(data, extra) {
+  const fresh = klineFreshnessText(data);
+  const delayed = klineDelayedFlag(data);
+  const provider = (data && data.provider) || klineRt.provider || "";
+  const asset = (data && data.asset_type) || klineRt.asset || "";
+  // A missing asset is not a delayed stock, even when a later tick says delayed.
+  let pace = !knownKlineAsset(asset)
+    ? "延时未知，不把它写成股票。"
+    : delayed == null
+      ? "延时未知，不写成实时"
+      : !delayed
+        ? "实时 · 约 5 秒更新"
+        : provider === "yahoo" && asset === "crypto"
+          ? "备用行情，不是逐笔实时"
+          : "知情 · 约 60 秒更新";
+  if (fresh) pace = pace.replace("更新", "询问").replace("实时 · ", "");
+  const body = fresh ? `${pace} · ${fresh}` : pace;
+  return [extra || klineStaleNote(data), body].filter(Boolean).join(" ").trim();
+}
+
+function klineTfLabel(tf) {
+  return (KLINE_TFS.find(([value]) => value === tf) || [])[1] || "";
+}
+
+function klineSourceLabel(data, tfLabel) {
+  const row = data || {};
+  const symbol = row.provider_symbol || "—";
+  if (!tfLabel) {
+    if (row.asset_type === "crypto") return "数据源：加密货币。周期未知，不把它写成日线。";
+    if (row.asset_type === "commodity") return "数据源：期货。周期未知，不把它写成日线。";
+    if (row.asset_type === "stock") return "数据源：股票。周期未知，不把它写成日线。";
+    return "资产类型未知，不把它写成股票。周期未知，不把它写成日线。";
+  }
+  const period = tfLabel;
+  if (row.asset_type === "crypto") {
+    const vendor = row.provider === "okx"
+      ? "OKX（主），其次 Coinbase"
+      : row.provider === "coinbase"
+        ? "Coinbase（备用）"
+        : "其他行情源（备用）";
+    return `数据源：加密货币${period} ${vendor}`;
+  }
+  if (row.asset_type === "commodity") return `数据源：期货${period} ${symbol}`;
+  if (row.asset_type === "stock" && row.provider === "sina") {
+    return `数据源：${row.source_label || "新浪（非官方，不复权）"}`;
+  }
+  if (row.asset_type === "stock") return `数据源：股票${period} ${symbol}`;
+  return "资产类型未知，不把它写成股票。";
+}
+
+function klineTickLabel(time, tf) {
+  const stamp = typeof time === "number" ? time : Date.UTC(time.year, (time.month || 1) - 1, time.day || 1) / 1000;
+  const date = new Date(Number(stamp) * 1000);
+  if (Number.isNaN(date.getTime())) return "";
+  const parts = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    hour: "2-digit",
+    minute: "2-digit",
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const part = (type) => (parts.find((item) => item.type === type) || {}).value || "";
+  if (tf === "5m" || tf === "1H") return `${part("hour")}:${part("minute")}`;
+  if (tf === "1M") return `${part("year")}-${part("month")}`;
+  return `${part("month")}-${part("day")}`;
+}
 
 function drawKline(lib, data) {
   const ks = klineState();
   ks.asset = data.asset_type;
   document.querySelectorAll("#kline-asset [data-asset]").forEach((b) => b.classList.toggle("on", b.dataset.asset === data.asset_type));
-  const provider = KLINE_PROVIDER[data.provider] || data.provider;
-  const source = data.asset_type === "crypto"
-    ? `数据源：${provider}${data.provider === "okx" ? "（主） · Coinbase（备用）" : "（备用）"}`
-    : data.asset_type === "commodity" ? `数据源：期货行情 ${data.provider_symbol}`
-    : data.provider === "sina" ? `数据源：${data.source_label || "新浪（非官方，不复权）"}` : `数据源：股票日线 ${data.provider_symbol}`;
+  const tfLabel = klineTfLabel(data.tf);
+  document.querySelectorAll("#kline-tf [data-tf]").forEach((b) => b.classList.toggle("on", Boolean(tfLabel) && b.dataset.tf === data.tf));
+  const source = klineSourceLabel(data, tfLabel);
   const adjNote = document.querySelector("#kline-adjnote");
   adjNote.hidden = !data.fallback;
   adjNote.textContent = data.fallback ? "价格未复权，可能与复权价不一致" : "";
-  document.querySelector("#kline-source").textContent = source;
+  document.querySelector("#kline-source").innerHTML = narrowBreakHtml(source);
   document.querySelector("#kline-name").textContent = data.canonical && data.canonical !== data.symbol ? `${data.symbol} · ${data.canonical}` : data.symbol;
   const future = document.querySelector("#kline-future");
   future.hidden = !data.is_future;
   future.textContent = data.is_future ? `期货标注 ${data.canonical} · 近月合约，换月可能跳空` : "";
-  const tfLabel = (KLINE_TFS.find(([v]) => v === data.tf) || [, "日线"])[1];
-  document.querySelector("#kline-note").textContent = `${tfLabel}，展示近 1 年；${data.asset_type === "crypto" ? "最后一根约每 5 秒刷新。" : "知情：最新价约每 60 秒刷新一次，为延时行情，不是逐笔实时。"}`;
-  const bars = data.bars || [];
+  const intraday = data.tf === "1H" || data.tf === "5m";
+  const shown = data.history_label ? `实际${data.history_label}` : "展示区间";
+  const cryptoCadence = data.delayed == null
+    ? "延时未知，不写成实时。"
+    : data.delayed
+      ? "备用行情，不是逐笔实时。"
+      : "最后一根约每 5 秒刷新。";
+  const stockCadence = data.asset_type === "stock" || data.asset_type === "commodity"
+    ? "知情：最新价约每 60 秒刷新一次，为延时行情，不是逐笔实时。"
+    : "资产类型未知，不把它写成股票，也不写成延时行情。";
+  const cadence = data.asset_type === "crypto" ? cryptoCadence : stockCadence;
+  const sentence = tfLabel
+    ? (data.span_note || `${tfLabel}，${shown}；${cadence}`)
+    : `周期未知，不把它写成日线。${shown}。不按日线刷新。`;
+  paintKlineNote(sentence);
+  if (data.asset_type === "crypto" && data.delayed) appendKlineNote("备用行情，不是逐笔实时。");
+  if (intraday && data.session_note) appendKlineNote(data.session_note);
+  klineRt.freshness = appendKlineFreshness(data);
+  const staleNote = klineStaleNote(data);
+  if (staleNote && !document.querySelector("#kline-note").textContent.includes(staleNote)) {
+    appendKlineNote(staleNote);
+  }
+  const rawBars = data.bars || [];
+  const bars = rawBars.filter(klineUsableBar);
+  const omitted = rawBars.length - bars.length;
   const host = document.querySelector("#kline-chart");
   removeKlineCharts();
   host.innerHTML = "";
   if (!bars.length) {
-    host.innerHTML = `<p class="kline-status">没有数据。</p>`;
+    host.innerHTML = `<p class="kline-status">${omitted ? "没有可绘制的正价格。" : "没有数据。"}</p>`;
     return;
   }
+  if (omitted || data.unpriced_note) {
+    const note = document.querySelector("#kline-note");
+    const extra = data.unpriced_note || `有${omitted}根K线没有正价格，未画入图表。`;
+    if (note && !note.textContent.includes("没有正价格")) appendKlineNote(extra);
+  }
+  const tickMarkFormatter = (time) => klineTickLabel(time, data.tf);
   const chart = lib.createChart(host, {
     autoSize: true,
     layout: { background: { color: "#ffffff" }, textColor: "#5f6368", attributionLogo: false },
     grid: { vertLines: { color: "#f0f3fa" }, horzLines: { color: "#f0f3fa" } },
     rightPriceScale: { borderColor: "#e0e0e0", minimumWidth: KLINE_SCALE_W },
-    timeScale: { borderColor: "#e0e0e0", visible: false },
+    timeScale: { borderColor: "#e0e0e0", visible: false, tickMarkFormatter },
     localization: { locale: "zh-CN" },
   });
   klineChart = chart;
@@ -4871,7 +6665,7 @@ function drawKline(lib, data) {
     layout: { background: { color: "#ffffff" }, textColor: "#5f6368", attributionLogo: false },
     grid: { vertLines: { color: "#f0f3fa" }, horzLines: { visible: false } },
     rightPriceScale: { borderColor: "#e0e0e0", minimumWidth: KLINE_SCALE_W, scaleMargins: { top: 0.1, bottom: 0 } },
-    timeScale: { borderColor: "#e0e0e0" },
+    timeScale: { borderColor: "#e0e0e0", tickMarkFormatter },
     localization: { locale: "zh-CN" },
   });
   klineVolChart = volChart;
@@ -4905,11 +6699,10 @@ function drawKline(lib, data) {
   volChart.timeScale().fitContent();
   chart.timeScale().fitContent();
   const last = bars[bars.length - 1];
-  const change = (last.close / bars[0].open - 1) * 100;
   document.querySelector("#kline-price").textContent = klinePrice(last.close);
   const changeEl = document.querySelector("#kline-change");
-  changeEl.textContent = `${change >= 0 ? "+" : ""}${change.toFixed(2)}%（1Y）`;
-  changeEl.classList.toggle("kline-change--down", change < 0);
+  changeEl.textContent = klineChangeText(last.close, bars[0].open, data.history_label);
+  changeEl.classList.toggle("kline-change--down", Number(last.close) < Number(bars[0].open));
   const ohlcEl = document.querySelector("#kline-ohlc");
   // W187: a bar whose source open/close fell outside its high/low was corrected
   // on the server; say so on that bar instead of showing it silently.
@@ -4922,30 +6715,44 @@ function drawKline(lib, data) {
     const text = `开 ${klinePrice(b.open)}  高 ${klinePrice(b.high)}  低 ${klinePrice(b.low)}  收 ${klinePrice(b.close)}`;
     const fixed = b.ohlc_fixed || isFixed(b.time);
     ohlcEl.classList.toggle("kline-ohlc--fixed", fixed);
-    return fixed ? `${text}  ·  ${fixedNote}` : text;
+    return klineOhlcHtml(text, fixed, fixed ? fixedNote : "");
   };
-  ohlcEl.textContent = ohlc(last);
+  ohlcEl.innerHTML = ohlc(last);
   chart.subscribeCrosshairMove((param) => {
     const point = param && param.seriesData && param.seriesData.get(candles);
     const newest = klineRt.bars[klineRt.bars.length - 1] || last;
-    ohlcEl.textContent = point ? ohlc({ ...point, time: param.time }) : ohlc(newest);
+    ohlcEl.innerHTML = point ? ohlc({ ...point, time: param.time }) : ohlc(newest);
   });
   klineRt.candles = candles;
   klineRt.volume = volume;
   klineRt.bars = bars.map((b) => ({ ...b }));
+  // Keep the source daily grain as well as the displayed timeframe.  Weekly
+  // and monthly volume is derived from this array so a forming day's volume
+  // replaces its previous value on the next poll instead of being added again.
+  // The fallback keeps older API fixtures usable; production responses carry
+  // `daily_bars` for every timeframe.
+  klineRt.dailyBars = (data.daily_bars || (data.tf === "1D" ? bars : [])).map((b) => ({ ...b }));
+  if (!klineRt.dailyBars.length) klineRt.dailyBars = bars.map((b) => ({ ...b }));
   klineRt.symbol = data.symbol;
-  klineRt.tf = data.tf;
+  klineRt.tf = klineTfLabel(data.tf) ? data.tf : "";
   klineRt.firstOpen = bars[0].open;
+  klineRt.historyLabel = data.history_label || "";
   klineRt.pollMs = (data.asset_type === "crypto" ? 5 : 60) * 1000;
-  klineRt.delayed = data.asset_type !== "crypto";
+  klineRt.asset = data.asset_type || "";
+  klineRt.provider = data.provider || "";
+  // A missing delay is not realtime. Only a known stock or metal stays delayed.
+  if (data.delayed != null) klineRt.delayed = Boolean(data.delayed);
+  else if (data.asset_type === "stock" || data.asset_type === "commodity") klineRt.delayed = true;
+  else klineRt.delayed = null;
   startKlineRt();
+  scheduleKlineScaleSync();
 }
 
 // V2-KLINE-RT: while the K 线行情 page is open and the tab is visible, poll
 // /api/kline/latest (crypto ~5 s via OKX public REST, stocks/metals ~60 s
 // delayed Yahoo quotes) and fold the newest bar into the last candle. A hidden
 // tab stops polling; becoming visible again polls at once and resumes.
-const klineRt = { timer: null, bars: [], candles: null, volume: null, pollMs: 60000, delayed: true, inFlight: false, seq: 0 };
+const klineRt = { timer: null, bars: [], dailyBars: [], candles: null, volume: null, pollMs: 60000, delayed: null, inFlight: false, seq: 0, freshness: "" };
 
 function klineRtActive() {
   return state.page === "kline" && document.visibilityState !== "hidden" && Boolean(klineRt.candles);
@@ -4956,11 +6763,15 @@ function stopKlineRt() {
   klineRt.timer = null;
 }
 
+function klineStaleHtml(text) {
+  return punctBreakHtml(text).replace("（下图", "<br class=\"notice-break\">（下图");
+}
+
 function setKlineLive(text, paused = false) {
   const el = document.querySelector("#kline-live");
   if (!el) return;
   el.hidden = false;
-  el.textContent = text;
+  el.innerHTML = punctBreakHtml(text);
   el.classList.toggle("kline-live--paused", paused);
 }
 
@@ -4971,7 +6782,11 @@ function startKlineRt() {
     if (state.page === "kline" && klineRt.candles) setKlineLive("已暂停（页面不可见）", true);
     return;
   }
-  setKlineLive(klineRt.delayed ? "知情 · 约 60 秒更新" : "实时 · 约 5 秒更新");
+  if (!klineTfLabel(klineRt.tf)) {
+    setKlineLive("周期未知，不把它写成日线。", true);
+    return;
+  }
+  setKlineLive(klineLiveText({freshness_note: klineRt.freshness || ""}));
   scheduleKlineRt(0);
 }
 
@@ -4984,15 +6799,44 @@ function scheduleKlineRt(delay) {
 async function tickKlineRt(seq) {
   if (seq !== klineRt.seq) return;
   if (!klineRtActive()) { stopKlineRt(); return; }
+  // A visibility event can schedule a second immediate tick while the first
+  // request is still in flight.  Do not overlap requests; the next timer will
+  // use the same sequence and the daily-bar merge below is idempotent anyway.
+  if (klineRt.inFlight) {
+    scheduleKlineRt(klineRt.pollMs);
+    return;
+  }
+  if (!klineTfLabel(klineRt.tf)) {
+    setKlineLive("周期未知，不把它写成日线。", true);
+    return;
+  }
+  klineRt.inFlight = true;
   try {
-    const data = await api(`/api/kline/latest?symbol=${encodeURIComponent(klineRt.symbol)}`);
+    const data = await api(`/api/kline/latest?symbol=${encodeURIComponent(klineRt.symbol)}&tf=${encodeURIComponent(klineRt.tf)}`);
     if (seq !== klineRt.seq || !klineRtActive()) return;
-    applyKlineBar(data.bar);
+    const applied = applyKlineBar(data.bar);
+    if (data.unpriced_note) {
+      const note = document.querySelector("#kline-note");
+      if (note && !note.textContent.includes(data.unpriced_note)) appendKlineNote(data.unpriced_note);
+    }
+    if (applied && applied.gap) await refreshKlineHistory(seq, data.bar);
     if (data.poll_seconds) klineRt.pollMs = data.poll_seconds * 1000;
-    setKlineLive(data.delayed ? "知情 · 约 60 秒更新" : "实时 · 约 5 秒更新");
+    if (data.delayed != null) klineRt.delayed = Boolean(data.delayed);
+    const delayNote = document.querySelector("#kline-note");
+    const knownAsset = knownKlineAsset(klineRt.asset) || knownKlineAsset(data.asset_type);
+    if (delayNote && knownAsset && klineRt.delayed != null && delayNote.textContent.includes("延时未知，不写成实时")) {
+      const known = klineRt.delayed
+        ? (klineRt.provider === "yahoo" && klineRt.asset === "crypto" ? "备用行情，不是逐笔实时" : "知情：延时行情，不是逐笔实时")
+        : "最后一根约每 5 秒刷新";
+      paintKlineNote(delayNote.textContent.replace("延时未知，不写成实时", known));
+    }
+    appendKlineFreshness(data);
+    setKlineLive(klineLiveText(data));
   } catch (error) {
     if (seq !== klineRt.seq) return;
-    setKlineLive(`更新失败，稍后重试：${error.message}`, true);
+    setKlineLive(`更新失败，稍后重试：${klineErrorText(error.message)}`, true);
+  } finally {
+    klineRt.inFlight = false;
   }
   if (seq === klineRt.seq && klineRtActive()) scheduleKlineRt(klineRt.pollMs);
 }
@@ -5000,43 +6844,153 @@ async function tickKlineRt(seq) {
 function klinePeriodKey(time, tf) {
   const d = new Date(time * 1000);
   if (tf === "1M") return `${d.getUTCFullYear()}-${d.getUTCMonth()}`;
-  if (tf === "1W") return String(Math.floor((time / 86400 + 3) / 7));  // ISO weeks start on Monday
+  if (tf === "1W") {
+    // Return the UTC date of the Monday.  An epoch-week number is not enough
+    // around year boundaries and could disagree with Python's ISO calendar.
+    const day = (d.getUTCDay() + 6) % 7;
+    d.setUTCDate(d.getUTCDate() - day);
+    return d.toISOString().slice(0, 10);
+  }
   return String(time);
 }
 
-function applyKlineBar(bar) {
-  if (!bar || !klineRt.candles) return;
-  const bars = klineRt.bars;
-  const last = bars[bars.length - 1];
-  let next;
-  if (last && klinePeriodKey(last.time, klineRt.tf) === klinePeriodKey(bar.time, klineRt.tf)) {
-    if (klineRt.tf === "1D") {
-      next = { ...bar };
-    } else {
-      next = { ...last, high: Math.max(last.high, bar.high), low: Math.min(last.low, bar.low), close: bar.close, ohlc_fixed: Boolean(last.ohlc_fixed || bar.ohlc_fixed) };
+function klineResampleDaily(dailyBars, tf) {
+  const byTime = new Map();
+  for (const bar of dailyBars || []) if (bar && Number.isFinite(Number(bar.time))) byTime.set(Number(bar.time), { ...bar, time: Number(bar.time) });
+  const ordered = [...byTime.values()].sort((a, b) => a.time - b.time);
+  if (tf === "1D") return ordered;
+  const out = [];
+  let currentKey = null;
+  for (const bar of ordered) {
+    const key = klinePeriodKey(bar.time, tf);
+    if (key !== currentKey) {
+      out.push({ ...bar, volume: Number(bar.volume || 0) });
+      currentKey = key;
+      continue;
     }
-    bars[bars.length - 1] = next;
-  } else if (!last || bar.time > last.time) {
-    next = { ...bar };
-    bars.push(next);
-  } else {
-    return;
+    const agg = out[out.length - 1];
+    agg.high = Math.max(agg.high, bar.high);
+    agg.low = Math.min(agg.low, bar.low);
+    agg.close = bar.close;
+    agg.volume += Number(bar.volume || 0);
+    if (bar.ohlc_fixed) agg.ohlc_fixed = true;
   }
-  klineRt.candles.update({ time: next.time, open: next.open, high: next.high, low: next.low, close: next.close });
-  if (klineRt.tf === "1D") klineRt.volume.update({ time: next.time, value: next.volume, color: next.close >= next.open ? "rgba(38,166,154,.35)" : "rgba(239,83,80,.35)" });
+  return out;
+}
+
+function mergeKlineDailyBar(bar) {
+  const daily = klineRt.dailyBars || (klineRt.dailyBars = []);
+  const time = Number(bar.time);
+  const index = daily.findIndex((item) => Number(item.time) === time);
+  if (index >= 0) daily[index] = { ...bar, time };
+  else daily.push({ ...bar, time });
+  daily.sort((a, b) => Number(a.time) - Number(b.time));
+}
+
+function updateKlineRealtimeSummary(next) {
   const price = document.querySelector("#kline-price");
   if (price) price.textContent = klinePrice(next.close);
-  const change = (next.close / klineRt.firstOpen - 1) * 100;
   const changeEl = document.querySelector("#kline-change");
   if (changeEl) {
-    changeEl.textContent = `${change >= 0 ? "+" : ""}${change.toFixed(2)}%（1Y）`;
-    changeEl.classList.toggle("kline-change--down", change < 0);
+    changeEl.textContent = klineChangeText(next.close, klineRt.firstOpen, klineRt.historyLabel);
+    changeEl.classList.toggle("kline-change--down", Number(next.close) < Number(klineRt.firstOpen));
   }
+  const ohlc = document.querySelector("#kline-ohlc");
+  if (ohlc) {
+    const text = `开 ${klinePrice(next.open)}  高 ${klinePrice(next.high)}  低 ${klinePrice(next.low)}  收 ${klinePrice(next.close)}`;
+    ohlc.innerHTML = klineOhlcHtml(text, next.ohlc_fixed);
+    ohlc.classList.toggle("kline-ohlc--fixed", Boolean(next.ohlc_fixed));
+  }
+}
+
+function updateKlineSeries(bars) {
+  if (!bars.length || !klineRt.candles || !klineRt.volume) return;
+  if (typeof klineRt.candles.setData === "function") klineRt.candles.setData(bars.map((b) => ({ time: b.time, open: b.open, high: b.high, low: b.low, close: b.close })));
+  if (typeof klineRt.volume.setData === "function") klineRt.volume.setData(bars.map((b) => ({ time: b.time, value: b.volume, color: b.close >= b.open ? "rgba(38,166,154,.35)" : "rgba(239,83,80,.35)" })));
+  scheduleKlineScaleSync();
+}
+
+async function refreshKlineHistory(seq, latestBar) {
+  const path = `/api/kline?symbol=${encodeURIComponent(klineRt.symbol)}&tf=${encodeURIComponent(klineRt.tf)}&refresh=1`;
+  const data = await api(path);
+  if (seq !== klineRt.seq || !klineRtActive()) return;
+  if (data.tf === "1H" || data.tf === "5m") {
+    klineRt.bars = (data.bars || []).map((b) => ({ ...b, time: Number(b.time) }));
+    if (latestBar) applyIntradayBar(latestBar);
+    updateKlineSeries(klineRt.bars);
+    if (klineRt.bars.length) updateKlineRealtimeSummary(klineRt.bars[klineRt.bars.length - 1]);
+    return;
+  }
+  const daily = Array.isArray(data.daily_bars) ? data.daily_bars : (data.tf === "1D" ? data.bars : []);
+  if (!daily.length) throw new Error("恢复行情缺少完整日线，稍后重试。");
+  klineRt.dailyBars = daily.map((b) => ({ ...b }));
+  // The live provider can be newer than the history response.  Overlay it by
+  // timestamp, then derive the displayed period from the merged daily source.
+  mergeKlineDailyBar(latestBar);
+  klineRt.bars = klineResampleDaily(klineRt.dailyBars, klineRt.tf);
+  updateKlineSeries(klineRt.bars);
+  updateKlineRealtimeSummary(klineRt.bars[klineRt.bars.length - 1]);
+}
+
+function applyIntradayBar(bar) {
+  if (!klineUsableBar(bar) || !klineRt.candles) return null;
+  const time = Number(bar.time);
+  if (!Number.isFinite(time)) return null;
+  const bars = klineRt.bars || (klineRt.bars = []);
+  const last = bars[bars.length - 1];
+  if (last && time < Number(last.time)) return null;
+  const step = klineRt.tf === "1H" ? 3600 : 300;
+  if (last && time > Number(last.time) + step * 6) return { gap: true };
+  const next = { ...bar, time };
+  if (last && Number(last.time) === time) bars[bars.length - 1] = next;
+  else bars.push(next);
+  klineRt.bars = bars;
+  klineRt.candles.update({ time, open: next.open, high: next.high, low: next.low, close: next.close });
+  klineRt.volume.update({ time, value: next.volume, color: next.close >= next.open ? "rgba(38,166,154,.35)" : "rgba(239,83,80,.35)" });
+  updateKlineRealtimeSummary(next);
+  return next;
+}
+
+function applyKlineBar(bar) {
+  if (klineRt.tf === "1H" || klineRt.tf === "5m") return applyIntradayBar(bar);
+  if (!klineUsableBar(bar) || !klineRt.candles) return null;
+  const daily = klineRt.dailyBars || (klineRt.dailyBars = []);
+  const previous = daily[daily.length - 1];
+  if (!Number.isFinite(Number(bar.time))) return null;
+  // A stale fallback response must not roll the chart back to an older day.
+  if (previous && Number(bar.time) < Number(previous.time)) return null;
+  // A latest-only response cannot reconstruct days missed while hidden or
+  // offline.  Ask for complete history before merging, so OHLCV and volume
+  // remain equivalent to a fresh daily resample.
+  if (previous && Number(bar.time) > Number(previous.time) + 86400) return { gap: true };
+  mergeKlineDailyBar(bar);
+  const bars = klineResampleDaily(klineRt.dailyBars, klineRt.tf);
+  const next = bars[bars.length - 1];
+  const last = klineRt.bars[klineRt.bars.length - 1];
+  if (!next) return null;
+  klineRt.bars = bars;
+  // The last displayed period is replaced with the recomputed aggregate.  In
+  // particular, this updates volume for weekly/monthly panes on every poll.
+  if (last && klinePeriodKey(last.time, klineRt.tf) === klinePeriodKey(next.time, klineRt.tf)) {
+    klineRt.candles.update({ time: next.time, open: next.open, high: next.high, low: next.low, close: next.close });
+    klineRt.volume.update({ time: next.time, value: next.volume, color: next.close >= next.open ? "rgba(38,166,154,.35)" : "rgba(239,83,80,.35)" });
+  } else if (!last || next.time > last.time) {
+    klineRt.candles.update({ time: next.time, open: next.open, high: next.high, low: next.low, close: next.close });
+    klineRt.volume.update({ time: next.time, value: next.volume, color: next.close >= next.open ? "rgba(38,166,154,.35)" : "rgba(239,83,80,.35)" });
+  } else {
+    updateKlineSeries(bars);
+  }
+  updateKlineRealtimeSummary(next);
+  scheduleKlineScaleSync();
+  return { gap: false, bar: next };
 }
 
 document.addEventListener("visibilitychange", () => {
   if (state.page !== "kline") { stopKlineRt(); return; }
   startKlineRt();
+});
+window.addEventListener("resize", () => {
+  if (state.page === "kline") scheduleKlineScaleSync();
 });
 
 // ---- V2-INFO-CRAWL: 信息抓取 (#start/info-crawl). Official public sources only;
@@ -5062,7 +7016,28 @@ function withInfoAttach(payload) {
 function infoAttachHtml() {
   const attach = state.infoAttach;
   if (!attach || !attach.job || !(attach.items || []).length) return "";
-  return `<p class="notice" id="info-attach">已带入信息抓取「${escapeHtml(attach.keyword)}」中勾选的 ${attach.items.length} 条资讯，报告会附来源引用。 <button type="button" class="button button--secondary button--small" id="info-attach-clear">不带入</button></p>`;
+  return `<p class="notice" id="info-attach">已带入信息抓取「${escapeHtml(attach.keyword)}」<br class="notice-break">中勾选的 ${attach.items.length} 条资讯，<br class="notice-break">报告会附来源引用。 <button type="button" class="button button--secondary button--small" id="info-attach-clear">不带入</button>${infoAttachNoNewsHtml()}</p>`;
+}
+
+// AUDIT-CHECK-02 (PM): only the news analyst reads attached items; without it the run
+// still starts, the items are not used, and this hint (own line) says so before start.
+const INFO_ATTACH_NO_NEWS = "未选新闻分析师，附件不会被使用。";
+function infoAttachUnused() {
+  // W214: the FINAL list — an env override replaces the page selection.
+  const list = envFieldLocked("analysts") ? state.envSkipped.analysts : state.form.analysts;
+  return !(list || []).includes("news");
+}
+function infoAttachNoNewsHtml() {
+  // Own line (CSS display:block). Hidden rows carry no text so the notice reads unchanged.
+  const unused = infoAttachUnused();
+  return `<span class="form-hint" id="info-attach-nonews"${unused ? "" : " hidden"}>${unused ? INFO_ATTACH_NO_NEWS : ""}</span>`;
+}
+function refreshInfoAttachHint() {
+  const hint = document.querySelector("#info-attach-nonews");
+  if (!hint) return;
+  const unused = infoAttachUnused();
+  hint.hidden = !unused;
+  hint.textContent = unused ? INFO_ATTACH_NO_NEWS : "";
 }
 
 function infoTime(stamp) {
@@ -5080,38 +7055,84 @@ function safeHttpUrl(value) {
   } catch { return ""; }
 }
 
+function infoAvailabilityKnown(source) {
+  return Boolean(source) && (source.available === true || source.available === false);
+}
+
+function infoOptionalKnown(source) {
+  return Boolean(source) && (source.optional === true || source.optional === false);
+}
+
+function infoSourceTag(source) {
+  if (!infoOptionalKnown(source)) return '<span class="ic-tag">是否必选未知</span>';
+  return source.optional === true ? '<span class="ic-tag">可选</span>' : '<span class="ic-tag">首批必选</span>';
+}
+
+function infoSourceNote(source) {
+  if (!infoAvailabilityKnown(source)) return "来源是否可用未知，不把它写成不可用。";
+  return source.available === true ? source.description : source.reason;
+}
+
 function infoSourceRow(source, info) {
-  const checked = source.available && (info.selected ? info.selected.includes(source.id) : !source.optional);
+  const available = source.available === true;
+  const unavailable = source.available === false;
+  const checked = available && (info.selected ? info.selected.includes(source.id) : source.optional === false);
   const terms = safeHttpUrl(source.terms_url);
-  return `<label class="ic-src${source.available ? "" : " ic-src--off"}${checked ? " ic-src--on" : ""}" data-source="${escapeHtml(source.id)}">
-    <input type="checkbox" value="${escapeHtml(source.id)}" ${checked ? "checked" : ""} ${source.available ? "" : "disabled"}>
-    <span class="ic-src-body"><span class="ic-src-name">${escapeHtml(source.name)}${source.optional ? '<span class="ic-tag">可选</span>' : '<span class="ic-tag">首批必选</span>'}${source.personal_use ? '<span class="ic-tag ic-tag--pu">仅限个人使用</span>' : ""}</span>
-    <small>${escapeHtml(source.available ? source.description : source.reason)}</small>
+  const note = infoSourceNote(source);
+  const noteHtml = String(note).includes("不把它写成") ? narrowBreakHtml(note) : escapeHtml(note);
+  return `<label class="ic-src${unavailable ? " ic-src--off" : ""}${checked ? " ic-src--on" : ""}" data-source="${escapeHtml(source.id)}">
+    <input type="checkbox" value="${escapeHtml(source.id)}" ${checked ? "checked" : ""} ${unavailable ? "disabled" : ""}>
+    <span class="ic-src-body"><span class="ic-src-name">${escapeHtml(source.name)}${infoSourceTag(source)}${source.personal_use ? '<span class="ic-tag ic-tag--pu">仅限个人使用</span>' : ""}</span>
+    <small>${noteHtml}</small>
     <details class="ic-terms"><summary>使用条款</summary>${terms ? `<a href="${escapeHtml(terms)}" target="_blank" rel="noopener noreferrer">${escapeHtml(terms)}</a>` : "未提供"}</details></span>
   </label>`;
 }
 
 function infoSourceGroups(info) {
   const group = (title, id, list) => list.length ? `<div class="ic-grp" id="${id}">${title}</div><div class="ic-sources">${list.map((source) => infoSourceRow(source, info)).join("")}</div>` : "";
-  return `<div id="ic-sources">${group("首批必选", "ic-grp-req", info.sources.filter((s) => !s.optional))}${group("可选来源", "ic-grp-opt", info.sources.filter((s) => s.optional))}</div>`;
+  return `<div id="ic-sources">${group("首批必选", "ic-grp-req", info.sources.filter((s) => s.optional === false))}${group("可选来源", "ic-grp-opt", info.sources.filter((s) => s.optional === true))}${group("是否必选未知，不把它写成首批必选", "ic-grp-unknown", info.sources.filter((s) => !infoOptionalKnown(s)))}</div>`;
 }
 
-function infoStatusHtml(job) {
+function infoJobOpen(job) {
+  return !!job && (job.status === "running" || job.status === "pending");
+}
+
+function infoJobReasonHtml(text) {
+  return punctBreakHtml(text).replace("（", "<br class=\"notice-break\">（");
+}
+
+function colonBreakHtml(text) {
+  return punctBreakHtml(text).replace("：", "：<br class=\"notice-break\">");
+}
+
+function infoStatusHtml(job, items) {
   if (!job) return "";
+  // A failed or interrupted job can still have pending sources. That is not a live crawl.
+  // A failed save can also leave an ok count while no items were written.
+  const open = infoJobOpen(job);
+  const unsaved = !open && job.status === "failed" && !(items || []).length;
   const rows = Object.entries(job.sources || {}).map(([id, row]) => {
     const name = (infoState().sources || []).find((item) => item.id === id)?.name || id;
+    const count = Number(row.count) || 0;
     let text;
     if (row.status === "unavailable") text = `<span class="ic-bad">不可用</span>：${escapeHtml(row.reason || "来源暂不可用")}`;
-    else if (row.status === "ok") text = row.count ? `${row.count} 条` : "该时段没有条目";
-    else text = "抓取中…";
+    else if (row.status === "ok" && unsaved && count) text = punctBreakHtml(`来源返回了 ${count} 条，但结果没有保存，不把条数当成已有结果。`);
+    else if (row.status === "ok") text = count ? `${count} 条` : "该时段没有条目";
+    else if (open) text = "抓取中…";
+    else text = "没有结果，不把它写成仍在抓取。";
     return `<li data-source-status="${escapeHtml(id)}"><b>${escapeHtml(name)}</b> ${text}</li>`;
   });
   return `<ul class="ic-status" id="ic-status">${rows.join("")}</ul>`;
 }
 
 function infoItemsHtml(info) {
-  if (!info.job || info.job.status === "running") return "";
-  if (!info.items.length) return '<p class="notice" id="ic-empty">没有抓到条目。不可用的来源见上方原因。</p>';
+  if (!info.job || infoJobOpen(info.job)) return "";
+  if (!info.items.length) {
+    if (info.job.reason) return "";
+    const unfinished = Object.values(info.job.sources || {}).some((row) => row.status !== "ok" && row.status !== "unavailable");
+    if (unfinished) return '<p class="notice" id="ic-empty">没有结果，不把它写成仍在抓取。</p>';
+    return '<p class="notice" id="ic-empty">没有抓到条目。不可用的来源见上方原因。</p>';
+  }
   const picked = new Set(info.picked || []);
   const rows = info.items.map((item) => {
     const url = safeHttpUrl(item.url);
@@ -5126,7 +7147,7 @@ function infoItemsHtml(info) {
   return `<p class="form-hint" id="ic-utc-note">共 ${info.items.length} 条 · 时间均为 UTC</p>
     <table class="ic-items" id="ic-items"><thead><tr><th>带入分析</th><th>时间（UTC）</th><th>来源 · 类型</th><th>标题与摘要</th></tr></thead><tbody>${rows}</tbody></table>
     <div class="ic-inject"><button type="button" class="button button--primary button--small" id="ic-to-analysis" ${count ? "" : "disabled"}>带入下一次分析（${count} 条）</button>
-    <span class="form-hint">默认不带入；只有勾选的条目会作为上下文加入分析，会增加模型用量。</span></div>`;
+    <span class="form-hint" id="ic-pick-hint">默认不带入；<br class="notice-break">只有勾选的条目会作为上下文加入分析，<br class="notice-break">会增加模型用量。</span></div>`;
 }
 
 function infoExistingHtml(info) {
@@ -5137,11 +7158,11 @@ function infoExistingHtml(info) {
 function renderInfoCrawl() {
   const info = infoState();
   setStartRoute(INFO_CRAWL_ID);
-  const running = info.job && info.job.status === "running";
+  const running = info.job && infoJobOpen(info.job);
   pageEl.innerHTML = `<header class="page-heading"><div>
       <button type="button" class="crumb" id="back-to-frameworks">‹ 全部分析工具</button>
       <h1>信息抓取</h1>
-      <p class="page-description">只读官方公开接口和新闻稿 RSS，不登录、不抓社交网站。结果仅供个人研究参考，抓取条目保留 30 天后自动清理。</p>
+      <p class="page-description" id="info-crawl-note">只读官方公开接口和新闻稿 RSS，<br class="notice-break">不登录、不抓社交网站。<br class="notice-break">结果仅供个人研究参考，<br>抓取条目保留 30 天后自动清理。</p>
     </div><div class="page-actions page-actions-group"></div></header>
     <section class="wizard-panel ic-panel">
       <form id="ic-form" class="wiz-fields" novalidate>
@@ -5151,10 +7172,11 @@ function renderInfoCrawl() {
         </div>
         <div class="field"><span class="field-label" id="ic-hours-label">时间范围</span><div class="seg" id="ic-hours" role="group" aria-labelledby="ic-hours-label">${INFO_HOURS.map(([value, label]) => `<button type="button" class="seg-item${info.hours === value ? " on" : ""}" data-hours="${value}">${label}</button>`).join("")}</div></div>
         <div class="field"><span class="field-label">来源</span>${info.sources ? infoSourceGroups(info) : '<div class="ic-sources" id="ic-sources"><p class="notice">正在读取来源…</p></div>'}${infoExistingHtml(info)}</div>
-        ${info.error ? `<p class="error-banner" role="alert" id="ic-error">${escapeHtml(info.error)}</p>` : ""}
+        ${info.error ? `<p class="error-banner" role="alert" id="ic-error">${colonBreakHtml(info.error)}</p>` : ""}
         <div class="wiz-actions"><button type="submit" class="button button--primary" id="ic-start" ${running ? "disabled" : ""}>${running ? "正在抓取…" : "开始抓取"}</button></div>
       </form>
-      ${infoStatusHtml(info.job)}
+      ${infoStatusHtml(info.job, info.items)}
+      ${info.job && !running && info.job.reason ? `<p class="notice" id="ic-job-note">${infoJobReasonHtml(info.job.reason)}</p>` : ""}
       ${infoItemsHtml(info)}
     </section>`;
   bindInfoCrawl();
@@ -5240,7 +7262,7 @@ function pollInfoJob(id, delay = state.infoPollMs ?? 1500) {
     try {
       const data = await api(`/api/info-crawl/jobs?id=${encodeURIComponent(id)}`);
       info.job = data.job;
-      if (info.job.status === "running") { if (state.analyzeFramework === INFO_CRAWL_ID) renderInfoCrawl(); pollInfoJob(id); return; }
+      if (infoJobOpen(info.job)) { if (state.analyzeFramework === INFO_CRAWL_ID) renderInfoCrawl(); pollInfoJob(id); return; }
       const items = await api(`/api/info-crawl/items?job=${encodeURIComponent(id)}`);
       info.items = Array.isArray(items.items) ? items.items : [];
     } catch (error) {

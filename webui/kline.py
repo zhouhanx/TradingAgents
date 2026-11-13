@@ -25,7 +25,8 @@ from tradingagents.dataflows import ohlc_check
 from tradingagents.dataflows.symbols import crypto_base, market_code, normalize_symbol
 from tradingagents.dataflows.vendors import sina
 
-TIMEFRAMES = ("1D", "1W", "1M")
+TIMEFRAMES = ("1D", "1W", "1M", "1H", "5m")
+INTRADAY = ("1H", "5m")
 DEFAULT_TIMEFRAME = "1D"
 HISTORY_DAYS = 366
 CACHE_TTL_SECONDS = 300
@@ -179,12 +180,18 @@ def _fetcher(name: str) -> Callable[[str], list[dict]]:
 
 
 def resample(bars: list[dict], tf: str) -> list[dict]:
+    # Keep one canonical daily row per timestamp before grouping.  A provider
+    # can return the forming day more than once (and some fallback chains may
+    # overlap at their boundary); feeding duplicate rows into the aggregate
+    # would make volume depend on fetch order rather than on the daily OHLCV.
+    by_time = {int(bar["time"]): dict(bar) for bar in bars}
+    ordered = [by_time[t] for t in sorted(by_time)]
     if tf == "1D":
-        return list(bars)
+        return ordered
     out: list[dict] = []
     key_of = (lambda d: d.isocalendar()[:2]) if tf == "1W" else (lambda d: (d.year, d.month))
     current_key = None
-    for bar in bars:
+    for bar in ordered:
         key = key_of(datetime.fromtimestamp(bar["time"], UTC))
         if key != current_key:
             out.append(dict(bar))
@@ -243,6 +250,63 @@ def _fresher_of_yahoo_and_sina(info: dict, yahoo_ident: str, yahoo_bars: list[di
     return "yahoo", yahoo_ident, yahoo_bars
 
 
+
+
+
+def _quote_bar(bars: list[dict]) -> tuple[dict | None, str | None]:
+    """Newest positive bar. A newer zero bar is not a quote."""
+    if not bars:
+        return None, None
+    if _priced_bar(bars[-1]):
+        return bars[-1], None
+    earlier = [bar for bar in bars if _priced_bar(bar)]
+    if not earlier:
+        return None, "没有正价格"
+    return earlier[-1], "最新一根没有正价格，显示上一根。"
+
+
+def _priced_bar(bar: dict) -> bool:
+    """A candle needs positive OHLC. Zero is not a price and must not stretch the chart."""
+    if not isinstance(bar, dict):
+        return False
+    for key in ("open", "high", "low", "close"):
+        value = bar.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        if value != value or value <= 0:
+            return False
+    return True
+
+
+def _priced_bars(bars: list[dict]) -> tuple[list[dict], int]:
+    kept = [bar for bar in bars if _priced_bar(bar)]
+    return kept, len(bars) - len(kept)
+
+
+def _unpriced_note(count: int) -> str:
+    return f"有{count}根K线没有正价格，未画入图表。"
+
+
+def history_span_label(bars: list[dict]) -> str:
+    """Label the change from the bars actually returned. Do not call a short series one year."""
+    times = sorted(int(bar["time"]) for bar in bars if isinstance(bar, dict) and isinstance(bar.get("time"), int))
+    if not times:
+        return ""
+    if len(times) == 1:
+        return "仅1根"
+    seconds = times[-1] - times[0]
+    if seconds < 50 * 60:
+        minutes = max(1, round(seconds / 60))
+        return f"近{minutes}分钟"
+    if seconds < 20 * 3600:
+        hours = max(1, round(seconds / 3600))
+        return f"近{hours}小时"
+    days = max(1, round(seconds / 86400))
+    if days >= 330:
+        return "近1年"
+    return f"近{days}天"
+
+
 def _bar_day(bar: dict):
     return datetime.fromtimestamp(bar["time"], UTC).date()
 
@@ -294,16 +358,223 @@ def _friendly(info: dict, errors: list[str]) -> str:
     return f"没有拿到 {info['canonical']} 的行情数据。"
 
 
-def kline(symbol: str, tf: str | None = None) -> dict:
-    tf = (tf or DEFAULT_TIMEFRAME).strip().upper()
-    if tf not in TIMEFRAMES:
-        raise KlineError("周期只支持 1D / 1W / 1M。")
+
+# V2-KLINE-INTRADAY. Hour and 5-minute bars are native vendor candles, not a
+# resample of the daily series. Yahoo minute history is short; Beijing is Sina
+# only and labelled unadjusted. Closed sessions and the A-share lunch break are
+# not filled with empty candles.
+YAHOO_INTRADAY = {"1H": ("60d", "1h"), "5m": ("5d", "5m")}
+SINA_INTRADAY = {"1H": ("60", 400), "5m": ("5", 240)}
+OKX_INTRADAY = {"1H": ("1H", 4, 14), "5m": ("5m", 3, 1)}
+COINBASE_INTRADAY = {"1H": (3600, 14), "5m": (300, 1)}
+INTRADAY_SECONDS = {"1H": 3600, "5m": 300}
+SPAN_NOTE = {
+    ("stock", "1H"): "小时线，请求近 60 天；沪深可回退新浪，北交所仅新浪，长度以实际返回为准。",
+    ("commodity", "1H"): "小时线，请求近 60 天，长度以实际返回为准。",
+    ("crypto", "1H"): "小时线，加密货币请求近 14 天（OKX，其次 Coinbase），长度以实际返回为准。",
+    ("stock", "5m"): "5分钟线，请求近 5 天；新浪分钟更短，长度以实际返回为准。午休和收盘后不补空K。",
+    ("commodity", "5m"): "5分钟线，请求近 5 天，长度以实际返回为准。非交易时段不补空K。",
+    ("crypto", "5m"): "5分钟线，加密货币请求近 24 小时，长度以实际返回为准。",
+}
+SESSION_NOTE = "非交易时段和午休不补空K，只显示数据源给出的K线。"
+HISTORY_LABEL = {("stock", "1H"): "近60天", ("commodity", "1H"): "近60天", ("crypto", "1H"): "近14天",
+                 ("stock", "5m"): "近5天", ("commodity", "5m"): "近5天", ("crypto", "5m"): "近24小时"}
+
+
+def _epoch(idx) -> int:
+    tz = getattr(idx, "tzinfo", None)
+    if tz is None:
+        return int(idx.replace(tzinfo=UTC).timestamp())
+    return int(idx.timestamp())
+
+
+def fetch_yahoo_intraday(canonical: str, tf: str) -> list[dict]:
+    import yfinance as yf
+
+    from tradingagents.dataflows.vendors.yahoo.common import yf_retry
+
+    period, interval = YAHOO_INTRADAY[tf]
+    frame = yf_retry(lambda: yf.Ticker(canonical).history(period=period, interval=interval, auto_adjust=True, actions=False))
+    if frame is None or frame.empty:
+        return []
+    out = []
+    for idx, row in frame.iterrows():
+        if any(row.get(k) != row.get(k) for k in ("Open", "High", "Low", "Close")):
+            continue
+        out.append(_bar(_epoch(idx), row["Open"], row["High"], row["Low"], row["Close"], row.get("Volume", 0)))
+    return out
+
+
+def fetch_sina_intraday(ident: str, tf: str) -> list[dict]:
+    from zoneinfo import ZoneInfo
+
+    scale, count = SINA_INTRADAY[tf]
+    clock = ZoneInfo("Asia/Shanghai")
+    out = []
+    for row in sina.scale_rows(ident, scale, count):
+        day = row["day"]
+        if len(day) <= 10:
+            local = datetime.strptime(day[:10], "%Y-%m-%d").replace(tzinfo=clock)
+        else:
+            local = datetime.strptime(day[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=clock)
+        out.append(_bar(local.timestamp(), row["open"], row["high"], row["low"], row["close"], row["volume"]))
+    return out
+
+
+def fetch_okx_intraday(base: str, tf: str) -> list[dict]:
+    bar, pages, days = OKX_INTRADAY[tf]
+    since = int((datetime.now(UTC) - timedelta(days=days)).timestamp())
+    after, bars = None, {}
+    for _ in range(pages):
+        params = {"instId": f"{base}-USDT", "bar": bar, "limit": "100"}
+        if after:
+            params["after"] = str(after)
+        resp = requests.get(OKX_URL, params=params, timeout=HTTP_TIMEOUT)
+        resp.raise_for_status()
+        body = resp.json()
+        if str(body.get("code")) != "0":
+            raise RuntimeError(f"OKX: {body.get('msg') or body.get('code')}")
+        rows = body.get("data") or []
+        if not rows:
+            break
+        for row in rows:
+            ts = int(row[0]) // 1000
+            if ts >= since:
+                bars[ts] = _bar(ts, row[1], row[2], row[3], row[4], row[5])
+        after = rows[-1][0]
+        if int(after) // 1000 < since:
+            break
+    return [bars[k] for k in sorted(bars)]
+
+
+def fetch_coinbase_intraday(base: str, tf: str) -> list[dict]:
+    granularity, days = COINBASE_INTRADAY[tf]
+    end = datetime.now(UTC)
+    start_limit = end - timedelta(days=days)
+    bars = {}
+    # Coinbase returns at most 300 candles per request.
+    step = timedelta(seconds=granularity * 299)
+    while end > start_limit:
+        start = max(start_limit, end - step)
+        resp = requests.get(
+            COINBASE_URL.format(product=f"{base}-USD"),
+            params={"granularity": granularity, "start": start.isoformat(), "end": end.isoformat()},
+            headers={"User-Agent": "TradingAgents-WebUI"},
+            timeout=HTTP_TIMEOUT,
+        )
+        resp.raise_for_status()
+        for t, low, high, op, close, vol in resp.json():
+            bars[int(t)] = _bar(t, op, high, low, close, vol)
+        end = start
+    return [bars[k] for k in sorted(bars)]
+
+
+def _fetch_intraday(name: str, ident: str, info: dict, tf: str) -> list[dict]:
+    if name == "okx":
+        return fetch_okx_intraday(info["base"], tf)
+    if name == "coinbase":
+        return fetch_coinbase_intraday(info["base"], tf)
+    if name == "yahoo":
+        return fetch_yahoo_intraday(ident, tf)
+    return fetch_sina_intraday(ident, tf)
+
+
+def _pick_intraday(info: dict, tf: str) -> tuple[str, str, list[dict], list[str]]:
+    errors: list[str] = []
+    yahoo_ident = yahoo_bars = None
+    for name, ident in info["providers"]:
+        try:
+            bars = _fetch_intraday(name, ident, info, tf)
+        except Exception as exc:  # noqa: BLE001 - try the next source
+            errors.append(f"{name}: {type(exc).__name__}")
+            continue
+        if not bars:
+            errors.append(f"{name}: 无数据")
+            continue
+        ohlc_check.fix_bars(bars, info["canonical"])
+        if name == "yahoo" and _is_yahoo_sina(info):
+            yahoo_ident, yahoo_bars = ident, bars
+            continue
+        if yahoo_bars and bars and bars[-1]["time"] <= yahoo_bars[-1]["time"]:
+            return "yahoo", yahoo_ident, yahoo_bars, errors
+        if yahoo_bars and bars and bars[-1]["time"] > yahoo_bars[-1]["time"]:
+            errors.append("yahoo: 数据过期")
+        return name, ident, bars, errors
+    if yahoo_bars:
+        return "yahoo", yahoo_ident, yahoo_bars, errors
+    raise KlineError(_friendly(info, errors))
+
+
+def intraday(symbol: str, tf: str, *, refresh: bool = False) -> dict:
+    info = route(symbol)
+    if info["canonical"].endswith(".BJ") and not sina_symbol(info["canonical"]):
+        raise KlineError(f"北交所 {info['canonical']} 只有新浪来源，当前代码无法查询。")
+    key = ("intraday", tf, info["canonical"])
+    now = time.time()
+    with _lock:
+        hit = _cache.get(key)
+    cached = bool(not refresh and hit and now - hit[0] < CACHE_TTL_SECONDS)
+    if cached:
+        chosen = hit[1]
+    else:
+        provider, ident, bars, errors = _pick_intraday(info, tf)
+        chosen = {"provider": provider, "provider_symbol": ident, "bars": bars, "fallback_errors": errors, "fetched_at": int(now)}
+        with _lock:
+            _cache[key] = (now, chosen)
+    bars, omitted_unpriced = _priced_bars(chosen["bars"])
+    stale = _stale_bar(bars[-1]["time"] if bars else None, tf, now)
+    ohlc_fixed = sum(1 for b in bars if b.get("ohlc_fixed"))
+    payload = {
+        "symbol": (symbol or "").strip().upper(),
+        "canonical": info["canonical"],
+        "asset_type": info["asset_type"],
+        "tf": tf,
+        "provider": chosen["provider"],
+        "provider_symbol": chosen["provider_symbol"],
+        "fallback_errors": chosen["fallback_errors"],
+        "is_future": info["asset_type"] == "commodity",
+        "adjusted": chosen["provider"] != "sina",
+        "delayed": quote_delayed(info["asset_type"], chosen["provider"]),
+        "source_label": "新浪（非官方，不复权）" if chosen["provider"] == "sina" else None,
+        "fallback": chosen["provider"] == "sina" and not info["canonical"].endswith(".BJ"),
+        "cached": cached,
+        "ohlc_fixed": ohlc_fixed,
+        "freshness_note": MAYBE_NOT_UPDATED if MAYBE_NOT_UPDATED in chosen["fallback_errors"] else None,
+        "fetched_at": chosen["fetched_at"],
+        "daily_bars": [],
+        "bars": bars,
+        "span_note": SPAN_NOTE[(info["asset_type"], tf)],
+        "session_note": SESSION_NOTE,
+        "history_label": history_span_label(bars) or HISTORY_LABEL[(info["asset_type"], tf)],
+        "stale_bar": stale,
+    }
+    if omitted_unpriced:
+        payload["unpriced_note"] = _unpriced_note(omitted_unpriced)
+    if ohlc_fixed:
+        payload["ohlc_note"] = ohlc_check.NOTE_ZH
+    return payload
+
+
+def normalize_tf(tf: str | None) -> str:
+    raw = (tf or DEFAULT_TIMEFRAME).strip()
+    upper = raw.upper()
+    if upper in ("1D", "1W", "1M", "1H"):
+        return upper
+    if raw.lower() == "5m":
+        return "5m"
+    raise KlineError("周期只支持 1D / 1W / 1M / 1H / 5m。")
+
+
+def kline(symbol: str, tf: str | None = None, *, refresh: bool = False) -> dict:
+    tf = normalize_tf(tf)
+    if tf in INTRADAY:
+        return intraday(symbol, tf, refresh=refresh)
     info = route(symbol)
     key = (info["asset_type"], info["canonical"])
     now = time.time()
     with _lock:
         hit = _cache.get(key)
-    cached = bool(hit and now - hit[0] < CACHE_TTL_SECONDS)
+    cached = bool(not refresh and hit and now - hit[0] < CACHE_TTL_SECONDS)
     if cached:
         daily = hit[1]
     else:
@@ -311,7 +582,14 @@ def kline(symbol: str, tf: str | None = None) -> dict:
         daily = {"provider": provider, "provider_symbol": ident, "bars": bars, "fallback_errors": errors, "fetched_at": int(now)}
         with _lock:
             _cache[key] = (now, daily)
-    return {
+    # ``daily_bars`` is intentionally included for weekly/monthly clients.
+    # Realtime updates arrive as a forming *daily* bar; retaining the source
+    # daily grain lets the browser replace that day's volume and recompute the
+    # complete period instead of adding the same cumulative volume every poll.
+    priced, omitted_unpriced = _priced_bars(daily["bars"])
+    daily_bars = resample(priced, "1D")
+    ohlc_fixed = sum(1 for b in priced if b.get("ohlc_fixed"))
+    payload = {
         "symbol": (symbol or "").strip().upper(),
         "canonical": info["canonical"],
         "asset_type": info["asset_type"],
@@ -321,15 +599,23 @@ def kline(symbol: str, tf: str | None = None) -> dict:
         "fallback_errors": daily["fallback_errors"],
         "is_future": info["asset_type"] == "commodity",
         "adjusted": daily["provider"] != "sina",
+        "delayed": quote_delayed(info["asset_type"], daily["provider"]),
         "source_label": "新浪（非官方，不复权）" if daily["provider"] == "sina" else None,
         "fallback": daily["provider"] == "sina" and not info["canonical"].endswith(".BJ"),
         "cached": cached,
-        "ohlc_fixed": sum(1 for b in daily["bars"] if b.get("ohlc_fixed")),
-        "ohlc_note": ohlc_check.NOTE_ZH,
+        "ohlc_fixed": ohlc_fixed,
         "freshness_note": MAYBE_NOT_UPDATED if MAYBE_NOT_UPDATED in daily["fallback_errors"] else None,
         "fetched_at": daily["fetched_at"],
-        "bars": resample(daily["bars"], tf),
+        "daily_bars": daily_bars,
+        "bars": resample(daily_bars, tf),
+        "history_label": history_span_label(daily_bars),
     }
+    # W200: do not claim a correction when none happened. Omit the note entirely.
+    if ohlc_fixed:
+        payload["ohlc_note"] = ohlc_check.NOTE_ZH
+    if omitted_unpriced:
+        payload["unpriced_note"] = _unpriced_note(omitted_unpriced)
+    return payload
 
 
 # ------------------------------------------------------------------ V2-KLINE-RT
@@ -415,8 +701,77 @@ def _fresher_live(info: dict, yahoo_ident: str, yahoo_bar: dict, errors: list[st
     return "yahoo", yahoo_ident, yahoo_bar, None
 
 
-def latest(symbol: str) -> dict:
-    """The newest daily bar and how often the page should ask again."""
+
+
+def quote_delayed(asset: str, provider: str) -> bool:
+    """Yahoo is a delayed quote even when the symbol is crypto."""
+    return provider == "yahoo" or asset != "crypto"
+
+
+def _stale_bar(when, tf: str, now: float) -> bool:
+    """An old bar is not proof that the session is closed."""
+    span = INTRADAY_SECONDS.get(tf)
+    if not span:
+        return False
+    try:
+        age = now - float(when)
+    except (TypeError, ValueError):
+        return False
+    return age > span * 3
+
+
+def _latest_intraday(symbol: str, tf: str) -> dict:
+    info = route(symbol)
+    asset = info["asset_type"]
+    key = ("live", tf, info["canonical"])
+    now = time.time()
+    with _lock:
+        hit = _live_cache.get(key)
+    cached = bool(hit and now - hit[0] < RT_CACHE_SECONDS[asset])
+    if cached:
+        answer = hit[1]
+    else:
+        errors, answer = [], None
+        for name, ident in info["providers"]:
+            try:
+                bars = _fetch_intraday(name, ident, info, tf)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{name}: {type(exc).__name__}")
+                continue
+            if not bars:
+                errors.append(f"{name}: 无数据")
+                continue
+            bar, skipped = _quote_bar(bars)
+            if bar is None:
+                errors.append(f"{name}: 没有正价格")
+                continue
+            ohlc_check.fix_bars([bar], info["canonical"])
+            answer = {"provider": name, "provider_symbol": ident, "bar": bar, "fallback_errors": errors,
+                      "freshness_note": None, "unpriced_note": skipped, "fetched_at": int(now)}
+            break
+        if answer is None:
+            raise KlineError("暂时拿不到最新行情，稍后会自动重试。")
+        with _lock:
+            _live_cache[key] = (now, answer)
+    return {
+        "symbol": (symbol or "").strip().upper(),
+        "canonical": info["canonical"],
+        "asset_type": asset,
+        "tf": tf,
+        "mode": "poll",
+        "poll_seconds": RT_POLL_SECONDS[asset],
+        "delayed": quote_delayed(asset, answer["provider"]),
+        "cached": cached,
+        "stale_bar": _stale_bar(answer["bar"].get("time"), tf, now),
+        **answer,
+    }
+
+
+def latest(symbol: str, tf: str | None = None) -> dict:
+    """The newest bar for ``tf`` and how often the page should ask again."""
+    chosen = normalize_tf(tf) if tf else "1D"
+    if chosen in INTRADAY:
+        return _latest_intraday(symbol, chosen)
     info = route(symbol)
     asset = info["asset_type"]
     key = (asset, info["canonical"])
@@ -434,10 +789,16 @@ def latest(symbol: str) -> dict:
             except Exception as exc:  # noqa: BLE001 - the next provider is the fallback
                 errors.append(f"{name}: {type(exc).__name__}")
                 continue
+            if bar and not _priced_bar(bar):
+                errors.append(f"{name}: 没有正价格")
+                continue
             if bar:
                 note = None
                 if name == "yahoo" and _is_yahoo_sina(info):
                     name, ident, bar, note = _fresher_live(info, ident, bar, errors)
+                if not _priced_bar(bar):
+                    errors.append(f"{name}: 没有正价格")
+                    continue
                 ohlc_check.fix_bars([bar], info["canonical"])
                 answer = {"provider": name, "provider_symbol": ident, "bar": bar, "fallback_errors": errors,
                           "freshness_note": note, "fetched_at": int(now)}
@@ -453,7 +814,7 @@ def latest(symbol: str) -> dict:
         "asset_type": asset,
         "mode": "poll",
         "poll_seconds": RT_POLL_SECONDS[asset],
-        "delayed": asset != "crypto",
+        "delayed": quote_delayed(asset, answer["provider"]),
         "cached": cached,
         **answer,
     }

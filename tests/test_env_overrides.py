@@ -137,3 +137,17 @@ def test_unknown_env_var_is_ignored(monkeypatch):
         TRADINGAGENTS_NONEXISTENT_KEY="oops",
     )
     assert "nonexistent_key" not in config
+
+
+def test_call_budget_env_reaches_config(monkeypatch):
+    """A CLI run can opt into the bounded retry layer without editing code."""
+    config = _config_with_env(monkeypatch, TRADINGAGENTS_LLM_CALL_BUDGET="900")
+    assert config["llm_call_budget"] == "900"
+    assert float(config["llm_call_budget"]) == 900.0
+
+
+def test_bad_call_budget_env_is_refused_at_client_build(monkeypatch):
+    config = _config_with_env(monkeypatch, TRADINGAGENTS_LLM_CALL_BUDGET="soon")
+    from tradingagents.llm_clients.factory import build_llm_kwargs
+    with pytest.raises(ValueError, match="llm_call_budget"):
+        build_llm_kwargs(config)

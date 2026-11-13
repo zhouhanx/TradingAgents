@@ -419,17 +419,27 @@ def pid_reused_after_restart(c: Console) -> list[str]:
 
 
 def _pid_alive(pid: int) -> bool:
+    """Whether ``pid`` is a live process. A zombie counts as gone (Linux /proc and macOS ps)."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
-    try:  # a zombie child of ours is gone for our purposes
+    try:  # Linux: field 3 of /proc/<pid>/stat is the state. macOS has no /proc.
         with open(f"/proc/{pid}/stat") as handle:
-            return handle.read().split()[2] != "Z"
+            return handle.read().split(")")[-1].split()[0] != "Z"
     except OSError:
+        pass
+    try:
+        out = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=5,
+                             env={**os.environ, "LC_ALL": "C"})
+    except (OSError, subprocess.SubprocessError):
+        return True
+    stat = out.stdout.strip()
+    if out.returncode != 0 or not stat:
         return False
+    return not stat.startswith("Z")
 
 
 def holdings_run_to_completion(c: Console) -> list[str]:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from tradingagents.dataflows.info_crawl.base import (
     NO_TIME_NOTE,
@@ -170,8 +171,10 @@ def get_info_items(job_id: str, item_ids=None, store=None, as_of=None) -> str:
     if not wanted:
         return ""
     if store is None:
-        from tradingagents.dataflows.info_crawl.store import default_store
-        store = default_store()
+        from tradingagents.dataflows.config import get_config
+        from tradingagents.dataflows.info_crawl.store import JsonlItemStore, default_store
+        pinned = get_config().get("info_crawl_dir")  # AUDIT-FIX-04: the console's store dir
+        store = JsonlItemStore(Path(pinned)) if pinned else default_store()
     cutoff = parse_time(as_of) if as_of is not None else None
     cutoff = min(cutoff, utc_now()) if cutoff else utc_now()
     chosen = set(wanted)

@@ -80,7 +80,7 @@ def test_a_launch_with_a_full_queue_is_refused_with_the_queue_full_sentence(real
     try:
         # Recorded the way _spawn records it: pid plus start time (W39).
         service.JOBS.write_run({"id": "busy", "status": "running", "pid": child.pid,
-                                "proc_start": service._process_start(child.pid), "started_at": "2026-10-31T09:00:00"})
+                                "proc_start": service._process_start(child.pid), "argv": child.args, "started_at": "2026-10-31T09:00:00"})
         status, body, _ = app["send"]("POST", "/api/runs", {"background": False})
     finally:
         child.kill()

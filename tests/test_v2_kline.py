@@ -59,6 +59,7 @@ def test_crypto_okx_first(monkeypatch):
     assert out["provider"] == "okx" and out["provider_symbol"] == "BTC-USDT"
     assert calls == [("okx", "BTC")]
     assert out["asset_type"] == "crypto" and not out["is_future"]
+    assert out["delayed"] is False
 
 
 def test_crypto_falls_back_to_coinbase_then_yahoo(monkeypatch):
@@ -71,6 +72,7 @@ def test_crypto_falls_back_to_coinbase_then_yahoo(monkeypatch):
     out = kline.kline("ETHUSDT")
     assert out["provider"] == "yahoo" and seen == ["ETH-USD"]
     assert out["fallback_errors"] == ["okx: ConnectionError", "coinbase: 无数据"]
+    assert out["delayed"] is True
 
 
 def test_all_providers_fail(monkeypatch):
@@ -108,6 +110,38 @@ def test_resample_weekly_monthly():
     assert weekly[0]["open"] == bars[0]["open"] and weekly[-1]["close"] == bars[-1]["close"]
     assert sum(b["volume"] for b in weekly) == sum(b["volume"] for b in bars)
     assert max(b["high"] for b in monthly) == max(b["high"] for b in bars)
+
+
+def test_resample_deduplicates_daily_rows_before_summing_volume():
+    first = _bars(2)
+    duplicate = kline._bar(first[1]["time"], 999, 1000, 998, 999.5, 7)
+    weekly = kline.resample([first[0], first[1], duplicate], "1W")
+    assert len(weekly) == 1
+    assert weekly[0]["open"] == first[0]["open"]
+    assert weekly[0]["close"] == duplicate["close"]
+    assert weekly[0]["volume"] == first[0]["volume"] + duplicate["volume"]
+
+
+def test_kline_keeps_daily_source_for_complete_realtime_resampling(monkeypatch):
+    bars = _bars(12)
+    monkeypatch.setattr(kline, "fetch_yahoo", lambda sym: bars)
+    for tf in ("1W", "1M"):
+        out = kline.kline("NVDA", tf)
+        assert out["daily_bars"] == bars
+        assert out["bars"] == kline.resample(out["daily_bars"], tf)
+        assert sum(row["volume"] for row in out["bars"]) == sum(row["volume"] for row in bars)
+        for got, expected in zip(out["bars"], kline.resample(bars, tf), strict=True):
+            assert [got[key] for key in ("open", "high", "low", "close", "volume")] == [
+                expected[key] for key in ("open", "high", "low", "close", "volume")]
+
+
+def test_kline_refresh_bypasses_history_cache(monkeypatch):
+    calls = []
+    monkeypatch.setattr(kline, "fetch_yahoo", lambda sym: calls.append(sym) or _bars(3))
+    first = kline.kline("NVDA", "1M")
+    refreshed = kline.kline("NVDA", "1M", refresh=True)
+    assert first["cached"] is False and refreshed["cached"] is False
+    assert calls == ["NVDA", "NVDA"]
 
 
 def test_okx_parses_and_paginates(monkeypatch):
@@ -153,6 +187,7 @@ def test_api_kline_endpoint(monkeypatch):
     handler_cls = next(v for v in vars(server).values() if isinstance(v, type) and hasattr(v, "_kline"))
     handler_cls._kline(H(), "XAUUSD", "")
     assert sent["status"] == 200 and sent["data"]["tf"] == "1D" and sent["data"]["provider_symbol"] == "GC=F"
+    assert sent["data"]["daily_bars"] == sent["data"]["bars"]
     handler_cls._kline(H(), "", "1D")
     assert sent["status"] == 400 and "标的" in sent["data"]["error"]
 
@@ -178,6 +213,10 @@ def test_ui_has_entry_attribution_and_no_tradingview_brand():
         assert "tradingview" not in text.lower()
     for forbidden in ("charting_library", "tradingview.com/widget", "s3.tradingview.com", "TradingView.widget"):
         assert forbidden.lower() not in (index + app).lower()
+    assert "function klineFreshnessText" in app
+    assert "function appendKlineFreshness" in app
+    assert "data.freshness_note" in app or "freshness_note" in app
+    assert 'textContent = "可能未更新"' not in app
 
 
 # ------------------------------------------------------------------ V2-KLINE-RT
@@ -196,6 +235,16 @@ def test_latest_crypto_okx_poll_5s(monkeypatch, _fresh_live):
     assert seen == ["BTC"] and out["provider"] == "okx"
     assert out["poll_seconds"] == 5 and out["delayed"] is False and out["mode"] == "poll"
     assert out["bar"]["close"] == 1.5
+
+
+def test_latest_crypto_yahoo_fallback_is_not_called_realtime(monkeypatch, _fresh_live):
+    def boom(base):
+        raise TimeoutError
+    monkeypatch.setattr(kline, "live_okx", boom)
+    monkeypatch.setattr(kline, "live_coinbase", boom)
+    monkeypatch.setattr(kline, "live_yahoo", lambda sym: kline._bar(1, 1, 2, 0.5, 1.5, 3))
+    out = kline.latest("BTC-USDT")
+    assert out["provider"] == "yahoo" and out["delayed"] is True
 
 
 def test_latest_crypto_falls_back(monkeypatch, _fresh_live):
@@ -461,6 +510,14 @@ def test_sina_response_labels(monkeypatch):
     assert y["source_label"] is None and y["adjusted"] is True
 
 
+def test_clean_bars_omit_ohlc_note(monkeypatch):
+    kline.clear_cache()
+    monkeypatch.setattr(kline, "fetch_yahoo", lambda s: _bars(3))
+    out = kline.kline("AAPL")
+    assert out["ohlc_fixed"] == 0
+    assert "ohlc_note" not in out
+
+
 def test_search_hint_survives_cache():
     kline.clear_search_cache()
     first = kline.search("不存在的公司")
@@ -469,3 +526,55 @@ def test_search_hint_survives_cache():
     assert second["hint"] == first["hint"] == "没有找到这个名称，请用 6 位代码查询。"
     assert second["results"] == []
     kline.clear_search_cache()
+
+def test_short_daily_history_is_not_labeled_one_year(monkeypatch):
+    monkeypatch.setattr(kline, "fetch_yahoo", lambda sym: _bars(3))
+    out = kline.kline("AAPL", "1D")
+    assert out["history_label"] == "近2天"
+    assert "1Y" not in out["history_label"]
+    assert "近1年" not in out["history_label"]
+    long = [_bars(1, start=1_700_006_400)[0], kline._bar(1_700_006_400 + 340 * DAY, 20, 21, 19, 20, 1)]
+    assert kline.history_span_label(long) == "近1年"
+    script = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "function klineChangeText" in script
+    assert "1Y" not in script
+    assert 'label || "区间"' in script
+    assert "展示近 1 年" not in script
+    assert "实际${data.history_label}" in script
+    assert "n <= 0" in script
+    assert "if (data.delayed != null) klineRt.delayed" in script
+    assert "延时未知，不写成实时" in script
+    assert 'data.asset_type === "crypto" ? null : true' in script
+    assert "provider_symbol || \"—\"" in script
+
+def test_non_positive_bar_is_not_drawn(monkeypatch):
+    bars = _bars(2) + [kline._bar(1_700_006_400 + 2 * DAY, 10, 11, 0, 0, 1)]
+    monkeypatch.setattr(kline, "fetch_yahoo", lambda sym: bars)
+    out = kline.kline("AAPL", "1D")
+    assert len(out["bars"]) == 2
+    assert all(bar["close"] > 0 and bar["low"] > 0 for bar in out["bars"])
+    assert "没有正价格" in out["unpriced_note"]
+    script = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "function klineUsableBar" in script
+    assert "没有可绘制的正价格" in script
+    assert "rawBars.filter(klineUsableBar)" in script
+
+def test_latest_does_not_return_a_zero_bar(monkeypatch, _fresh_live):
+    monkeypatch.setattr(kline, "live_yahoo", lambda s: kline._bar(1_700_000_000, 10, 11, 0, 0, 1))
+    monkeypatch.setattr(kline, "live_sina", lambda s: kline._bar(1_700_086_400, 12, 13, 11, 12.5, 1))
+    out = kline.latest("600519")
+    assert out["bar"]["close"] == 12.5
+    assert out["provider"] == "sina"
+    assert out["bar"]["low"] > 0
+
+
+def test_intraday_latest_skips_a_newer_zero_bar(monkeypatch, _fresh_live):
+    def fetch(name, ident, info, tf):
+        return [kline._bar(100, 10, 11, 9, 10.5, 1), kline._bar(400, 0, 0, 0, 0, 1)]
+    monkeypatch.setattr(kline, "_fetch_intraday", fetch)
+    out = kline.latest("BTC-USDT", "5m")
+    assert out["bar"]["close"] == 10.5
+    assert out["unpriced_note"] == "最新一根没有正价格，显示上一根。"
+    script = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "data.unpriced_note" in script
+

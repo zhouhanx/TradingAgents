@@ -56,24 +56,33 @@ def chain(canonical: str) -> list[str]:
     return ["yahoo"]
 
 
-def daily_rows(ident: str, count: int = MAX_BARS) -> list[dict]:
-    """Newest ``count`` daily bars as ``{"day","open","high","low","close","volume"}`` floats."""
-    key = (ident, count)
+def _rows(ident: str, scale: str, count: int, day_len: int) -> list[dict]:
+    key = (ident, scale, count)
     now = time.time()
     with _lock:
         hit = _cache.get(key)
     if hit and now - hit[0] < CACHE_SECONDS:
         return hit[1]
-    resp = requests.get(SINA_URL, params={"symbol": ident, "scale": "240", "ma": "no", "datalen": str(count)},
+    resp = requests.get(SINA_URL, params={"symbol": ident, "scale": scale, "ma": "no", "datalen": str(count)},
                         headers={"User-Agent": "Mozilla/5.0 TradingAgents"}, timeout=HTTP_TIMEOUT)
     resp.raise_for_status()
-    text = resp.text.strip()
-    raw = resp.json() if text not in ("", "null") else []
-    rows = [{"day": r["day"][:10], "open": float(r["open"]), "high": float(r["high"]), "low": float(r["low"]),
+    body = resp.text.strip()
+    raw = resp.json() if body not in ("", "null") else []
+    rows = [{"day": r["day"][:day_len], "open": float(r["open"]), "high": float(r["high"]), "low": float(r["low"]),
              "close": float(r["close"]), "volume": float(r.get("volume") or 0)} for r in raw or []]
     with _lock:
         _cache[key] = (now, rows)
     return rows
+
+
+def daily_rows(ident: str, count: int = MAX_BARS) -> list[dict]:
+    """Newest ``count`` daily bars as ``{"day","open","high","low","close","volume"}`` floats."""
+    return _rows(ident, "240", count, 10)
+
+
+def scale_rows(ident: str, scale: str, count: int) -> list[dict]:
+    """Intraday bars. ``day`` keeps the source clock, usually ``YYYY-mm-dd HH:MM:SS``."""
+    return _rows(ident, scale, count, 19)
 
 
 def history_frame(canonical: str, start: str | None = None, end_exclusive: str | None = None) -> pd.DataFrame:

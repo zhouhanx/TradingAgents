@@ -1,9 +1,19 @@
+
 import threading
 from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import LLMResult
+
+
+def _callback_role(kwargs: dict) -> str:
+    """Graph node name when the caller passed it. Empty when the call is unattributed."""
+    meta = kwargs.get("metadata") if isinstance(kwargs, dict) else None
+    if not isinstance(meta, dict):
+        return ""
+    role = meta.get("langgraph_node") or meta.get("role")
+    return role.strip() if isinstance(role, str) else ""
 
 
 class StatsCallbackHandler(BaseCallbackHandler):
@@ -20,6 +30,8 @@ class StatsCallbackHandler(BaseCallbackHandler):
         self.usage_unknown = 0
         # Calls that did report usage, even 0/0 (W81: then the footer shows 0, not --).
         self.usage_reported = 0
+        # V2-COST-STATS: tokens by graph node when the callback metadata names one.
+        self.by_role = {}
 
     def on_llm_start(
         self,
@@ -65,8 +77,15 @@ class StatsCallbackHandler(BaseCallbackHandler):
         if usage_metadata:
             with self._lock:
                 self.usage_reported += 1
-                self.tokens_in += usage_metadata.get("input_tokens", 0)
-                self.tokens_out += usage_metadata.get("output_tokens", 0)
+                incoming = int(usage_metadata.get("input_tokens") or 0)
+                outgoing = int(usage_metadata.get("output_tokens") or 0)
+                self.tokens_in += incoming
+                self.tokens_out += outgoing
+                role = _callback_role(kwargs)
+                if role:
+                    bucket = self.by_role.setdefault(role, {"input_tokens": 0, "output_tokens": 0})
+                    bucket["input_tokens"] += incoming
+                    bucket["output_tokens"] += outgoing
 
     def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
         """W81: a call that failed was still a call; its usage is unknown."""
@@ -93,4 +112,5 @@ class StatsCallbackHandler(BaseCallbackHandler):
                 "tokens_out": self.tokens_out,
                 "usage_unknown": self.usage_unknown,
                 "usage_reported": self.usage_reported,
+                "by_role": {key: dict(value) for key, value in self.by_role.items()},
             }

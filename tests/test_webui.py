@@ -334,10 +334,14 @@ def test_api_key_is_saved_without_being_echoed(monkeypatch, tmp_path):
     else:
         os.environ["DEEPSEEK_API_KEY"] = previous
     script = Path("webui/static/app.js").read_text(encoding="utf-8")
-    save_key = script[script.index("async function saveKey"):script.index("function renderModels")]
+    save_key = script[script.index("function keySaveNotice"):script.index("function renderModels")]
     assert save_key.index("await renderAccounts()") < save_key.index("insertAdjacentHTML")
     assert "result.cli" in save_key
     assert "密钥不会回显" in save_key
+    assert "保存结果未知，不把它写成已保存或已跳过。" in save_key
+    assert "saved === true" in save_key
+    assert "saved === false" in save_key
+    assert 'result.saved ? "已保存" : "已跳过，没有写入"' not in save_key
 
 
 def test_report_path_cannot_escape_results(monkeypatch, tmp_path):
@@ -872,8 +876,9 @@ def test_completion_sentence_is_shown_only_when_the_cli_prints_it():
     assert parse_completion(["Analysis Complete! extra"]) is None
     assert parse_completion([]) is None
     script = Path("webui/static/app.js").read_text(encoding="utf-8")
-    assert "completionNote(data.progress)" in script
+    assert "completionNote(data.progress, run)" in script
     assert "progress.complete" in script
+    assert "不把它写成分析已完成" in script
     assert "分析已完成" in script
     source = Path("webui/service.py").read_text(encoding="utf-8")
     assert "print(COMPLETION_SENTENCE, flush=True)" in source
@@ -2126,6 +2131,9 @@ def test_settings_save_reports_failure_in_the_page():
     saver = script[script.index("async function saveConfigPart"):script.index("function modelAdvancedSection")]
     assert ".catch(() => {})" not in saver
     assert "error-banner" in saver
+    assert "保存结果未知，不把它写成已保存。" in saver
+    assert "result.saved !== true" in saver
+    assert 'feedback.textContent = doneText' in saver
 
 
 def test_whats_new_includes_the_cli_upgrade_line(monkeypatch):
@@ -2221,9 +2229,12 @@ def test_data_env_is_saved_without_being_echoed(monkeypatch, tmp_path):
     assert "/api/data-env" in script
     assert "不会回显" in script
     assert "保存数据凭据" in script
-    save_env = script[script.index("async function saveDataEnv"):script.index("async function beginLogin")]
+    save_env = script[script.index("function dataEnvSaveNotice"):script.index("async function beginLogin")]
     assert "await renderAccounts()" in save_env
     assert save_env.index("await api(\"/api/data-env\"") < save_env.index("await renderAccounts()")
+    assert "保存结果未知，不把它写成已保存。" in save_env
+    assert "result.saved === true" in save_env
+    assert "saved.push(result.env_var)" not in save_env
 
 
 def test_cloud_env_is_saved_without_being_echoed(monkeypatch, tmp_path):
@@ -2412,6 +2423,7 @@ def test_signed_in_status_includes_the_pre_run_plan_sentence(monkeypatch):
 
 
 def test_checkpoint_clear_uses_the_cli_sentence(monkeypatch, tmp_path):
+    monkeypatch.delenv("TRADINGAGENTS_CACHE_DIR", raising=False)
     monkeypatch.setattr(service, "_memory_root", lambda: tmp_path)
     monkeypatch.setenv("TRADINGAGENTS_WEBUI_HOME", str(tmp_path / "webui"))
     cache = tmp_path / "cache"
@@ -2465,7 +2477,8 @@ def test_second_start_is_refused_while_one_is_running(monkeypatch, tmp_path):
         idle = service.stop_run()
         assert idle["status"] == "stopped"
         assert idle["cli"] == "Stopping TradingAgents…"
-        assert "正在停止" in idle["zh"]
+        assert idle["zh"] == "任务已停止。不是正常完成。"
+        assert "分析" not in idle["zh"]
     finally:
         service.stop_run()
         service.set_spawn_argv(None)
@@ -2474,6 +2487,14 @@ def test_second_start_is_refused_while_one_is_running(monkeypatch, tmp_path):
     assert "没有查询" in absent["note"]
     script = Path("webui/static/app.js").read_text(encoding="utf-8")
     assert "result.cli" in script
+
+
+def test_a_stopped_backtest_is_not_called_an_analysis():
+    assert service.stopped_sentence({"kind": "backtest"}) == "回测已停止，不是正常完成。不把它写成分析。"
+    assert service.stopped_sentence({"kind": "analysis"}) == "任务已停止。不是正常完成。"
+    unknown = service.stopped_sentence({"kind": "index"})
+    assert unknown.startswith("任务已停止")
+    assert "不把它写成分析" in unknown
 
 
 def test_background_start_names_the_log_like_the_cli(monkeypatch, tmp_path):
@@ -5127,7 +5148,9 @@ def test_dead_console_process_is_not_called_complete(monkeypatch, tmp_path):
     })
     failed = service.refresh_run_process(service.JOBS.current_run())
     assert failed["status"] == "failed"
-    assert failed["detail"] == "分析进程已退出，但没有写出结果。进程退出不等于分析完成。"
+    assert failed["detail"] == service.UNKNOWN_EXIT_WITHOUT_RESULT
+    assert "分析进程" not in failed["detail"]
+    assert "不等于分析完成" not in failed["detail"]
     assert "Analysis Complete" not in json.dumps(failed)
     result = tmp_path / "done.json"
     result.write_text("{}", encoding="utf-8")
@@ -5149,6 +5172,7 @@ def test_dead_console_process_is_not_called_complete(monkeypatch, tmp_path):
             "status": "running",
             "pid": live.pid,
             "proc_start": service._process_start(live.pid),  # W39: pid and start time identify the worker
+            "argv": live.args,  # macOS identity also requires the exact recorded command.
             "ticker": "NVDA",
             "date": "2026-10-29",
         })
@@ -5159,6 +5183,239 @@ def test_dead_console_process_is_not_called_complete(monkeypatch, tmp_path):
         live.wait(timeout=5)
     script = Path("webui/static/app.js").read_text(encoding="utf-8")
     assert "run.detail" in script or "run?.detail" in script
+
+
+def test_a_dead_backtest_is_not_called_an_exited_analysis(monkeypatch, tmp_path):
+    import subprocess
+    import sys
+
+    monkeypatch.setenv("TRADINGAGENTS_WEBUI_HOME", str(tmp_path))
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.05)"])
+    proc.wait(timeout=5)
+    service.JOBS.write_run({
+        "id": "dead-bt",
+        "kind": "backtest",
+        "status": "running",
+        "pid": proc.pid,
+        "ticker": "NVDA",
+        "date": "2026-10-01..2026-10-08",
+        "result": str(tmp_path / "missing-bt.json"),
+    })
+    failed = service.refresh_run_process(service.JOBS.read_run("dead-bt"))
+    assert failed["status"] == "failed"
+    assert failed["detail"] == "回测进程已退出，但没有写出结果。进程退出不等于回测完成。"
+    assert "分析" not in failed["detail"]
+    assert service.exit_without_result_sentence({"kind": "analysis"}) == service.ANALYSIS_EXIT_WITHOUT_RESULT
+    assert "不把它写成分析完成" in service.exit_without_result_sentence({"kind": "index"})
+    script = Path("webui/static/app.js").read_text(encoding="utf-8")
+    body = script.split("function shownRunDetail", 1)[1].split("function exitNoticeHtml", 1)[0]
+    assert "ANALYSIS_EXIT_WITHOUT_RESULT" in body
+    assert 'kind !== "analysis"' in body
+    assert "回测进程已退出，但没有写出结果。进程退出不等于回测完成。" in script
+
+
+def test_a_finished_backtest_with_a_result_is_not_called_an_analysis(monkeypatch, tmp_path):
+    import subprocess
+    import sys
+
+    monkeypatch.setenv("TRADINGAGENTS_WEBUI_HOME", str(tmp_path))
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.05)"])
+    proc.wait(timeout=5)
+    result = tmp_path / "done-bt.json"
+    result.write_text("{}", encoding="utf-8")
+    service.JOBS.write_run({
+        "id": "done-bt",
+        "kind": "backtest",
+        "status": "running",
+        "pid": proc.pid,
+        "ticker": "NVDA",
+        "date": "2026-10-01..2026-10-08",
+        "result": str(result),
+    })
+    finished = service.refresh_run_process(service.JOBS.read_run("done-bt"))
+    assert finished["status"] == "finished"
+    assert finished["detail"] == "回测进程已退出，结果文件已写出。这只说明进程结束，不表示回测完成。"
+    assert "分析" not in finished["detail"]
+    assert "评级" not in finished["detail"]
+    assert service.result_written_sentence({"kind": "analysis"}) == service.RESULT_WRITTEN_SENTENCE
+    unknown = service.result_written_sentence({"kind": "index"})
+    assert "不把它写成分析完成" in unknown
+    assert "分析进程" not in unknown
+    script = Path("webui/static/app.js").read_text(encoding="utf-8")
+    assert "回测进程已退出，结果文件已写出。这只说明进程结束，不表示回测完成。" in script
+    assert "ANALYSIS_RESULT_WRITTEN" in script
+
+
+def test_a_reused_pid_on_a_backtest_is_not_called_an_analysis():
+    record = {"id": "bt-reused", "kind": "backtest", "status": "running"}
+    service._mark_pid_reused(record)
+    assert record["status"] == "failed" and record["pid_reused"] is True
+    assert record["detail"] == record["zh"]
+    assert record["detail"] == ("进程号现在属于另一个程序，启动时间对不上。"
+                                "原来的回测进程已经不在，没有写出结果。没有向那个程序发送信号。")
+    assert "分析进程" not in record["detail"]
+    assert service.pid_reused_sentence({"kind": "analysis"}) == service.PID_REUSED_SENTENCE
+    unknown = service.pid_reused_sentence({"kind": "index"})
+    assert "不把它写成分析进程" in unknown
+    assert "原来的分析进程" not in unknown
+    script = Path("webui/static/app.js").read_text(encoding="utf-8")
+    body = script.split("function shownRunDetail", 1)[1].split("function exitNoticeHtml", 1)[0]
+    assert "ANALYSIS_PID_REUSED" in body
+    assert 'kind !== "analysis"' in body
+
+
+def test_an_unverified_backtest_stop_is_not_called_an_analysis(monkeypatch):
+    record = {"id": "bt-unknown", "kind": "backtest", "status": "running", "pid": 1}
+    monkeypatch.setattr(service, "_worker_state", lambda _record: "unknown")
+    with pytest.raises(service.ConsoleError) as refused:
+        service._stop_record(record)
+    assert refused.value.status == 409
+    text = str(refused.value)
+    assert "无法确认这是回测进程" in text
+    assert "没有发送任何信号" in text
+    assert "\n下一步：" in text
+    assert "分析进程" not in text
+    assert service.process_unverified_sentence({"kind": "analysis"}) == service.PROCESS_UNVERIFIED_SENTENCE
+    unknown = service.process_unverified_sentence({"kind": "index"})
+    assert "不把它写成分析进程" in unknown
+    assert "本任务的分析进程" not in unknown
+    script = Path("webui/static/app.js").read_text(encoding="utf-8")
+    body = script.split("function shownStopRefusal", 1)[1].split("function stopRefusalHtml", 1)[0]
+    assert "ANALYSIS_UNVERIFIED_PREFIX" in body
+    assert 'kind !== "analysis"' in body
+
+
+def test_a_backtest_that_cannot_spawn_is_not_called_an_analysis(monkeypatch, tmp_path):
+    monkeypatch.setenv("TRADINGAGENTS_WEBUI_HOME", str(tmp_path))
+    log = tmp_path / "spawn.log"
+    log.write_text("", encoding="utf-8")
+
+    def boom(*_args, **_kwargs):
+        raise OSError("spawn failed")
+
+    monkeypatch.setattr(service.subprocess, "Popen", boom)
+
+    def launch(kind):
+        with pytest.raises(service.ConsoleError) as refused:
+            service._spawn({"job_path": "missing.job"}, {"id": kind, "kind": kind, "status": "running"}, log)
+        return str(refused.value)
+
+    backtest = launch("backtest")
+    assert backtest.startswith("控制台没能启动回测。对应命令行：")
+    assert "没能启动分析" not in backtest
+    assert "could not start the CLI" in backtest
+    assert launch("analysis").startswith("控制台没能启动分析。对应命令行：")
+    unknown = launch("index")
+    assert unknown.startswith("控制台没能启动这个任务。不把它写成分析。")
+    assert "没能启动分析" not in unknown
+    script = Path("webui/static/app.js").read_text(encoding="utf-8")
+    body = script.split("function backtestStartFailure", 1)[1].split("function backtestStartFailureHtml", 1)[0]
+    assert "控制台没能启动分析。" in body
+    assert "控制台没能启动回测。" in body
+
+
+def test_a_started_backtest_is_not_called_an_analysis_completion(tmp_path):
+    marked = service._mark_background_start({"kind": "backtest", "selections": {}}, tmp_path / "bt.log")
+    assert marked["zh"] == "已在后台启动。进程启动不等于回测完成。"
+    assert "分析完成" not in marked["zh"]
+    analysis = service._mark_background_start({"kind": "analysis", "selections": {}}, tmp_path / "an.log")
+    assert analysis["zh"] == "已在后台启动。进程启动不等于分析完成。"
+    unknown = service._mark_background_start({"kind": "index", "selections": {}}, tmp_path / "idx.log")
+    assert "不把它写成分析完成" in unknown["zh"]
+    assert "不等于分析完成" not in unknown["zh"]
+    script = Path("webui/static/app.js").read_text(encoding="utf-8")
+    body = script.split("function backtestStartZh", 1)[1].split("function backtestNotice", 1)[0]
+    assert "不等于分析完成" in body
+    assert "写成分析完成" in body
+
+
+def test_an_immediate_backtest_exit_is_not_called_an_analysis(monkeypatch, tmp_path):
+    monkeypatch.setenv("TRADINGAGENTS_WEBUI_HOME", str(tmp_path))
+    log = tmp_path / "bt.log"
+    log.write_text("", encoding="utf-8")
+
+    class _Dead:
+        pid = 4321
+        returncode = 1
+        def poll(self):
+            return 1
+
+    monkeypatch.setattr(service.subprocess, "Popen", lambda *_args, **_kwargs: _Dead())
+    monkeypatch.setattr(service, "_process_start", lambda _pid: None)
+    record = {"id": "bt-exit", "kind": "backtest", "status": "running", "selections": {}}
+    with pytest.raises(service.ConsoleError, match="background startup failed"):
+        service._spawn({"job_path": "missing.job"}, record, log)
+    saved = service.JOBS.read_run("bt-exit")
+    assert saved["status"] == "failed"
+    assert saved["zh"] == "后台启动失败。进程启动不等于回测完成。"
+    assert "分析完成" not in saved["zh"]
+    assert service.background_failed_zh({"kind": "analysis"}) == "后台启动失败。进程启动不等于分析完成。"
+    unknown = service.background_failed_zh({"kind": "index"})
+    assert "不把它写成分析完成" in unknown
+    assert "不等于分析完成" not in unknown
+    script = Path("webui/static/app.js").read_text(encoding="utf-8")
+    body = script.split("function backtestStartZh", 1)[1].split("function backtestNotice", 1)[0]
+    assert "后台启动失败" in body
+    assert "不等于回测完成" in body
+
+
+def test_an_idle_or_unknown_backtest_without_roles_is_not_a_list_completion_count():
+    idle = service._progress_counts({"id": "bt-idle", "status": "idle", "kind": "backtest", "selections": {}})
+    assert idle["blank"] is True
+    assert idle["unrecorded"] is False
+    assert idle["team_zh"] == "不写成准备中"
+    unknown = service._progress_counts({"id": "bt-mystery", "status": "mystery", "kind": "backtest", "selections": {}})
+    assert unknown["blank"] is True
+    assert unknown["unrecorded"] is False
+    assert unknown["team_zh"] == "不写成准备中"
+    running = service._progress_counts({"id": "bt-live", "status": "running", "kind": "backtest", "selections": {}})
+    assert running["blank"] is False
+    assert running["unrecorded"] is False
+    assert running["team_zh"] == "准备中"
+    finished = service._progress_counts({"id": "bt-fin", "status": "finished", "kind": "backtest", "selections": {}})
+    assert finished["unrecorded"] is True
+    assert finished["blank"] is False
+    queued = service._progress_counts({"id": "bt-queue", "status": "queued", "kind": "backtest", "selections": {}})
+    assert queued["blank"] is False
+
+
+def test_restarting_a_backtest_is_not_started_as_an_analysis(monkeypatch, tmp_path):
+    monkeypatch.setenv("TRADINGAGENTS_WEBUI_HOME", str(tmp_path))
+    service.JOBS.write_run({
+        "id": "bt-restart",
+        "kind": "backtest",
+        "status": "finished",
+        "ticker": "NVDA",
+        "selections": {"ticker": "NVDA"},
+    })
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("started")
+
+    monkeypatch.setattr(service, "start_validated_run", refuse)
+    with pytest.raises(service.ConsoleError) as refused:
+        service.restart_run(run_id="bt-restart")
+    assert refused.value.status == 409
+    assert str(refused.value) == "这是回测，不能按分析重新启动。没有启动。"
+    service.JOBS.write_run({
+        "id": "idx-restart",
+        "kind": "index",
+        "status": "finished",
+        "selections": {"ticker": "AAA"},
+    })
+    with pytest.raises(service.ConsoleError) as unknown:
+        service.restart_run(run_id="idx-restart")
+    assert "不把它写成分析重新启动" in str(unknown.value)
+    assert "没有启动" in str(unknown.value)
+    script = Path("webui/static/app.js").read_text(encoding="utf-8")
+    body = script.split("function restartRefusal", 1)[1].split("function restartRefusalHtml", 1)[0]
+    assert "不能按分析重新启动" in body
+    assert 'kind === "backtest"' in body
+    header = script.split("function runDetailHtml", 1)[1].split("function frameworkTitle", 1)[0]
+    assert 'run.kind === "backtest"' in header
+    assert '["failed", "finished", "stopped", "cancelled", "completed"].includes(run.status)' in header
+    assert 'runStatusLabel(run.status) === "状态未知"' in header
+    assert 'run.status === "idle"' in header
+    assert "重新启动" in header
 
 
 def test_models_page_shows_the_ollama_cli_lines():
@@ -5269,3 +5526,119 @@ def test_check_preface_does_not_claim_a_blank_date_came_from_the_flag():
     assert "ticker_from_default" in body
     assert "date_flag_prefix" in body
     assert "--date、--analysts" in body
+
+
+def test_a_result_without_saved_flag_is_not_called_saved():
+    script = Path("webui/static/app.js").read_text(encoding="utf-8")
+    body = script.split("function saveNotice", 1)[1].split("function fallbackSaveLines", 1)[0]
+    assert "保存结果未知，不把它写成已保存。" in body
+    assert "result.saved === true" in body
+    assert "result.saved === false" in body
+    assert 'return `<p class="notice">报告已保存。</p>' not in body
+
+
+def test_unknown_login_end_is_not_called_finished():
+    script = Path("webui/static/app.js").read_text(encoding="utf-8")
+    body = script.split("function loginEndNotice", 1)[1].split("async function beginLogin", 1)[0]
+    assert "登录状态未知，不把它写成已结束或已完成。" in body
+    assert 'status === "idle"' in body
+    assert 'status === "signed_in"' in body
+    assert '登录流程已结束。`' not in script
+
+
+def test_logout_without_outcome_is_not_called_signed_out():
+    script = Path("webui/static/app.js").read_text(encoding="utf-8")
+    body = script.split("function logoutNotice", 1)[1].split("async function logout", 1)[0]
+    assert "退出结果未知，不把它写成已退出。" in body
+    assert 'outcome === "revoked"' in body
+    assert 'outcome === "forgotten"' in body
+    assert "本来就没有登录，不把它写成已退出。" in body
+    logout_body = script[script.index("async function logout"):script.index("async function saveKey")]
+    assert "logoutNotice(" in logout_body
+    assert 'id="logout-note"' in logout_body
+    assert "narrowBreakHtml" in logout_body
+    assert 'result.zh || `${label} 已退出。`' not in logout_body
+    assert "escapeHtml(result.zh)" not in logout_body
+
+
+def test_stop_without_status_is_not_called_stopped():
+    script = Path("webui/static/app.js").read_text(encoding="utf-8")
+    body = script.split("function stopNotice", 1)[1].split("function cancelNotice", 1)[0]
+    assert "停止结果状态未知，不把它写成已停止。" in body
+    assert 'status === "stopped"' in body
+    assert 'status === "starting"' in body
+    assert "rememberNotice(stopNotice(result))" in script
+    assert 'result.zh || result.detail || "任务已停止。"' not in script
+
+
+def test_cancel_without_status_is_not_called_cancelled():
+    script = Path("webui/static/app.js").read_text(encoding="utf-8")
+    body = script.split("function cancelNotice", 1)[1].split("async function cancelQueuedRun", 1)[0]
+    assert "取消结果状态未知，不把它写成已取消排队。" in body
+    assert 'status === "cancelled"' in body
+    assert "rememberNotice(cancelNotice(result))" in script
+    assert 'result.zh || result.detail || "已取消排队。"' not in script
+
+
+def test_a_queued_restart_toast_is_not_a_success_mark():
+    script = Path("webui/static/app.js").read_text(encoding="utf-8")
+    body = script.split("function restartToastKind", 1)[1].split("function restartNotice", 1)[0]
+    assert 'if (status === "running") return "ok"' in body
+    assert 'if (!status) return "unknown"' in body
+    assert 'return "wait"' in body
+    assert "showToast(restartNotice(result, resume), restartToastKind(result))" in script
+
+
+def test_backtest_without_status_is_not_called_submitted():
+    script = Path("webui/static/app.js").read_text(encoding="utf-8")
+    body = script.split("function backtestNotice", 1)[1].split("function backtestPayload", 1)[0]
+    assert "回测状态未知，不把它写成已提交或已启动。" in body
+    assert "回测已提交" not in body
+    assert 'status === "queued"' in body
+    assert 'status === "running"' in body
+    assert 'status === "failed"' in body
+
+
+def test_restart_without_status_is_not_called_submitted():
+    script = Path("webui/static/app.js").read_text(encoding="utf-8")
+    body = script.split("function restartNotice", 1)[1].split("async function restartRun", 1)[0]
+    assert "任务状态未知，不把它写成已提交或已重新启动。" in body
+    assert "任务状态未知，不把它写成已提交或已从断点重新启动。" in body
+    assert "任务已提交" not in body
+    assert 'status === "queued"' in body
+    assert 'status === "running"' in body
+
+
+def test_unknown_launch_status_is_not_called_submitted():
+    script = Path("webui/static/app.js").read_text(encoding="utf-8")
+    body = script.split("function showLaunchStarted", 1)[1].split("const SIGN_IN_PROBLEM", 1)[0]
+    assert "任务状态未知，不把它写成已提交或已启动。" in body
+    assert "已提交任务" not in body
+    assert "任务已提交" not in body
+    assert 'queued ? "已加入队列"' in body
+    assert '"正在启动"' in body
+    assert '"已启动分析"' in body
+    assert 'launchDialog(running ? "ok" : queued || starting ? "wait" : "unknown"' in body
+
+
+def test_unknown_run_status_is_not_shown_raw():
+    script = Path("webui/static/app.js").read_text(encoding="utf-8")
+    body = script.split("function runStatusLabel", 1)[1].split("function runStatusClass", 1)[0]
+    assert '|| "状态未知"' in body
+    assert '|| status || "未知"' not in body
+    assert "不把它写成已结束，也不写成运行中" in script
+
+
+def test_unknown_role_status_is_not_called_in_progress():
+    script = Path("webui/static/app.js").read_text(encoding="utf-8")
+    assert "function knownAgentStatus" in script
+    assert "角色状态未知，不把它写成进行中或已完成。" in script
+    assert 'unknown: ["wait", "状态未知"]' in script
+
+
+def test_ended_run_without_finish_time_is_not_timed_until_now():
+    script = Path("webui/static/app.js").read_text(encoding="utf-8")
+    body = script.split("function elapsedText", 1)[1].split("function statusPill", 1)[0]
+    assert "if (!Number.isFinite(endRaw)) return" in body
+    assert "endRaw = Date.now()" not in body
+    assert "没有结束时间，不按当前时间计算已用时间。" in script

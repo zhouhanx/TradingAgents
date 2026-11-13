@@ -110,6 +110,18 @@ def build_failure(exc: BaseException, job: dict | None = None) -> dict:
         "run_id": (job or {}).get("id"),
     }
     failure["summary"] = summary(failure)
+    try:
+        from webui.cost import classify_failure
+
+        classified = classify_failure(exc)
+        # unknown means no structured field. Leave it off so a timeout or other
+        # call-policy kind is not replaced by a weaker "unknown" label.
+        if classified.get("kind") != "unknown":
+            health = provider_health(str(classified.get("kind") or ""), bool(classified.get("budget")))
+            if health is not None:
+                failure["provider_health"] = health
+    except Exception:
+        pass
     return failure
 
 
@@ -225,6 +237,19 @@ def safe_text(value: str) -> str:
     return value.encode("utf-8", "replace").decode("utf-8")
 
 
+_HEALTH_KINDS = frozenset({"rate_limit", "budget_exceeded", "call_timeout", "unknown", "auth", "not_budget"})
+
+
+def provider_health(kind: str, budget: bool) -> dict | None:
+    """Only the structured classification. A mismatched budget flag is dropped."""
+    if kind not in _HEALTH_KINDS:
+        return None
+    flagged = bool(budget)
+    if flagged != (kind == "budget_exceeded"):
+        return None
+    return {"kind": kind, "budget": flagged}
+
+
 def clean_failure(data) -> dict | None:
     """``data`` reduced to the failure schema, every text field redacted.
 
@@ -253,6 +278,12 @@ def clean_failure(data) -> dict | None:
         if count is not None:
             clean[key] = count
     clean["budget_exhausted"] = data.get("budget_exhausted") is True
+    health = provider_health(
+        str((data.get("provider_health") or {}).get("kind") or "") if isinstance(data.get("provider_health"), dict) else "",
+        bool(isinstance(data.get("provider_health"), dict) and data["provider_health"].get("budget") is True),
+    )
+    if health is not None:
+        clean["provider_health"] = health
     checkpoint = _checkpoint(data.get("checkpoint"))
     if checkpoint is not None:
         clean["checkpoint"] = checkpoint

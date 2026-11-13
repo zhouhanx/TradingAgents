@@ -29,6 +29,7 @@ from tradingagents.dataflows.info_crawl.base import (
     TTLCache,
 )
 from tradingagents.dataflows.info_crawl.rss import parse_feed
+from webui import server  # Load before the shared signed-in fixture inspects sys.modules.
 
 ROOT = Path(__file__).resolve().parents[1]
 PKG = ROOT / "tradingagents" / "dataflows" / "info_crawl"
@@ -356,7 +357,7 @@ _CONNECT, _GETADDRINFO = socket.socket.connect, socket.getaddrinfo
 
 @pytest.fixture
 def console(monkeypatch, tmp_path):
-    from webui import info_crawl, server
+    from webui import info_crawl
     refused_connect, refused_lookup = socket.socket.connect, socket.getaddrinfo
     monkeypatch.setattr(socket.socket, "connect", lambda sock, address: (
         _CONNECT if address[0] == "127.0.0.1" else refused_connect)(sock, address))

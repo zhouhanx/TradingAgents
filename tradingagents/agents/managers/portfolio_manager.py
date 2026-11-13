@@ -16,7 +16,7 @@ from tradingagents.agents.context import (
     get_portfolio_context_from_state,
 )
 from tradingagents.agents.rating import parse_rating
-from tradingagents.agents.schemas import PortfolioDecision, render_pm_decision
+from tradingagents.agents.schemas import PortfolioDecision, decision_record, render_pm_decision
 from tradingagents.agents.structured import NO_EXTERNAL_TOOLS, bind_structured, invoke_structured
 
 
@@ -81,9 +81,11 @@ Write these sections, in this order, starting with the rating on its own line:
         if decision is not None:
             final_trade_decision = render_pm_decision(decision)
             final_rating = decision.rating.value
+            recorded = decision_record(decision, final_rating)
         else:
             final_trade_decision = llm.invoke(prompt).content
             final_rating = parse_rating(final_trade_decision)
+            recorded = decision_record(None, final_rating)
 
         new_risk_debate_state = {
             "history": risk_debate_state["history"],
@@ -101,6 +103,7 @@ Write these sections, in this order, starting with the rating on its own line:
             "risk_debate_state": new_risk_debate_state,
             "final_trade_decision": final_trade_decision,
             "final_rating": final_rating,
+            "decision_record": recorded,
         }
 
     return portfolio_manager_node

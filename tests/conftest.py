@@ -253,10 +253,20 @@ def _no_real_dotenv(monkeypatch):
 def _console_signed_in(request, monkeypatch, tmp_path_factory):
     import http.client
     import secrets
-    import sys
 
-    server = sys.modules.get("webui.server")
-    if server is None or request.node.get_closest_marker("console_signed_out"):
+    if request.node.get_closest_marker("console_signed_out"):
+        yield
+        return
+    # Import it here rather than rely on an earlier test having imported it: a test
+    # that imports webui.server inside its own fixture (or runs alone / first) must
+    # still get the signed-in console (no hidden order dependency).
+    import importlib
+
+    try:
+        server = importlib.import_module("webui.server")
+    except ImportError:
+        server = None
+    if server is None:
         yield
         return
     from webui import console_auth

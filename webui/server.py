@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, urlsplit
 
-from webui import console_auth, info_crawl, service
+from webui import compare, console_auth, cost, info_crawl, schedule, service, watchlist
 from webui.catalog import PROVIDER_ICONS, provider_rows, public_catalog
 from webui.frameworks import DEFAULT_FRAMEWORK, public_frameworks, public_tools
 
@@ -287,6 +287,28 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._info_call(reader)
             return
+        if parsed.path == "/api/watchlist":
+            self._call(watchlist.list_watch)
+            return
+        if parsed.path == "/api/schedule":
+            self._call(schedule.list_schedules)
+            return
+        if parsed.path == "/api/cost":
+            self._call(cost.list_cost)
+            return
+        if parsed.path == "/api/compare":
+            query = parse_qs(parsed.query)
+            left = (query.get("left") or [""])[0]
+            right = (query.get("right") or [""])[0]
+            if left and right:
+                self._call(lambda: compare.compare_pair(left, right))
+            else:
+                self._call(compare.list_compare)
+            return
+        if parsed.path == "/api/compare/replay":
+            query = parse_qs(parsed.query)
+            self._call(lambda: compare.replay_run((query.get("id") or [""])[0]))
+            return
         if parsed.path == "/api/kline/search":
             # V2-UI-FIX-1: symbol suggestions (local CN names + Yahoo search); same token rule.
             query = parse_qs(parsed.query)
@@ -295,12 +317,16 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/kline/latest":
             # V2-KLINE-RT: the newest bar for the page's visible-only polling; same token rule.
             query = parse_qs(parsed.query)
-            self._kline_latest((query.get("symbol") or [""])[0])
+            self._kline_latest((query.get("symbol") or [""])[0], (query.get("tf") or [""])[0])
             return
         if parsed.path == "/api/kline":
             # V2-KLINE: K 线行情 bars; read-only, same session-token rule as every API read.
             query = parse_qs(parsed.query)
-            self._kline((query.get("symbol") or [""])[0], (query.get("tf") or [""])[0])
+            self._kline(
+                (query.get("symbol") or [""])[0],
+                (query.get("tf") or [""])[0],
+                (query.get("refresh") or [""])[0] in {"1", "true"},
+            )
             return
         if parsed.path == "/api/models":
             query = parse_qs(parsed.query)
@@ -402,7 +428,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/auth/login": lambda: service.start_login(body.get("provider") if "provider" in body else None),
             "/api/auth/login/paste": lambda: service.JOBS.paste_login(str(body.get("url") or "")),
             "/api/auth/logout": lambda: service.logout(body.get("provider") if "provider" in body else None),
-            "/api/config": lambda: service.save_config(body),
+            "/api/config": lambda: service.save_config_result(body),
             "/api/keys": lambda: service.save_api_key(str(body.get("provider") or ""), str(body.get("key") or "")),
             "/api/data-env": lambda: service.save_data_env(str(body.get("env") or ""), str(body.get("value") or "")),
             "/api/runs": lambda: self._start(body),
@@ -414,6 +440,23 @@ class Handler(BaseHTTPRequestHandler):
             "/api/backtests": lambda: service.start_backtest(body),
             "/api/checkpoints/clear": lambda: service.clear_checkpoints(),
             "/api/updates/refresh": lambda: service.refresh_updates(),
+            "/api/local-import/validate": lambda: service.validate_local_import(body),
+            "/api/watchlist": lambda: watchlist.add_symbol(body.get("symbol")),
+            "/api/watchlist/remove": lambda: watchlist.remove_symbol(body.get("symbol")),
+            "/api/watchlist/refresh": lambda: watchlist.refresh(
+                body.get("quotes") or {},
+                decisions=body.get("decisions") if isinstance(body.get("decisions"), dict) else None,
+                observe_local=not isinstance(body.get("decisions"), dict),
+            ),
+            "/api/watchlist/kline": lambda: watchlist.open_kline(body.get("symbol")),
+            "/api/watchlist/analyze": lambda: watchlist.explicit_analyze(body.get("symbol")),
+            "/api/schedule": lambda: schedule.create_schedule(body.get("symbol"), body.get("at")),
+            "/api/schedule/pause": lambda: schedule.set_status(str(body.get("id") or ""), "paused"),
+            "/api/schedule/resume": lambda: schedule.set_status(str(body.get("id") or ""), "active"),
+            "/api/schedule/remove": lambda: schedule.set_status(str(body.get("id") or ""), "removed"),
+            "/api/schedule/manual": lambda: schedule.manual_run(str(body.get("id") or "")),
+            "/api/schedule/tick": lambda: _schedule_tick(body),
+            "/api/schedule/drop": lambda: schedule.drop_reminder(str(body.get("id") or ""), str(body.get("reason") or "")),
         }
         if parsed.path == "/api/info-crawl/jobs":
             self._info_call(lambda: info_crawl.start_job(body))
@@ -459,6 +502,14 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self._json(func())
         except service.ConsoleError as exc:
+            self._json({"error": str(exc)}, exc.status)
+        except watchlist.WatchlistError as exc:
+            self._json({"error": str(exc)}, exc.status)
+        except schedule.ScheduleError as exc:
+            self._json({"error": str(exc)}, exc.status)
+        except cost.CostError as exc:
+            self._json({"error": str(exc)}, exc.status)
+        except compare.CompareError as exc:
             self._json({"error": str(exc)}, exc.status)
         except Exception as exc:  # surface the failure; do not pretend success
             # The exception text can carry OS errors and server paths: it goes to the
@@ -569,11 +620,12 @@ class Handler(BaseHTTPRequestHandler):
         markup = markup.replace('<meta charset="utf-8">', f'<meta charset="utf-8">\n  {meta}', 1)
         self._html(markup)
 
-    def _kline(self, symbol: str, tf: str) -> None:
+    def _kline(self, symbol: str, tf: str, refresh: bool = False) -> None:
         from webui import kline as kline_data
 
         try:
-            self._json(kline_data.kline(symbol, tf or None))
+            answer = kline_data.kline(symbol, tf or None, refresh=True) if refresh else kline_data.kline(symbol, tf or None)
+            self._json(answer)
         except kline_data.KlineError as exc:
             self._json({"error": str(exc)}, 400)
 
@@ -585,11 +637,11 @@ class Handler(BaseHTTPRequestHandler):
         except kline_data.KlineError as exc:
             self._json({"error": str(exc)}, 400)
 
-    def _kline_latest(self, symbol: str) -> None:
+    def _kline_latest(self, symbol: str, tf: str = "") -> None:
         from webui import kline as kline_data
 
         try:
-            self._json(kline_data.latest(symbol))
+            self._json(kline_data.latest(symbol, tf or None))
         except kline_data.KlineError as exc:
             self._json({"error": str(exc)}, 400)
 
@@ -708,6 +760,18 @@ def _log_internal_error(method: str, path: str, exc: BaseException) -> None:
 RUN_ID_REQUIRED = "请求里的任务 id 为空或不是文字，没有对任何任务执行操作。"
 
 
+def _schedule_tick(body: dict) -> dict:
+    """One local schedule pass. The page omits now and events; tests may pass them."""
+    from datetime import datetime
+
+    raw = body.get("now")
+    moment = None
+    if raw:
+        moment = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    events = body.get("events") if isinstance(body.get("events"), list) else None
+    return schedule.tick(moment, events=events, observe_local=events is None)
+
+
 def _run_id(body: dict) -> str:
     """The run a stop / restart / cancel names.
 
@@ -778,21 +842,42 @@ def serve(host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:
     return httpd
 
 
+SCHEDULE_TICK_EVERY = 60.0
+
+
+def tick_open_schedules() -> None:
+    """Record a due slot while the console is open, even off the schedule page.
+
+    Does not call a model. A home with no schedule file is left untouched.
+    """
+    if not (service.webui_home() / "schedule.json").is_file():
+        return
+    schedule.tick(observe_local=True)
+
+
 def start_run_dispatcher(interval: float = 2.0) -> threading.Thread:
     """Recover runs left by an earlier console, then keep starting queued runs (RUN-004).
 
     See ``service.recover_runs_on_start`` for what happens to running and queued
-    runs across a console restart.
+    runs across a console restart. A saved schedule is also checked at start and
+    about once a minute, so a due slot is not lost while another page is open.
     """
     import contextlib
     with contextlib.suppress(Exception):
         service.recover_runs_on_start()
+    with contextlib.suppress(Exception):
+        tick_open_schedules()
 
     def loop() -> None:
+        last_schedule = time.monotonic()
         while True:
             time.sleep(interval)
             with contextlib.suppress(Exception):
                 service.dispatch_queue()
+            if time.monotonic() - last_schedule >= SCHEDULE_TICK_EVERY:
+                last_schedule = time.monotonic()
+                with contextlib.suppress(Exception):
+                    tick_open_schedules()
 
     thread = threading.Thread(target=loop, name="webui-run-dispatcher", daemon=True)
     thread.start()

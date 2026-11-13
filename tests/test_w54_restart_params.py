@@ -44,7 +44,7 @@ FAKE_REFRESH = "rt_W54FAKErefresh5555aaaa"
 FAKES = (FAKE_KEY, FAKE_TOKEN, FAKE_REFRESH, "W54FAKE")
 BOUNDARY = "ModelBoundaryReached"
 
-WORKER = textwrap.dedent("""
+_WORKER_SOURCE = textwrap.dedent("""
     import json, os, socket, sys
     def _blocked(*a, **k):
         raise OSError("network blocked in the W54 test")
@@ -64,6 +64,11 @@ WORKER = textwrap.dedent("""
     from webui import worker
     sys.exit(worker.main([job_path]))
 """)
+# macOS ``ps`` exposes a ``python -c`` argument with embedded newlines as
+# literal ``\\012`` escapes.  The console's identity check intentionally
+# compares argv exactly, so keep the recorded command line single-line while
+# retaining the readable source above.
+WORKER = f"exec(compile({_WORKER_SOURCE!r}, '<w54-worker>', 'exec'))"
 
 
 @pytest.fixture

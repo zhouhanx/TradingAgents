@@ -250,6 +250,13 @@ class PortfolioDecision(BaseModel):
             "incorporate them; otherwise rely solely on the current analysis."
         ),
     )
+    evidence: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Short quotations copied from the analysts' text already in this prompt. "
+            "Leave empty when the prompt has no such quotation. Do not invent a quote."
+        ),
+    )
     price_target: float | None = Field(
         default=None,
         description="Optional target price in the instrument's quote currency.",
@@ -263,6 +270,26 @@ class PortfolioDecision(BaseModel):
     @classmethod
     def _nullish_float_to_none(cls, v):
         return _coerce_optional_float(v)
+
+
+
+def decision_record(decision: PortfolioDecision | None, rating: str) -> dict:
+    """Structured decision for compare. Free text never becomes evidence quotes."""
+    if decision is None:
+        return {"rating": rating, "summary": "", "evidence": [], "source": "free_text"}
+    quotes = []
+    for item in decision.evidence or []:
+        text_item = str(item or "").strip()
+        if text_item:
+            quotes.append(text_item[:240])
+        if len(quotes) == 8:
+            break
+    return {
+        "rating": decision.rating.value,
+        "summary": decision.executive_summary,
+        "evidence": quotes,
+        "source": "structured",
+    }
 
 
 def render_pm_decision(decision: PortfolioDecision) -> str:

@@ -106,7 +106,7 @@ def test_two_run_and_the_third_is_queued_with_the_real_queue_position(sleepers):
     assert c.get("pid") is None and not Path(c["log"]).exists()
     data = service.api_runs()
     assert [r["ticker"] for r in data["runs"]] == ["AAA", "BBB", "CCC", "DDD"]
-    assert data["counts"] == {"all": 4, "running": 2, "queued": 2, "failed": 0, "finished": 0}
+    assert data["counts"] == {"all": 4, "running": 2, "starting": 0, "stopping": 0, "queued": 2, "failed": 0, "finished": 0}
     assert [r["position"] for r in data["runs"]] == [None, None, 1, 2]
     assert data["runs"][2]["team_zh"] == "等待开始" and data["runs"][2]["done"] == 0
 
@@ -128,10 +128,11 @@ def test_an_in_process_run_that_ends_starts_the_next_queued_run(home, monkeypatc
     ran = []
     service.set_runner(lambda job: ran.append(job["selections"]["ticker"]) or 0)
     # occupy the one slot with a record whose process is alive
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    worker_argv = [sys.executable, "-c", "import time; time.sleep(30)"]
+    child = subprocess.Popen(worker_argv)
     try:
         service.JOBS.write_run({"id": "busy", "status": "running", "pid": child.pid, "started_at": "2026-10-31T09:00:00",
-                                "proc_start": service._process_start(child.pid)})
+                                "proc_start": service._process_start(child.pid), "argv": worker_argv})
         queued = service.start_validated_run({**SEL, "ticker": "QQQ"}, background=False)
         assert queued["status"] == "queued" and ran == []
     finally:
@@ -490,6 +491,124 @@ def test_a_running_run_whose_pid_was_reused_is_failed_by_the_status_read(sleeper
         other.wait()
 
 
+def test_a_completed_run_whose_pid_was_reused_is_finished_and_frees_the_slot(sleepers):
+    """A written result is completion even when macOS has already reused the pid.
+
+    The unrelated process must not be signalled, and the freed slot starts the queue.
+    """
+    running, _other_running = _start("AAA"), _start("BBB")
+    queued = _start("CCC")
+    assert service.JOBS.read_run(queued["id"])["status"] == "queued"
+    record = service.JOBS.read_run(running["id"])
+    Path(record["result"]).write_text('{"decision": "HOLD"}', encoding="utf-8")
+    _kill(running)
+    other = _unrelated_sleeper()
+    try:
+        service.JOBS.write_run({**service.JOBS.read_run(running["id"]), "pid": other.pid, "status": "running"})
+        assert service._worker_state(service.JOBS.read_run(running["id"])) == "foreign"
+        refreshed = service.refresh_run_process(service.JOBS.read_run(running["id"]))
+        assert refreshed["status"] == "finished" and refreshed.get("pid_reused") is not True
+        assert refreshed["detail"] == service.RESULT_WRITTEN_SENTENCE
+        assert other.poll() is None
+        started = service.dispatch_queue()
+        assert [item["id"] for item in started] == [queued["id"]]
+        assert service._slots_used(service._refresh_all(), service.run_limits()) == 2
+    finally:
+        other.kill()
+        other.wait()
+
+
+def test_stop_on_a_completed_reused_pid_does_not_signal(sleepers):
+    running = _start("AAA")
+    record = service.JOBS.read_run(running["id"])
+    Path(record["result"]).write_text("{}", encoding="utf-8")
+    _kill(running)
+    other = _unrelated_sleeper()
+    try:
+        service.JOBS.write_run({**service.JOBS.read_run(running["id"]), "pid": other.pid, "status": "running"})
+        answer = service.stop_run(running["id"])
+        assert answer["status"] == "finished" and answer.get("pid_reused") is not True
+        time.sleep(0.2)
+        assert other.poll() is None
+    finally:
+        other.kill()
+        other.wait()
+
+
+def test_linux_proc_zombie_and_start_tick_are_not_a_live_worker(home, monkeypatch):
+    """Linux /proc identifies a zombie and a start tick without calling ps."""
+    pid = 424242
+    fields = ["Z", *["1"] * 18, "987654"]
+    stat = f"{pid} (python) " + " ".join(fields)
+
+    original = Path.read_text
+
+    def read_text(self, *args, **kwargs):
+        if str(self) == f"/proc/{pid}/stat":
+            return stat
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(service, "_reap", lambda _pid: False)
+    monkeypatch.setattr(os, "kill", lambda _pid, _sig: None)
+    assert service._is_zombie(pid) is True
+    assert service._alive(pid) is False
+    assert service._process_start(pid) == "proc:987654"
+    result = home / "done.json"
+    result.parent.mkdir(parents=True, exist_ok=True)
+    result.write_text("{}", encoding="utf-8")
+    service.JOBS.write_run({"id": "z1", "status": "running", "pid": pid, "result": str(result),
+                            "proc_start": "proc:1"})
+    done = service.refresh_run_process(service.JOBS.read_run("z1"))
+    assert done["status"] == "finished"
+    assert service._slots_used(service.JOBS.list_runs(), service.run_limits()) == 0
+
+
+def test_proc_start_mismatch_with_a_result_finishes_and_without_one_frees_the_slot(home, monkeypatch):
+    """A /proc start-tick mismatch is foreign. A written result still completes the run."""
+    pid = 515151
+    monkeypatch.setattr(service, "_reap", lambda _pid: False)
+    monkeypatch.setattr(service, "_is_zombie", lambda _pid: False)
+    monkeypatch.setattr(os, "kill", lambda _pid, _sig: None)
+    monkeypatch.setattr(service, "_process_start", lambda _pid: "proc:222")
+    result = home / "out.json"
+    result.parent.mkdir(parents=True, exist_ok=True)
+    result.write_text('{"decision": "HOLD"}', encoding="utf-8")
+    service.JOBS.write_run({"id": "m1", "status": "running", "pid": pid, "result": str(result),
+                            "proc_start": "proc:111", "argv": ["python", "-m", "webui.worker", "job"]})
+    assert service._worker_state(service.JOBS.read_run("m1")) == "foreign"
+    done = service.refresh_run_process(service.JOBS.read_run("m1"))
+    assert done["status"] == "finished" and done.get("pid_reused") is not True
+    service.JOBS.write_run({"id": "m2", "status": "running", "pid": pid, "result": str(home / "missing.json"),
+                            "proc_start": "proc:111", "argv": ["python", "-m", "webui.worker", "job"]})
+    failed = service.refresh_run_process(service.JOBS.read_run("m2"))
+    assert failed["status"] == "failed" and failed["pid_reused"] is True
+    assert service._slots_used(service._refresh_all(), service.run_limits()) == 0
+
+
+def test_macos_ps_zombie_does_not_hold_a_slot(home, monkeypatch):
+    """macOS has no /proc; ps stat=Z is the zombie boundary and must free the slot."""
+    pid = 616161
+    monkeypatch.setattr(service, "_reap", lambda _pid: False)
+    monkeypatch.setattr(os, "kill", lambda _pid, _sig: None)
+
+    def ps(argv, **kwargs):
+        class Done:
+            returncode = 0
+            stdout = "Z\n" if "stat=" in argv else ""
+            stderr = ""
+        return Done()
+
+    monkeypatch.setattr(service.subprocess, "run", ps)
+    assert service._is_zombie(pid) is True
+    assert service._alive(pid) is False
+    service.JOBS.write_run({"id": "mz", "status": "running", "pid": pid, "result": str(home / "none.json"),
+                            "proc_start": "ps:old"})
+    failed = service.refresh_run_process(service.JOBS.read_run("mz"))
+    assert failed["status"] == "failed" and failed.get("pid_reused") is not True
+    assert service._slots_used(service.JOBS.list_runs(), service.run_limits()) == 0
+
+
 def test_a_record_without_a_start_time_is_ours_only_when_its_command_line_names_the_run(home):
     run_id = "20261031_120000_0123abcd"
     mine = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", f"/x/{run_id}.job.json"], start_new_session=True)
@@ -695,3 +814,37 @@ def test_linux_tick_stamp_still_needs_no_command_line(monkeypatch):
     monkeypatch.setattr(service, "_process_start", lambda pid: "proc:123456")
     monkeypatch.setattr(service, "_process_cmdline", lambda pid: (_ for _ in ()).throw(AssertionError("not read")))
     assert service._worker_state(_mac_record(proc_start="proc:123456")) == "ours"
+
+
+def test_stopping_and_starting_are_not_called_running():
+    records = [
+        {"id": "run-live", "status": "running", "ticker": "AAPL"},
+        {"id": "run-stop", "status": "stopping", "ticker": "TSLA"},
+        {"id": "run-start", "status": "starting", "ticker": "IBM"},
+    ]
+    _positions, _rows, counts, _listing = service._run_listing(records)
+    assert counts["running"] == 1
+    assert counts["stopping"] == 1
+    assert counts["starting"] == 1
+    script = Path("webui/static/app.js").read_text(encoding="utf-8")
+    assert 'filter === "running") return item.status === "running"' in script
+    assert "个停止中" in script
+    assert "个启动中" in script
+    assert "LIVE_RUN" not in script
+
+
+def test_queue_full_sentence_does_not_call_stopping_running():
+    limits = {"max_running": 2, "max_queued": 5}
+    same = service.queue_full_sentence(limits, 2, 5)
+    assert same.startswith("队列已满：2 个任务运行中，5 个在排队")
+    mixed = service.queue_full_sentence(limits, 1, 5, stopping=1)
+    assert mixed.startswith("队列已满：1 个任务运行中，1 个停止中，5 个在排队")
+    assert "2 个任务运行中" not in mixed
+    only_stopping = service.queue_full_sentence(limits, 0, 5, stopping=2)
+    assert only_stopping.startswith("队列已满：2 个停止中，5 个在排队")
+    assert "运行中" not in only_stopping.split("（", 1)[0]
+    busy = service.backtest_busy_sentence(limits, 1, 0, stopping=1)
+    assert "停止中 1 个" in busy
+    assert "正在运行 2 个" not in busy
+    unchanged = service.backtest_busy_sentence(limits, 2, 1)
+    assert "正在运行 2 个，上限 2 个，另有 1 个在排队" in unchanged
