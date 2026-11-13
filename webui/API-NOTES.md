@@ -66,3 +66,8 @@
   - `currency` 去空格转大写后须为三个字母（USD、CNY…）。不写时为 USD；写了但不合法时该模型「价格未知」（W246）。
   - 一次运行里已计价的角色用了不止一种币种时，合计显示「币种不一致，不计入合计」，各角色仍各自显示金额和币种（W245）。页面没有跨运行的总计。
   - 单价文件可带 UTF-8 BOM（W247）。
+- **V2-COST-PRICING-2**：
+  - 运行合计：各角色金额显示时仍各自舍入到 0.000001；合计用各角色未舍入的精确金额（Decimal）相加，最后只舍入一次（W251）。所以合计可能和页面上各角色金额之和差最后一位。
+  - `cache_read_per_million: null` 等同于没写：缓存命中按输入单价计，旁注「缓存命中按输入单价计」（W254）。
+  - `cache_read`（`cached_tokens`）不是整数、为负数或大于 `input_tokens` 时，如果原始 `token_usage` 里有合法的 `prompt_cache_hit_tokens`（0 ≤ 命中数 ≤ 输入），用量记录改用它，只记一次，并写 `cache_read_source: "prompt_cache_hit_tokens:invalid_cache_read"`（W252）。只有 `prompt_cache_hit_tokens` 时仍写 `"prompt_cache_hit_tokens"`。
+  - 回退之后仍不合法的缓存命中数按 0 个命中计价，即全部输入按 `input_per_million` 计（W254）。

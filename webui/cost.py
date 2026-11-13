@@ -37,6 +37,14 @@ A price must be a JSON number or a plain decimal string (``"0.50"``, not
 left out means USD, anything else makes the model 价格未知 (W246). A run whose
 priced roles use more than one currency shows 币种不一致，不计入合计 instead of a
 total; each role keeps its own amount and currency (W245).
+
+V2-COST-PRICING-2: each role shows its amount rounded to TOLERANCE_COST, but the
+run total adds the exact (unrounded) role amounts and rounds once, so it can differ
+from the sum of the shown role amounts in the last digit (W251).
+``"cache_read_per_million": null`` is the same as leaving it out. A cache-hit
+count that is not an integer, negative, or above ``input_tokens`` (after the usage
+record's fallback to DeepSeek's ``prompt_cache_hit_tokens``) is priced as 0 hits:
+all input at ``input_per_million`` (W252, W254).
 """
 
 from __future__ import annotations
@@ -522,19 +530,24 @@ def _price(model: str, prices: dict) -> dict | None:
     }
 
 
-def _money(tokens_in: int, tokens_out: int, price: dict, cache_read: int = 0) -> Decimal:
+def _exact_money(tokens_in: int, tokens_out: int, price: dict, cache_read: int = 0) -> Decimal:
     """Input = cache hits at ``cache_read_per_million`` + the rest at ``input_per_million``.
 
     Without a cache price every input token is priced at the input price (the caller
-    marks the row CACHE_AT_INPUT_NOTE when there were hits).
+    marks the row CACHE_AT_INPUT_NOTE when there were hits). Not rounded: the run
+    total adds these exact amounts and rounds once (W251).
     """
     million = Decimal(1_000_000)
     cache_price = price.get("cache_read_per_million")
     hits = min(max(int(cache_read or 0), 0), tokens_in) if cache_price is not None else 0
     amount = (Decimal(tokens_in - hits) * price["input_per_million"] + Decimal(hits) * cache_price
               if hits else Decimal(tokens_in) * price["input_per_million"])
-    amount = (amount + Decimal(tokens_out) * price["output_per_million"]) / million
-    return amount.quantize(TOLERANCE_COST)
+    return (amount + Decimal(tokens_out) * price["output_per_million"]) / million
+
+
+def _money(tokens_in: int, tokens_out: int, price: dict, cache_read: int = 0) -> Decimal:
+    """One role's amount as shown: the exact amount rounded to TOLERANCE_COST."""
+    return _exact_money(tokens_in, tokens_out, price, cache_read).quantize(TOLERANCE_COST)
 
 
 def _money_text(amount: Decimal, currency: str) -> str:
@@ -591,14 +604,15 @@ def _view_run(record: dict, prices: dict, root: Path | None = None) -> dict:
             hits = used.get("cache_read") or 0
             if price is not None:
                 try:
-                    amount = _money(incoming, outgoing, price, hits)
+                    exact = _exact_money(incoming, outgoing, price, hits)
+                    amount = exact.quantize(TOLERANCE_COST)
                 except (InvalidOperation, ArithmeticError):
                     amount = None  # too large to state to the cent: unknown, not a 500
             if amount is None:
                 api_known = False
                 cost_text = "价格未知"
             else:
-                api_amount += amount
+                api_amount += exact  # W251: exact amounts summed, rounded once below
                 api_currency = price["currency"]
                 currencies.add(price["currency"])
                 cost_text = _money_text(amount, price["currency"])
@@ -679,7 +693,10 @@ def _view_run(record: dict, prices: dict, root: Path | None = None) -> dict:
     elif len(currencies) > 1:
         api_text = MIXED_CURRENCY_TEXT  # W245: never add USD to CNY
     else:
-        api_text = _money_text(api_amount, api_currency or "USD")
+        try:
+            api_text = _money_text(api_amount.quantize(TOLERANCE_COST), api_currency or "USD")
+        except (InvalidOperation, ArithmeticError):
+            api_text = "价格未知"
     show_role_money = bool(
         reconciled and reconciled.get("provider_total") and reconciled.get("matches_provider")
         and not unassigned and api_known

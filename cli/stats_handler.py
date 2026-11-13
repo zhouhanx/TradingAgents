@@ -48,6 +48,12 @@ def _details(value) -> dict:
     return {str(key): number for key, value in value.items() if (number := _count(value)) is not None}
 
 
+CACHE_SOURCE_HIT_TOKENS = "prompt_cache_hit_tokens"
+# W252: the response's cache_read (cached_tokens) was out of range or not an integer,
+# so the valid prompt_cache_hit_tokens replaced it.
+CACHE_SOURCE_HIT_TOKENS_AFTER_INVALID = "prompt_cache_hit_tokens:invalid_cache_read"
+
+
 def _input_details(usage_metadata: dict, message, response) -> tuple[dict, str]:
     """``input_token_details`` plus DeepSeek's cache hits when LangChain dropped them.
 
@@ -55,11 +61,19 @@ def _input_details(usage_metadata: dict, message, response) -> tuple[dict, str]:
     DeepSeek also sends ``prompt_cache_hit_tokens`` (the same number); a response with
     only that field would lose the hits, so read it from the raw ``token_usage``
     (non-streaming calls keep it). Never added on top of an existing ``cache_read``.
+
+    W252: a ``cache_read`` that is not an integer, negative, or above ``input_tokens``
+    does not block a valid ``prompt_cache_hit_tokens`` (0 <= hits <= input): the hits
+    replace it (one count, never both) and ``cache_read_source`` says so. With no valid
+    fallback the row keeps what the provider sent; the cost page prices it as 0 hits.
     """
-    details = _details(usage_metadata.get("input_token_details"))
-    if "cache_read" in details:
-        return details, ""
+    raw_details = usage_metadata.get("input_token_details")
+    details = _details(raw_details)
     incoming = _count(usage_metadata.get("input_tokens")) or 0
+    given = details.get("cache_read")
+    if given is not None and 0 <= given <= incoming:
+        return details, ""
+    invalid = isinstance(raw_details, dict) and "cache_read" in raw_details and raw_details["cache_read"] is not None
     meta = getattr(message, "response_metadata", None) or {}
     output = getattr(response, "llm_output", None) or {}
     for raw in (meta.get("token_usage"), output.get("token_usage") if isinstance(output, dict) else None):
@@ -67,7 +81,8 @@ def _input_details(usage_metadata: dict, message, response) -> tuple[dict, str]:
             continue
         hits = _count(raw.get("prompt_cache_hit_tokens"))
         if hits is not None and 0 <= hits <= incoming:
-            return {**details, "cache_read": hits}, "prompt_cache_hit_tokens"
+            source = CACHE_SOURCE_HIT_TOKENS_AFTER_INVALID if invalid else CACHE_SOURCE_HIT_TOKENS
+            return {**details, "cache_read": hits}, source
     return details, ""
 
 
