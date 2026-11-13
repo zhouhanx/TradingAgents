@@ -878,6 +878,30 @@ test('the cost page names the price file and says when calls returned no usage',
   } finally { none.dom.window.close(); }
 });
 
+test('the cost page shows cache-priced roles and does not add mixed currencies', async () => {
+  const role = (en, zh, extra) => ({role: en, zh, tier: 'quick', provider: 'deepseek', model: 'deepseek-chat', billing: 'api', ...extra});
+  const ui = await setup({'/api/cost': {prices_path: '/p/cost-prices.json', prices_models: 3, prices_unreadable: false, runs: [
+    {id: 'cny', ticker: '600519', date: '2026-11-14', prompt_count: 4000, completion_count: 400, api_text: '0.01455 CNY', match_text: '与供应商计数一致，容差 0。',
+      roles: [role('Market Analyst', '市场分析师', {prompt_count: 2000, completion_count: 200, cache_read: 1500, cost_text: '0.00335 CNY', price_note: ''}),
+              role('Portfolio Manager', '组合经理', {tier: 'deep', model: 'deepseek-reasoner', prompt_count: 2000, completion_count: 200, cache_read: 1500, cost_text: '0.0112 CNY', price_note: '缓存命中按输入单价计'})]},
+    {id: 'mixed', ticker: 'NVDA', date: '2026-11-14', prompt_count: 4000, completion_count: 400, api_text: '币种不一致，不计入合计', match_text: '与供应商计数一致，容差 0。',
+      roles: [role('Market Analyst', '市场分析师', {provider: 'openai', model: 'gpt-4.1-mini', prompt_count: 2000, completion_count: 200, cost_text: '0.00112 USD', price_note: ''}),
+              role('Portfolio Manager', '组合经理', {tier: 'deep', model: 'deepseek-reasoner', prompt_count: 2000, completion_count: 200, cost_text: '0.0112 CNY', price_note: ''})]},
+  ], note: ''}});
+  try {
+    await ui.click('[data-page=cost]');
+    for (let i = 0; i < 6; i++) await settle();
+    const [cny, mixed] = [...ui.doc.querySelectorAll('.cost-card')];
+    assert.equal(cny.querySelector('.cost-api').textContent, 'API 0.01455 CNY');
+    const notes = [...cny.querySelectorAll('.cost-note')].map((el) => el.textContent);
+    assert.deepEqual(notes, ['缓存命中按输入单价计'], 'only the role without a cache price is marked');
+    assert.match(cny.querySelectorAll('.cost-roles li')[1].textContent, /组合经理提示 2000 · 完成 2000\.0112 CNY缓存命中按输入单价计/);
+    assert.equal(mixed.querySelector('.cost-api').textContent, '币种不一致，不计入合计');
+    assert.match(mixed.textContent, /0\.00112 USD/);
+    assert.match(mixed.textContent, /0\.0112 CNY/);
+  } finally { ui.dom.window.close(); }
+});
+
 test('the cost page opens with an unreadable price file and says so with its path', async () => {
   const ui = await setup({'/api/cost': {prices_path: '/home/me/.tradingagents/cost-prices.json', prices_models: 0, prices_unreadable: true, runs: [{
     id: 'c-broken', ticker: 'AAPL', date: '2026-11-12', prompt_count: 100, completion_count: 10,

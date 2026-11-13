@@ -5948,7 +5948,7 @@ async function renderCost() {
         tiers.push(role);
       }
       const tierHtml = tiers.map(costTierHtml).join("");
-      const lines = counted.map((role) => `<li><span class="cost-role">${escapeHtml(role.zh || role.role)}</span><span class="cost-tokens">${escapeHtml(costTokens(role))}</span><span>${escapeHtml(role.cost_text || "")}</span></li>`).join("");
+      const lines = counted.map((role) => `<li><span class="cost-role">${escapeHtml(role.zh || role.role)}</span><span class="cost-tokens">${escapeHtml(costTokens(role))}</span><span>${escapeHtml(role.cost_text || "")}</span>${role.price_note ? `<span class="cost-note">${escapeHtml(role.price_note)}</span>` : ""}</li>`).join("");
       const rest = missing ? costRestHtml(run, roles, missing) : "";
       const sub = run.subscription_text ? `<p class="form-hint">${escapeHtml(run.subscription_text)}</p>` : "";
       const health = run.health_text ? `<p class="cost-health">${punctBreakHtml(run.health_text)}</p>` : "";

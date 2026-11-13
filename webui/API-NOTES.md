@@ -59,3 +59,10 @@
 - **用量文件**：控制台运行的分析结束时（完成或失败）在结果文件旁写 `<run>.usage.json`（`schema: cost-usage-1`），每次模型调用一行：`role`（图里的角色；子图分析师按外层节点归到具体分析师，不写成 `agent`）、`node`、`model`、`response_id`、`input_tokens`、`output_tokens`、`total_tokens`、`input_token_details`（如 `cache_read`）、`output_token_details`、`ended_at`；另有 `llm_calls`、`usage_reported`、`usage_unknown`（没有返回用量的调用数）。被「停止」的运行（SIGTERM）不写用量文件；命令行运行不写。
 - **没有供应商合计**：文件里没有 `reported`，所以页面只显示合计、不显示各角色数字和金额（「没有供应商合计，不把调用合计当成已核对。」）。核对（REGRESSION-01）之后才写 `reported: {input_tokens, output_tokens}`，相等（容差 0）时显示各角色用量和金额。
 - **单价**：`<TRADINGAGENTS_WEBUI_HOME>/cost-prices.json`，格式 `{"models": {"<模型 id>": {"input_per_million": "…", "output_per_million": "…", "currency": "USD"}}}`，模板 `webui/cost-prices.example.json`（空）。没有列出的模型显示「价格未知」。负数、NaN、无穷（含溢出为无穷的 `1e999`）的单价只让该模型显示「价格未知」，不计入合计（W234）。文件不是 UTF-8、不是 JSON（含 `Infinity`/`NaN` 字面量）或不是 `{"models": {…}}` 时，`/api/cost` 仍正常返回，所有单价按未知处理，`prices_unreadable: true`，页面显示「单价文件无法读取」和路径（W233）。页面不能编辑单价。`GET /api/cost` 新增 `prices_path`、`prices_models`（可用单价的模型数）、`prices_unreadable`，每个运行新增 `usage_unknown`。
+- **V2-COST-PRICING**：
+  - 单价可选 `cache_read_per_million`（每百万缓存命中输入 token）。有它时，`input_token_details.cache_read` 按它计，其余输入按 `input_per_million` 计。没有它而这次调用有缓存命中时，全部输入按输入单价计，该角色旁注「缓存命中按输入单价计」。
+  - DeepSeek 的缓存命中：langchain-openai 只把 `prompt_tokens_details.cached_tokens` 写进 `cache_read`（DeepSeek 现在两者都返回，数值相同）。只有 `prompt_cache_hit_tokens` 时，用量记录从原始 `token_usage` 补上 `cache_read`，并写 `cache_read_source: "prompt_cache_hit_tokens"`。已有 `cache_read` 时不再相加。
+  - 单价只接受 JSON 数字或普通小数字符串（如 `"0.50"`；不接受 `"1_000"`、`"1e3"`、带符号或空格），范围 0–10000（每百万 token），否则该模型「价格未知」（W250）。
+  - `currency` 去空格转大写后须为三个字母（USD、CNY…）。不写时为 USD；写了但不合法时该模型「价格未知」（W246）。
+  - 一次运行里已计价的角色用了不止一种币种时，合计显示「币种不一致，不计入合计」，各角色仍各自显示金额和币种（W245）。页面没有跨运行的总计。
+  - 单价文件可带 UTF-8 BOM（W247）。

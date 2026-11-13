@@ -1165,6 +1165,7 @@ table.ic-items th { font-size: 12px; color: var(--muted, #666); font-weight: 500
 .cost-card header { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: baseline; }
 .cost-roles { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; }
 .cost-roles li { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+.cost-roles .cost-note { color: var(--muted, #666); font-size: 12px; }
 .cost-role, .cost-tokens, .cost-model { white-space: nowrap; }
 .cost-model { overflow-wrap: normal; }
 .cost-role { font-weight: 600; }

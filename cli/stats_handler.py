@@ -48,6 +48,29 @@ def _details(value) -> dict:
     return {str(key): number for key, value in value.items() if (number := _count(value)) is not None}
 
 
+def _input_details(usage_metadata: dict, message, response) -> tuple[dict, str]:
+    """``input_token_details`` plus DeepSeek's cache hits when LangChain dropped them.
+
+    langchain-openai maps only ``prompt_tokens_details.cached_tokens`` to ``cache_read``.
+    DeepSeek also sends ``prompt_cache_hit_tokens`` (the same number); a response with
+    only that field would lose the hits, so read it from the raw ``token_usage``
+    (non-streaming calls keep it). Never added on top of an existing ``cache_read``.
+    """
+    details = _details(usage_metadata.get("input_token_details"))
+    if "cache_read" in details:
+        return details, ""
+    incoming = _count(usage_metadata.get("input_tokens")) or 0
+    meta = getattr(message, "response_metadata", None) or {}
+    output = getattr(response, "llm_output", None) or {}
+    for raw in (meta.get("token_usage"), output.get("token_usage") if isinstance(output, dict) else None):
+        if not isinstance(raw, dict):
+            continue
+        hits = _count(raw.get("prompt_cache_hit_tokens"))
+        if hits is not None and 0 <= hits <= incoming:
+            return {**details, "cache_read": hits}, "prompt_cache_hit_tokens"
+    return details, ""
+
+
 def _model_name(message, invocation: dict) -> str:
     meta = getattr(message, "response_metadata", None)
     for value in ((meta or {}).get("model_name"), (meta or {}).get("model"),
@@ -152,7 +175,8 @@ class StatsCallbackHandler(BaseCallbackHandler):
                     bucket = self.by_role.setdefault(role, {"input_tokens": 0, "output_tokens": 0})
                     bucket["input_tokens"] += incoming
                     bucket["output_tokens"] += outgoing
-                self.calls.append({
+                in_details, cache_source = _input_details(usage_metadata, message, response)
+                row = {
                     "role": role,
                     "node": node,
                     "model": _model_name(message, params),
@@ -160,10 +184,13 @@ class StatsCallbackHandler(BaseCallbackHandler):
                     "input_tokens": incoming,
                     "output_tokens": outgoing,
                     "total_tokens": _count(usage_metadata.get("total_tokens")),
-                    "input_token_details": _details(usage_metadata.get("input_token_details")),
+                    "input_token_details": in_details,
                     "output_token_details": _details(usage_metadata.get("output_token_details")),
                     "ended_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-                })
+                }
+                if cache_source:
+                    row["cache_read_source"] = cache_source
+                self.calls.append(row)
 
     def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
         """W81: a call that failed was still a call; its usage is unknown."""

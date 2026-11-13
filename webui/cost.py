@@ -13,7 +13,8 @@ Prices: ``<TRADINGAGENTS_WEBUI_HOME>/cost-prices.json`` (default
 ``~/.tradingagents/webui/cost-prices.json``)::
 
     {"models": {"<model id as the run saved it>": {
-        "input_per_million": "0.50", "output_per_million": "1.50", "currency": "USD"}}}
+        "input_per_million": "0.50", "output_per_million": "1.50",
+        "cache_read_per_million": "0.10", "currency": "USD"}}}
 
 (Example numbers only, not any provider's price.)
 
@@ -24,6 +25,18 @@ A price that is negative, NaN, or not finite (``1e999`` overflows to inf) is
 unknown for that model only (W234). A file that is not UTF-8, not JSON (the
 ``Infinity`` / ``NaN`` literals included), or not ``{"models": {...}}`` is
 unreadable: no prices at all, ``prices_unreadable`` true, never an error (W233).
+The file is read as UTF-8 with or without a BOM (W247).
+
+V2-COST-PRICING: ``cache_read_per_million`` is optional. With it, a call's
+``input_token_details.cache_read`` tokens are priced at it and the rest of
+``input_tokens`` at ``input_per_million``; without it, all input is priced at
+``input_per_million`` and the role says 缓存命中按输入单价计 (CACHE_AT_INPUT_NOTE).
+A price must be a JSON number or a plain decimal string (``"0.50"``, not
+``"1_000"`` / ``"1e3"`` / ``" 1"``) between 0 and PRICE_CAP_PER_MILLION (10000)
+(W250). ``currency`` is a three-letter code after strip/upper (``usd`` -> USD);
+left out means USD, anything else makes the model 价格未知 (W246). A run whose
+priced roles use more than one currency shows 币种不一致，不计入合计 instead of a
+total; each role keeps its own amount and currency (W245).
 """
 
 from __future__ import annotations
@@ -31,6 +44,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -306,10 +320,14 @@ def reconcile_usage(calls: list[dict], reported: dict | None = None) -> dict:
             raise CostError("供应商用量必须是整数。")
         total_in += incoming
         total_out += outgoing
+        details = call.get("input_token_details") if isinstance(call.get("input_token_details"), dict) else {}
+        hits = _count(details.get("cache_read"))
         rows.append({
             "role": _text(call.get("role")),
             "input_tokens": incoming,
             "output_tokens": outgoing,
+            # Provider cache hits inside input_tokens; out of range -> 0 (all at the input price).
+            "cache_read": hits if hits is not None and 0 <= hits <= incoming else 0,
         })
     if not isinstance(reported, dict) or not reported:
         return {
@@ -424,7 +442,7 @@ def read_prices(root: Path | None = None) -> tuple[dict, bool]:
             raw = handle.read(MAX_PRICES_BYTES + 1)
         if len(raw) > MAX_PRICES_BYTES:
             return {}, True
-        data = json.loads(raw.decode("utf-8"), parse_constant=_reject_constant)
+        data = json.loads(raw.decode("utf-8-sig"), parse_constant=_reject_constant)  # W247: a BOM is fine
     except (OSError, UnicodeDecodeError, ValueError, RecursionError):
         return {}, True
     models = data.get("models") if isinstance(data, dict) else None
@@ -437,18 +455,49 @@ def load_prices(root: Path | None = None) -> dict:
     return read_prices(root)[0]
 
 
+PRICE_CAP_PER_MILLION = Decimal(10000)
+_DECIMAL_TEXT = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+_CURRENCY = re.compile(r"[A-Z]{3}")
+CACHE_AT_INPUT_NOTE = "缓存命中按输入单价计"
+MIXED_CURRENCY_TEXT = "币种不一致，不计入合计"
+
+
 def _unit_price(value) -> Decimal | None:
-    """One per-million price: a finite number >= 0, else unknown (W234). 1e999 overflows to inf."""
-    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+    """One per-million price, else unknown.
+
+    W234: finite and >= 0 (``1e999`` overflows to inf). W250: a JSON number or a
+    plain decimal string (``"0.50"``; not ``"1_000"``, ``"1e3"``, ``" 1"``), and at
+    most PRICE_CAP_PER_MILLION per million tokens.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        if not _DECIMAL_TEXT.fullmatch(value):
+            return None
+        text = value
+    elif isinstance(value, (int, float, Decimal)):
+        text = str(value)
+    else:
         return None
     try:
-        amount = Decimal(str(value).strip())
+        amount = Decimal(text)
         as_float = float(amount)
     except (InvalidOperation, ValueError, OverflowError):
         return None
-    if not amount.is_finite() or not math.isfinite(as_float) or amount < 0:
+    if not amount.is_finite() or not math.isfinite(as_float) or amount < 0 or amount > PRICE_CAP_PER_MILLION:
         return None
     return amount
+
+
+def _currency(row: dict) -> str | None:
+    """W246: a three-letter code (``usd`` -> ``USD``). Absent -> USD; anything else invalid."""
+    if "currency" not in row:
+        return "USD"
+    value = row.get("currency")
+    if not isinstance(value, str):
+        return None
+    code = value.strip().upper()
+    return code if _CURRENCY.fullmatch(code) else None
 
 
 def _price(model: str, prices: dict) -> dict | None:
@@ -457,18 +506,34 @@ def _price(model: str, prices: dict) -> dict | None:
         return None
     incoming = _unit_price(row.get("input_per_million"))
     outgoing = _unit_price(row.get("output_per_million"))
-    if incoming is None or outgoing is None:
+    currency = _currency(row)
+    if incoming is None or outgoing is None or currency is None:
         return None
+    cache = None
+    if row.get("cache_read_per_million") is not None:
+        cache = _unit_price(row.get("cache_read_per_million"))
+        if cache is None:  # stated but unusable: the model's price is not known
+            return None
     return {
         "input_per_million": incoming,
         "output_per_million": outgoing,
-        "currency": _text(row.get("currency")) or "USD",
+        "cache_read_per_million": cache,
+        "currency": currency,
     }
 
 
-def _money(tokens_in: int, tokens_out: int, price: dict) -> Decimal:
+def _money(tokens_in: int, tokens_out: int, price: dict, cache_read: int = 0) -> Decimal:
+    """Input = cache hits at ``cache_read_per_million`` + the rest at ``input_per_million``.
+
+    Without a cache price every input token is priced at the input price (the caller
+    marks the row CACHE_AT_INPUT_NOTE when there were hits).
+    """
     million = Decimal(1_000_000)
-    amount = (Decimal(tokens_in) * price["input_per_million"] + Decimal(tokens_out) * price["output_per_million"]) / million
+    cache_price = price.get("cache_read_per_million")
+    hits = min(max(int(cache_read or 0), 0), tokens_in) if cache_price is not None else 0
+    amount = (Decimal(tokens_in - hits) * price["input_per_million"] + Decimal(hits) * cache_price
+              if hits else Decimal(tokens_in) * price["input_per_million"])
+    amount = (amount + Decimal(tokens_out) * price["output_per_million"]) / million
     return amount.quantize(TOLERANCE_COST)
 
 
@@ -483,9 +548,10 @@ def _role_usage(usage: dict) -> dict[str, dict]:
     found = {}
     for call in usage.get("calls") or []:
         role = _text(call.get("role")) or "未归集"
-        bucket = found.setdefault(role, {"input_tokens": 0, "output_tokens": 0})
+        bucket = found.setdefault(role, {"input_tokens": 0, "output_tokens": 0, "cache_read": 0})
         bucket["input_tokens"] += call["input_tokens"]
         bucket["output_tokens"] += call["output_tokens"]
+        bucket["cache_read"] += call.get("cache_read") or 0
     return found
 
 
@@ -501,6 +567,7 @@ def _view_run(record: dict, prices: dict, root: Path | None = None) -> dict:
     by_role = _role_usage(reconciled) if reconciled and reconciled["matches_provider"] else {}
     api_amount = Decimal(0)
     api_currency = ""
+    currencies: set[str] = set()
     api_known = True
     subscription_tokens = False
     rows = []
@@ -510,6 +577,7 @@ def _view_run(record: dict, prices: dict, root: Path | None = None) -> dict:
         outgoing = used["output_tokens"] if used else None
         cost_text = "未调用"
         usage_label = ""
+        price_note = ""
         kind = _billing_kind(role.get("billing"))
         if used and kind == "subscription":
             subscription_tokens = True
@@ -520,9 +588,10 @@ def _view_run(record: dict, prices: dict, root: Path | None = None) -> dict:
         elif used:
             price = _price(role.get("model") or "", prices)
             amount = None
+            hits = used.get("cache_read") or 0
             if price is not None:
                 try:
-                    amount = _money(incoming, outgoing, price)
+                    amount = _money(incoming, outgoing, price, hits)
                 except (InvalidOperation, ArithmeticError):
                     amount = None  # too large to state to the cent: unknown, not a 500
             if amount is None:
@@ -531,7 +600,10 @@ def _view_run(record: dict, prices: dict, root: Path | None = None) -> dict:
             else:
                 api_amount += amount
                 api_currency = price["currency"]
+                currencies.add(price["currency"])
                 cost_text = _money_text(amount, price["currency"])
+                if hits and price.get("cache_read_per_million") is None:
+                    price_note = CACHE_AT_INPUT_NOTE
         if not used:
             matched = bool(reconciled and reconciled.get("matches_provider"))
             usage_label = "用量未归集" if calls and not matched else "未调用"
@@ -553,6 +625,8 @@ def _view_run(record: dict, prices: dict, root: Path | None = None) -> dict:
             "completion_count": outgoing,
             "cost_text": cost_text,
             "usage_label": usage_label,
+            "cache_read": used.get("cache_read", 0) if used else None,
+            "price_note": price_note,
         })
     unassigned = False
     if not reconciled:
@@ -602,6 +676,8 @@ def _view_run(record: dict, prices: dict, root: Path | None = None) -> dict:
         api_text = "不显示 API 合计：用量未全部归集。"
     elif not api_known:
         api_text = "价格未知"
+    elif len(currencies) > 1:
+        api_text = MIXED_CURRENCY_TEXT  # W245: never add USD to CNY
     else:
         api_text = _money_text(api_amount, api_currency or "USD")
     show_role_money = bool(
@@ -613,6 +689,7 @@ def _view_run(record: dict, prices: dict, root: Path | None = None) -> dict:
             text = str(row.get("cost_text") or "")
             if any(ch.isdigit() for ch in text):
                 row["cost_text"] = "不计入合计"
+                row["price_note"] = ""
     return {
         "id": record.get("id"),
         "ticker": record.get("ticker") or "",
