@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import secrets
 import threading
 from datetime import UTC, datetime
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -43,6 +45,10 @@ RULE_CAP = 5
 RULE_CAP_TEXT = "每个代码最多 5 条"
 PRICE_TEXT = "请输入大于 0 的价格。"
 PCT_TEXT = "涨跌幅填 0.1 到 50 之间。"
+PRICE_MAX = 1e12
+PRICE_MAX_TEXT = "价格不能超过 1 万亿（1e12）。"
+NUMBER_TEXT = "只能填半角数字和小数点，例如 1452.30。"
+KIND_LOCKED_TEXT = "规则类型不能修改，请删除后重新添加。"
 POLL_CHOICES = (0, 1, 5, 15)
 POLL_DEFAULT_WITH_RULES = 5
 
@@ -65,19 +71,119 @@ def _blank() -> dict:
         "triggers": [],
         "admissions": [],
         "checks": [],
+        "trigger_seq": 0,
+        "alerts_seen_seq": 0,
     }
 
 
+CORRUPT_CODE = "watchlist_corrupt"
+
+
+def _backup_corrupt(path: Path, raw: bytes) -> str:
+    """Copy a bad watchlist.json aside once. The same bad bytes are not copied again."""
+    for old in sorted(path.parent.glob(f"{path.name}.corrupt-*")):
+        try:
+            if old.read_bytes() == raw:
+                return old.name
+        except OSError:
+            continue
+    stamp = datetime.now(BEIJING).strftime("%Y%m%d-%H%M%S")
+    target = path.with_name(f"{path.name}.corrupt-{stamp}")
+    index = 1
+    while target.exists():
+        target = path.with_name(f"{path.name}.corrupt-{stamp}-{index}")
+        index += 1
+    target.write_bytes(raw)
+    return target.name
+
+
+def _corrupt(path: Path, raw: bytes | None) -> WatchlistError:
+    """W261: a broken file is not an empty list. Back it up and refuse reads and writes."""
+    if raw is None:
+        return WatchlistError(
+            f"读不到自选数据文件 {path.name}，没有按空列表处理，也不会写入。请检查文件权限后刷新页面。",
+            409, code=CORRUPT_CODE)
+    try:
+        backup = _backup_corrupt(path, raw)
+        kept = f"原文件已备份为 {backup}。"
+    except OSError:
+        kept = "备份没有成功，原文件保持不动。"
+    return WatchlistError(
+        f"自选数据文件 {path.name} 已损坏，没有按空列表读取，也不会写入。{kept}"
+        f"请修复或移走 {path.name} 后刷新页面。",
+        409, code=CORRUPT_CODE)
+
+
+_TABLES = ("items", "triggers", "admissions", "checks")
+
+
+def _text_or_missing(row: dict, key: str) -> bool:
+    return key not in row or row[key] is None or isinstance(row[key], str)
+
+
+def _rule_well_formed(rule) -> bool:
+    """A stored rule is an object with a string id; its arm number, when present, is a whole number."""
+    if not isinstance(rule, dict):
+        return False
+    ident, arm = rule.get("id"), rule.get("arm_seq")
+    if not isinstance(ident, str) or not ident:
+        return False
+    return arm is None or (type(arm) is int and arm >= 0)
+
+
+def _well_formed(data) -> bool:
+    """W261/W264: every table is a list and every row in it is usable, or the whole file is
+    damaged. A bad row is never skipped: the next write would drop it from the file.
+
+    items: objects with a non-empty string ``symbol``; rows in a ``rules`` list are objects
+    with a string ``id`` and a whole-number ``arm_seq``; ``rules`` itself, when present, is a
+    list (a file from before rules has no ``rules`` key and loads with none). triggers: objects whose ``id`` and
+    ``symbol`` are strings when present. checks and admissions: objects whose ``trigger_id``
+    is a string when present.
+    """
+    if not isinstance(data, dict):
+        return False
+    if any(key in data and not isinstance(data[key], list) for key in _TABLES):
+        return False
+    for item in data.get("items") or []:
+        if not isinstance(item, dict):
+            return False
+        symbol = item.get("symbol")
+        if not isinstance(symbol, str) or not symbol.strip():
+            return False
+        if "rules" in item and not isinstance(item["rules"], list):  # commit 8: "rules": "bad" is damage
+            return False
+        if not all(_rule_well_formed(rule) for rule in item.get("rules") or []):
+            return False
+    for row in data.get("triggers") or []:
+        if not isinstance(row, dict) or not _text_or_missing(row, "id") or not _text_or_missing(row, "symbol"):
+            return False
+    for key in ("checks", "admissions"):
+        for row in data.get(key) or []:
+            if not isinstance(row, dict) or not _text_or_missing(row, "trigger_id"):
+                return False
+    return True
+
+
 def _load(root: Path | None) -> dict:
+    """Read watchlist.json. Missing means a new list; unreadable or broken raises (W261).
+
+    A file whose rows do not fit (W264) is broken too: backed up once and refused, never 500.
+    """
     path = _path(root)
     if not path.is_file():
         return _blank()
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return _blank()
-    if not isinstance(data, dict):
-        return _blank()
+        raw = path.read_bytes()
+    except OSError:
+        raise _corrupt(path, None) from None
+    try:
+        # W266: a leading UTF-8 BOM is not damage (same as the price file); _save never writes one.
+        data = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise _corrupt(path, raw) from None
+    if not _well_formed(data):
+        raise _corrupt(path, raw)
     data.setdefault("rule_version", DEFAULT_RULE)
     # A missing mode is not observe. A new file still starts in observe via _blank().
     data.setdefault("items", [])
@@ -90,9 +196,40 @@ def _load(root: Path | None) -> dict:
             item.setdefault("last_price", None)
             item.setdefault("last_decision", None)
             # Files written before V2-WATCHLIST rules have no rules; they load with none.
-            rules = item.get("rules")
-            item["rules"] = [rule for rule in rules if isinstance(rule, dict)] if isinstance(rules, list) else []
+            item.setdefault("rules", [])
+    _number_triggers(data)
     return data
+
+
+def _seq(value) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def _number_triggers(data: dict) -> None:
+    """W262: every trigger has a sequence number that only grows; unseen is counted by it.
+
+    Older files are numbered in table order. Their stored seen time becomes the highest
+    number among rule triggers made at or before it.
+    """
+    rows = [row for row in data["triggers"] if isinstance(row, dict)]
+    top = max([_seq(data.get("trigger_seq")) or 0] + [_seq(row.get("seq")) or 0 for row in rows])
+    for row in rows:
+        if _seq(row.get("seq")) is None:
+            top += 1
+            row["seq"] = top
+    data["trigger_seq"] = top
+    if _seq(data.get("alerts_seen_seq")) is None and data.get("alerts_seen_seq") != 0:
+        seen_at = _when(data.get("alerts_seen_at"))
+        data["alerts_seen_seq"] = 0 if seen_at is None else max(
+            [0] + [row["seq"] for row in rows
+                   if (made := _when(row.get("created_at"))) is not None and made <= seen_at])
+
+
+def _stamp_trigger(data: dict, row: dict) -> dict:
+    data["trigger_seq"] = (_seq(data.get("trigger_seq")) or 0) + 1
+    row["seq"] = data["trigger_seq"]
+    data["triggers"].append(row)
+    return row
 
 
 def _save(root: Path | None, data: dict) -> None:
@@ -291,12 +428,33 @@ def _public_trigger(trigger: dict, admissions: list[dict], checks: list[dict]) -
     return published
 
 
-def _visible_triggers(rows: list[dict]) -> list[dict]:
+def _table_order(rows: list[dict], symbols: list[str]) -> list[dict]:
+    """W-WL2: in a newest-first list, triggers recorded in the same second follow the
+    watchlist table's row order (then the order they were recorded), not the reverse."""
+    place = {symbol: index for index, symbol in enumerate(symbols)}
+    out: list[dict] = []
+    run: list[dict] = []
+
+    def flush() -> None:
+        run.sort(key=lambda row: (place.get(row.get("symbol"), len(place)), row.get("seq") or 0))
+        out.extend(run)
+        run.clear()
+
+    for row in rows:
+        if run and row.get("created_at") != run[0].get("created_at"):
+            flush()
+        run.append(row)
+    flush()
+    return out
+
+
+def _visible_triggers(rows: list[dict], symbols: list[str] | None = None) -> list[dict]:
     """Newest first. Checked triggers stay even when they are older than the last twenty (R6)."""
     recent = rows[-TRIGGER_VISIBLE:]
     recent_ids = {item.get("id") for item in recent}
     sticky = [item for item in rows if item.get("checked") and item.get("id") not in recent_ids]
-    return list(reversed(sticky + recent))
+    # Sticky checked rows stay after the recent ones and are not mixed into their seconds.
+    return _table_order(list(reversed(recent)), symbols or []) + list(reversed(sticky))
 
 
 def list_watch(root: Path | None = None) -> dict:
@@ -305,14 +463,14 @@ def list_watch(root: Path | None = None) -> dict:
     mode = _known_mode(data.get("mode") if isinstance(data.get("mode"), str) else None)
     admissions = _rows(data.get("admissions"))
     checks = _rows(data.get("checks"))
-    seen_at = _when(data.get("alerts_seen_at"))
+    seen = data["alerts_seen_seq"]
     triggers = []
     for item in data["triggers"]:
         if not isinstance(item, dict):
             continue
         row = _public_trigger(item, admissions, checks)
-        made = _when(item.get("created_at"))
-        row["unseen"] = item.get("kind") == "rule" and made is not None and (seen_at is None or made > seen_at)
+        row["seq"] = item["seq"]
+        row["unseen"] = item.get("kind") == "rule" and item["seq"] > seen
         triggers.append(row)
     return {
         "rule_version": data["rule_version"],
@@ -320,7 +478,8 @@ def list_watch(root: Path | None = None) -> dict:
         "mode_label": MODE_LABEL.get(mode) if mode else "状态未知",
         "items": [_public_item(item) for item in data["items"] if isinstance(item, dict)],
         "triggers": triggers,
-        "visible_triggers": _visible_triggers(triggers),
+        "visible_triggers": _visible_triggers(
+            triggers, [str(item.get("symbol")) for item in data["items"] if isinstance(item, dict)]),
         "note": _watch_note(mode),
         "poll_minutes": _poll_minutes(data),
         "poll_stored": isinstance(data.get("poll_minutes"), int) and data.get("poll_minutes") in POLL_CHOICES,
@@ -329,6 +488,8 @@ def list_watch(root: Path | None = None) -> dict:
         "trigger_total": len(triggers),
         "unseen_count": sum(1 for row in triggers if row["unseen"]),
         "alerts_seen_at": data.get("alerts_seen_at"),
+        "alerts_seen_seq": seen,
+        "trigger_seq": data["trigger_seq"],
     }
 
 
@@ -362,44 +523,147 @@ def remove_symbol(raw, root: Path | None = None) -> dict:
     return list_watch(root)
 
 
-def _number_text(value: float) -> str:
-    """3 -> 3, 1.5 -> 1.5: the way the page prints a percentage the user typed."""
-    return f"{float(value):g}"
+def _half_up(number: float, places: int) -> Decimal:
+    """Round like the page's toFixed (the exact binary value, ties away from zero)."""
+    return Decimal(number).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+
+
+DECIMALS_MAX = 6
+DECIMALS_TEXT = "小数最多 6 位。"
+_PLAIN = re.compile(r"^\+?(\d+)(?:\.(\d*))?$|^\+?\.(\d+)$")
+
+
+def typed_text(raw) -> str | None:
+    """W259 (PM ruling): the number as the user typed it, tidied but never rounded.
+
+    "1452.30" stays "1452.30"; "0190.5" -> "190.5"; ".5" -> "0.5"; "5." -> "5". A JSON number
+    has no typed form: 3.0 -> "3", 1452.3 -> "1452.3". Exponent forms ("1e3") are written out.
+    None when it is not a finite number.
+    """
+    if isinstance(raw, bool) or raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        number = float(raw)
+        if not math.isfinite(number):
+            return None
+        if number.is_integer():
+            return str(int(number))
+        text = format(Decimal(repr(number)), "f")
+    elif isinstance(raw, str):
+        text = raw.strip()
+    else:
+        return None
+    match = _PLAIN.match(text)
+    if not match:
+        try:
+            number = Decimal(text)
+        except InvalidOperation:
+            return None
+        if not number.is_finite():
+            return None
+        text = format(number, "f")
+        match = _PLAIN.match(text.lstrip("-")) if not text.startswith("-") else None
+        if not match:
+            return None
+    whole, frac = (match.group(1), match.group(2)) if match.group(3) is None else ("0", match.group(3))
+    whole = whole.lstrip("0") or "0"
+    return f"{whole}.{frac}" if frac else whole
+
+
+def _rule_text(rule: dict) -> str:
+    """The stored typed text; rules saved before it existed get theirs from the number.
+
+    W270-3: a value_text that does not stand for the stored value is ignored and the number
+    itself is shown, so the label always names the threshold that is actually compared.
+    "Stands for" means the text, read as a decimal, turns into exactly the stored float:
+    1452.30 for 1452.3 yes, 1452.31 for 1452.3 no. (A float keeps about 17 digits, so a
+    typed 999999999999.123456 is the source of its float, not a mismatch.)
+    """
+    text = rule.get("value_text")
+    value = rule.get("value")
+    if isinstance(text, str) and typed_text(text) == text and _number_of(value) is not None:
+        try:
+            if float(Decimal(text)) == float(value):
+                return text
+        except (InvalidOperation, ValueError, OverflowError):
+            pass
+    return typed_text(value) or ""
+
+
+def _number_of(value) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _decimal_of(rule: dict) -> Decimal | None:
+    """W268: the threshold a rule shows, as an exact decimal (from _rule_text)."""
+    text = _rule_text(rule)
+    try:
+        number = Decimal(text) if text else None
+    except InvalidOperation:
+        return None
+    return number if number is not None and number.is_finite() else None
+
+
+def threshold_text(text: str) -> str:
+    """A price threshold in a label: every typed digit, padded with zeros up to the page's
+    price format (>= 1000 one decimal, >= 1 two, else four significant), never rounded.
+    1452.35 -> 1452.35, 1452.30 -> 1452.30, 190 -> 190.00, 0.5 -> 0.5000."""
+    whole, _, frac = text.partition(".")
+    if len(whole) >= 4:
+        page = 1
+    elif whole != "0":
+        page = 2
+    else:
+        lead = len(frac) - len(frac.lstrip("0"))
+        page = lead + 4 if frac.strip("0") else 3
+    places = max(page, len(frac))
+    return f"{whole}.{frac.ljust(places, '0')}"
 
 
 def price_text(value: float) -> str:
     """The page's price format (>= 1000 one decimal, >= 1 two, else four significant).
 
-    A typed threshold keeps its own digits when that format would round it away.
+    Used for quotes. Rule thresholds use threshold_text (the typed digits).
     """
     number = float(value)
     size = abs(number)
+    if not math.isfinite(number):
+        return "—"
     if size >= 1000:
-        text = f"{number:.1f}"
-    elif size >= 1:
-        text = f"{number:.2f}"
-    else:
-        text = f"{number:#.4g}"
-    if float(text) != number:
-        text = f"{number:.10g}"
-    return text
+        return format(_half_up(number, 1), "f")
+    if size >= 1:
+        return format(_half_up(number, 2), "f")
+    if size == 0:
+        return "0.000"
+    places = 3 - Decimal(number).adjusted()
+    rounded = _half_up(number, places)
+    if rounded.adjusted() > Decimal(number).adjusted():  # 0.99995 -> 1.000, as toPrecision(4)
+        rounded = _half_up(number, places - 1)
+    return format(rounded, "f")
 
 
-def rule_label(kind: str, value: float) -> str:
+def rule_label(kind: str, value, text: str | None = None) -> str:
+    """``text`` is the typed number (W259); without it the number's own digits are used."""
+    shown = text if text is not None else (typed_text(value) or "")
+    price = threshold_text(shown) if shown else ""
     return {
-        "above": f"高于 {price_text(value)}",
-        "below": f"低于 {price_text(value)}",
-        "pct": f"涨跌 ≥ {_number_text(value)}%（较昨收）",
-        "win": f"一个刷新间隔内涨跌 ≥ {_number_text(value)}%",
+        "above": f"高于 {price}",
+        "below": f"低于 {price}",
+        "pct": f"涨跌 ≥ {shown}%（较昨收）",
+        "win": f"一个刷新间隔内涨跌 ≥ {shown}%",
     }.get(kind, "")
 
 
-def rule_chip(kind: str, value: float) -> str:
+def rule_chip(kind: str, value, text: str | None = None) -> str:
+    shown = text if text is not None else (typed_text(value) or "")
     if kind == "pct":
-        return f"涨跌 ≥ {_number_text(value)}%"
+        return f"涨跌 ≥ {shown}%"
     if kind == "win":
-        return f"间隔内涨跌 ≥ {_number_text(value)}%"
-    return rule_label(kind, value)
+        return f"间隔内涨跌 ≥ {shown}%"
+    return rule_label(kind, value, shown)
 
 
 def beijing_text(stamp, fmt: str = "%m-%d %H:%M") -> str:
@@ -417,11 +681,11 @@ def _rule_state_label(rule: dict) -> tuple[str, str]:
     """(text, state) for the drawer: 生效中 / 已触发 with the re-arm condition / 已停用."""
     if rule.get("enabled") is False:
         return "已停用。", "off"
-    kind, value = rule.get("kind"), rule.get("value")
+    kind = rule.get("kind")
     hit_at = beijing_text(rule.get("fired_at"))
     if rule.get("state") == "hit" and kind in {"above", "below"}:
         side = "以下" if kind == "above" else "以上"
-        return f"已触发（北京 {hit_at}）。价格回到 {price_text(value)} {side}后重新生效。", "hit"
+        return f"已触发（北京 {hit_at}）。价格回到 {threshold_text(_rule_text(rule))} {side}后重新生效。", "hit"
     if rule.get("state") == "today" and kind == "pct":
         return f"已触发（北京 {hit_at}）。同一方向每个交易日只提醒一次，下个交易日重新生效。", "today"
     return "生效中。", "armed"
@@ -436,36 +700,79 @@ def _public_rule(rule: dict) -> dict:
         "id": rule.get("id"),
         "kind": kind,
         "value": value,
+        "value_text": _rule_text(rule) if usable else None,
         "enabled": rule.get("enabled") is not False,
         "state": state,
         "state_label": text,
-        "label": rule_label(kind, value) if usable else "",
-        "chip": rule_chip(kind, value) if usable else "",
+        "label": rule_label(kind, value, _rule_text(rule)) if usable else "",
+        "chip": rule_chip(kind, value, _rule_text(rule)) if usable else "",
         "fired_at": rule.get("fired_at"),
     }
 
 
-def _rule_value(kind, raw) -> float:
+_ASCII_DECIMAL = re.compile(r"[0-9]+(?:\.[0-9]{1,6})?")
+_ASCII_LONG = re.compile(r"[0-9]+\.[0-9]{7,}")
+_ASCII_NEGATIVE = re.compile(r"-[0-9]+(?:\.[0-9]+)?")
+
+
+def _input_text(raw) -> str | None:
+    """The submitted number as text. A JSON number is written as Python writes it (190 -> "190",
+    1452.3 -> "1452.3", 1e-07 stays "1e-07" and is refused). None for anything else."""
+    if isinstance(raw, bool) or raw is None:
+        return None
+    if isinstance(raw, int):
+        return str(raw)
+    if isinstance(raw, float):
+        return repr(raw) if math.isfinite(raw) else None
+    return raw if isinstance(raw, str) else None
+
+
+def _rule_value(kind, raw) -> tuple[float, str]:
+    r"""(number, tidied typed text). W269/W270-1/W272 (PM ruling): after the surrounding
+    whitespace and one leading ``+`` are removed, only ASCII ``[0-9]+(\.[0-9]{1,6})?`` is a
+    number. Full-width or other scripts' digits, ``_``, ``.5``, ``5.`` and exponent forms
+    answer 400 bad_number; more than 6 decimals answers bad_decimals. The number is the
+    decimal of the text; > 0, <= 1e12 (prices) and 0.1-50 (percentages) are checked on that
+    decimal, so 1000000000000.000001 is over the cap.
+    """
     if kind not in RULE_KINDS:
         raise WatchlistError("请选择规则类型。")
-    if kind in {"above", "below"}:
-        number = _price(raw)
-        if number is None:
-            raise WatchlistError(PRICE_TEXT, code="bad_price")
-        return number
-    number = _price(raw)
-    if number is None or number < 0.1 or number > 50:
-        raise WatchlistError(PCT_TEXT, code="bad_pct")
-    return number
+    price_kind = kind in {"above", "below"}
+    range_error = (WatchlistError(PRICE_TEXT, code="bad_price") if price_kind
+                   else WatchlistError(PCT_TEXT, code="bad_pct"))
+    raw_text = _input_text(raw)
+    if raw_text is None:
+        raise range_error
+    text = raw_text.strip()
+    if text.startswith("+"):
+        text = text[1:]
+    if not _ASCII_DECIMAL.fullmatch(text):
+        if _ASCII_LONG.fullmatch(text):
+            raise WatchlistError(DECIMALS_TEXT, code="bad_decimals")
+        if _ASCII_NEGATIVE.fullmatch(text) or not any(ch.isdecimal() for ch in text):
+            raise range_error  # -5, empty, abc, inf, nan: not a positive number
+        raise WatchlistError(NUMBER_TEXT, code="bad_number")
+    whole, _, frac = text.partition(".")
+    text = f"{whole.lstrip('0') or '0'}.{frac}" if frac else (whole.lstrip("0") or "0")
+    number = Decimal(text)
+    if number <= 0:
+        raise range_error
+    if price_kind:
+        if number > PRICE_MAX_DECIMAL:
+            raise WatchlistError(PRICE_MAX_TEXT, code="bad_price")
+    elif number < PCT_MIN or number > PCT_MAX:
+        raise range_error
+    return float(number), text
 
 
-def _same_rule(rule: dict, kind: str, value: float) -> bool:
-    other = rule.get("value")
-    return (
-        rule.get("kind") == kind
-        and isinstance(other, (int, float))
-        and math.isclose(float(other), value, rel_tol=1e-9, abs_tol=1e-12)
-    )
+PRICE_MAX_DECIMAL = Decimal("1000000000000")
+PCT_MIN, PCT_MAX = Decimal("0.1"), Decimal("50")
+
+
+def _same_rule(rule: dict, kind: str, text: str) -> bool:
+    """W268 (PM ruling): the same kind and exactly the same decimal. 1452.3 and 1452.30 are
+    the same threshold; 1452.300001 is not 1452.3. No float tolerance."""
+    return rule.get("kind") == kind and _decimal_of(rule) == Decimal(text)
 
 
 def _arm(rule: dict) -> None:
@@ -505,14 +812,16 @@ def change_rule(body: dict, root: Path | None = None) -> dict:
             if len(rules) >= RULE_CAP:
                 raise WatchlistError(f"{RULE_CAP_TEXT}。", code="rule_cap")
             kind = str(body.get("kind") or "")
-            value = _rule_value(kind, body.get("value"))
+            value, text = _rule_value(kind, body.get("value"))
             for rule in rules:
-                if _same_rule(rule, kind, value):
-                    raise WatchlistError(f"已有一条「{rule_label(kind, value)}」，不用重复加。", code="duplicate")
+                if _same_rule(rule, kind, text):
+                    raise WatchlistError(f"已有一条「{rule_label(kind, rule.get('value'), _rule_text(rule))}」，不用重复加。",
+                                         code="duplicate")
             rule = {
                 "id": f"r{secrets.token_hex(4)}",
                 "kind": kind,
                 "value": value,
+                "value_text": text,
                 "enabled": body.get("enabled") is not False,
                 "created_at": _now(),
                 "arm_seq": 0,
@@ -533,11 +842,18 @@ def change_rule(body: dict, root: Path | None = None) -> dict:
                 rule["enabled"] = enabled
             else:
                 kind = str(rule.get("kind") or "")
-                value = _rule_value(kind, body.get("value"))
+                asked = body.get("kind")
+                if asked not in (None, "") and asked != kind:  # W260: a rule keeps its type
+                    raise WatchlistError(KIND_LOCKED_TEXT, code="kind_locked")
+                value, text = _rule_value(kind, body.get("value"))
                 for other in rules:
-                    if other is not rule and _same_rule(other, kind, value):
-                        raise WatchlistError(f"已有一条「{rule_label(kind, value)}」，不用重复加。", code="duplicate")
-                if not _same_rule(rule, kind, value):
+                    if other is not rule and _same_rule(other, kind, text):
+                        raise WatchlistError(
+                            f"已有一条「{rule_label(kind, other.get('value'), _rule_text(other))}」，不用重复加。",
+                            code="duplicate")
+                same = _same_rule(rule, kind, text)
+                rule["value_text"] = text  # 1452.3 -> 1452.30 changes only how it reads
+                if not same:
                     rule["value"] = value
                     # A new threshold is a new rule for the once-a-day count too.
                     rule["fired_days"] = {}
@@ -594,8 +910,7 @@ def _add_trigger(data: dict, symbol: str, kind: str, old, new) -> dict:
         "started": False,
         "run_id": None,
     }
-    data["triggers"].append(row)
-    return row
+    return _stamp_trigger(data, row)
 
 
 def _indexed(mapping: dict | None) -> dict:
@@ -784,7 +1099,7 @@ def _fire(data: dict, item: dict, rule: dict, quote: dict, detail: str, extra: d
     found = next((row for row in data["triggers"] if row.get("id") == ident), None)
     if found:
         return {}
-    label = rule_label(rule["kind"], rule["value"])
+    label = rule_label(rule["kind"], rule["value"], _rule_text(rule))
     price = quote["price"]
     when = beijing_text(quote["fetched_at"])
     row = {
@@ -800,13 +1115,14 @@ def _fire(data: dict, item: dict, rule: dict, quote: dict, detail: str, extra: d
         "new_value": price,
         "price": price,
         "fetched_at": quote["fetched_at"],
-        "text": f"{rule_chip(rule['kind'], rule['value'])} · {detail}",
+        "rule_value_text": _rule_text(rule),
+        "text": f"{rule_chip(rule['kind'], rule['value'], _rule_text(rule))} · {detail}",
         "created_at": _now(),
         "started": False,
         "run_id": None,
         **extra,
     }
-    data["triggers"].append(row)
+    _stamp_trigger(data, row)
     rule["fired_at"] = _now()
     return {
         "id": ident,
@@ -891,20 +1207,36 @@ def _referenced(data: dict) -> set[str]:
     }
 
 
+def _seen(row: dict, seen_seq: int) -> bool:
+    """Seen as the page counts it: only rule triggers are ever unseen, until the seen mark passes them."""
+    return row.get("kind") != "rule" or (_seq(row.get("seq")) or 0) <= seen_seq
+
+
 def _prune_triggers(data: dict) -> None:
-    """R6: keep at most 500. Drop the oldest unchecked ones; a checked trigger is kept."""
+    """R6/W263/W265 (PM ruling): keep at most 500 in total, deleting in three tiers.
+
+    1. the oldest seen triggers that no check or admission refers to;
+    2. then the oldest unseen ones that nothing refers to;
+    3. only then the oldest referenced ones (by time), seen or not.
+    The newest 20 (the list on the page, which holds the hits just recorded) are never
+    deleted. Check and admission records of a deleted trigger stay as history.
+    """
     rows = data["triggers"]
-    if len(rows) <= TRIGGER_STORE_CAP:
-        return
-    keep = _referenced(data)
     excess = len(rows) - TRIGGER_STORE_CAP
-    kept = []
-    for row in rows:
-        if excess > 0 and str(row.get("id")) not in keep:
-            excess -= 1
-            continue
-        kept.append(row)
-    data["triggers"] = kept
+    if excess <= 0:
+        return
+    seen_seq = _seq(data.get("alerts_seen_seq")) or 0
+    referenced = _referenced(data)
+    older = range(max(len(rows) - TRIGGER_VISIBLE, 0))
+
+    def tier(index: int) -> int:
+        row = rows[index]
+        if str(row.get("id")) in referenced:
+            return 2
+        return 0 if _seen(row, seen_seq) else 1
+
+    gone = set(sorted(older, key=lambda index: (tier(index), index))[:excess])
+    data["triggers"] = [row for index, row in enumerate(rows) if index not in gone]
 
 
 def _remind(fired: list[dict], root: Path | None) -> None:
@@ -970,10 +1302,20 @@ def refresh(quotes: dict, root: Path | None = None, decisions: dict | None = Non
     return view
 
 
-def mark_seen(root: Path | None = None) -> dict:
-    """R8: the 自选 page was opened. The unseen count is stored, so every tab agrees."""
+def mark_seen(root: Path | None = None, upto_seq=None) -> dict:
+    """R8/W262: the 自选 page showed triggers up to ``upto_seq``. The seen mark is stored,
+    so every tab agrees, and it is a trigger number rather than a time: a trigger made in
+    the same second by another tab's refresh stays unseen until a page has shown it.
+    Without ``upto_seq`` everything recorded so far counts as seen. The mark never goes back.
+    """
+    # W267: a non-negative integer only. true/false, 0.0 and "3" are not trigger numbers.
+    if upto_seq is not None and (type(upto_seq) is not int or upto_seq < 0):
+        raise WatchlistError("upto_seq 须为不小于 0 的整数。")
     with _LOCK:
         data = _load(root)
+        top = data["trigger_seq"]
+        upto = top if upto_seq is None else min(upto_seq, top)
+        data["alerts_seen_seq"] = max(data["alerts_seen_seq"], upto)
         data["alerts_seen_at"] = _now()
         _save(root, data)
     return list_watch(root)

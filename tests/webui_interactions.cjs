@@ -92,7 +92,9 @@ async function setup(overrides = {}, {html = markup, url = WIZARD_URL} = {}) {
     if (value && value.__status) return {ok: false, status: value.__status, json: async () => structuredClone(value.body)};
     return {ok: true, json: async () => structuredClone(value)};
   };
-  window.eval(`${script}\nwindow.uiTest = {state, showPage, openRunDetail, closeRunDetail, readForm, renderAnalyze, renderRuns, renderAccounts, renderReports, submitAnalysis, resultPanel, renderMarkdown, openSaveDrawer, markScrollableTables, paintHolding, paintReview, nextStepPanel, restartRefusal, restartRefusalHtml, liveSectionTable, analystRequiredHtml, infoItemsHtml, customModelRow, infoAttachHtml, showToast, formNoteHtml, compareCard, infoStatusHtml, paintReplay, modelTable, renderModelChoices, api, watchWhen, watchQuoteContext, watchClock};`);
+  window.eval(`${script}\nwindow.uiTest = {state, showPage, openRunDetail, closeRunDetail, readForm, renderAnalyze, renderRuns, renderAccounts, renderReports, submitAnalysis, resultPanel, renderMarkdown, openSaveDrawer, markScrollableTables, paintHolding, paintReview, nextStepPanel, restartRefusal, restartRefusalHtml, liveSectionTable, analystRequiredHtml, infoItemsHtml, customModelRow, infoAttachHtml, showToast, formNoteHtml, compareCard, infoStatusHtml, paintReplay, modelTable, renderModelChoices, api, watchWhen, watchQuoteContext, watchClock, watchStamp, watchTableOrder, watchTypedText, watchThresholdText, ruleValueError, rulePreview};`);
+  // The watchlist fixtures are from 2026-11-13 evening (Beijing); date labels (W-WL1) compare with this day.
+  window.eval("watchNowMs = () => Date.parse('2026-11-13T14:45:00Z')");
   for (let i = 0; i < 5; i++) await settle();
   const doc = window.document;
   const click = async (selector) => {
@@ -7258,7 +7260,7 @@ test('V2-WATCHLIST: the rule drawer lists rules, validates, saves and stops at f
     '/api/watchlist/rules': (options) => {
       const body = JSON.parse(options.body);
       posts.push(body);
-      if (body.op === 'add' && body.value === 3) return {__status: 400, body: {error: '已有一条「涨跌 ≥ 3%（较昨收）」，不用重复加。', code: 'duplicate'}};
+      if (body.op === 'add' && body.value === '3') return {__status: 400, body: {error: '已有一条「涨跌 ≥ 3%（较昨收）」，不用重复加。', code: 'duplicate'}};
       if (body.op === 'add') {
         data = structuredClone(data);
         const item = data.items[0];
@@ -7294,7 +7296,7 @@ test('V2-WATCHLIST: the rule drawer lists rules, validates, saves and stops at f
     assert.equal(drawer().querySelector('.unit').textContent, '%（较昨收，涨或跌都算）');
     await ui.click('#rule-add');
     assert.equal(drawer().querySelector('.rule-err').textContent, '已有一条「涨跌 ≥ 3%（较昨收）」，不用重复加。');
-    assert.deepEqual(posts.at(-1), {symbol: 'NVDA', op: 'add', kind: 'pct', value: 3});
+    assert.deepEqual(posts.at(-1), {symbol: 'NVDA', op: 'add', kind: 'pct', value: '3'});  // W259: the typed text
     await ui.click('[data-rule-kinds="add"] [data-rule-kind="below"]');
     assert.equal(drawer().querySelector('.unit').textContent, '美元');
     ui.fill('#rule-add-value', '180');
@@ -7463,7 +7465,8 @@ test('V2-WATCHLIST R2: the status line and choice follow rules; the choice is sa
     await ui.click('[data-page=watchlist]');
     const on = () => ui.doc.querySelector('#watch-poll .seg-item.on').textContent;
     assert.equal(on(), '5 分钟');
-    assert.match(ui.doc.querySelector('.wl-status').textContent, /^自动刷新中 · 每 5 分钟上次 北京 22:40:05下次 \d\d:\d\d$/);
+    // 下次 comes from the real clock while date labels compare with the pinned day (W-WL1), so it may carry a date here.
+    assert.match(ui.doc.querySelector('.wl-status').textContent, /^自动刷新中 · 每 5 分钟上次 北京 22:40:05下次 (\d\d-\d\d )?\d\d:\d\d$/);
     assert.match(ui.doc.querySelector('#watch-poll-hint').textContent, /只在控制台页面开着时刷新/);
     await ui.click('[data-poll="0"]');
     assert.deepEqual(polls, [0]);
@@ -7492,4 +7495,255 @@ test('V2-WATCHLIST: no enabled rules says auto refresh only updates prices; no s
     assert.ok([...empty.doc.querySelectorAll('#watch-poll .seg-item')].every((node) => node.disabled));
     assert.equal(empty.doc.querySelector('#watch-refresh').disabled, true);
   } finally { empty.dom.window.close(); }
+});
+
+test('V2-WATCHLIST-POLISH W261: a broken watchlist.json shows its Chinese error, no table, and no action that writes', async () => {
+  const sentence = '自选数据文件 watchlist.json 已损坏，没有按空列表读取，也不会写入。原文件已备份为 watchlist.json.corrupt-20261114-093000。请修复或移走 watchlist.json 后刷新页面。';
+  const broken = {__status: 409, body: {error: sentence, code: 'watchlist_corrupt'}};
+  const ui = await setup({'/api/watchlist': broken});
+  try {
+    await ui.click('[data-page=watchlist]');
+    const banner = ui.doc.querySelector('#watch-error');
+    assert.equal(banner.hidden, false);
+    assert.equal(banner.textContent, sentence);
+    assert.equal(ui.doc.querySelector('.watch-table'), null);
+    assert.match(ui.doc.querySelector('#watch-broken').textContent, /自选数据暂时不能用没有把它当成空列表，也不会写入。/);
+    assert.doesNotMatch(ui.doc.querySelector('#watch-table').textContent, /还没有自选/);
+    assert.ok([...ui.doc.querySelectorAll('#watch-form input, #watch-form button')].every((node) => node.disabled));
+    assert.equal(ui.doc.querySelector('#watch-refresh').disabled, true);
+    assert.match(ui.doc.querySelector('#page').textContent, /已停止：自选数据文件损坏/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('V2-WATCHLIST-POLISH W261: a write that finds the file broken drops the stale table instead of keeping it', async () => {
+  const sentence = '自选数据文件 watchlist.json 已损坏，没有按空列表读取，也不会写入。原文件已备份为 watchlist.json.corrupt-20261114-093000。请修复或移走 watchlist.json 后刷新页面。';
+  const ui = await setup({'/api/watchlist': (options) => (options.method === 'POST' ? {__status: 409, body: {error: sentence, code: 'watchlist_corrupt'}} : wlData()), '/api/watchlist/seen': wlData()});
+  try {
+    await ui.click('[data-page=watchlist]');
+    assert.equal(ui.doc.querySelectorAll('.watch-table tbody tr').length, 4);
+    ui.doc.querySelector('#watch-symbol').value = 'TSLA';
+    ui.doc.querySelector('#watch-form').dispatchEvent(new ui.window.Event('submit', {cancelable: true}));
+    for (let i = 0; i < 8; i++) await settle();
+    assert.equal(ui.doc.querySelector('#watch-error').textContent, sentence);
+    assert.equal(ui.doc.querySelector('.watch-table'), null);
+    assert.ok(ui.doc.querySelector('#watch-broken'));
+  } finally { ui.dom.window.close(); }
+});
+
+test('V2-WATCHLIST-POLISH W262: opening 自选 marks seen up to the highest trigger number the page shows, not by time', async () => {
+  const at = '2026-11-13T14:40:05+00:00';
+  const trig = (seq, unseen) => ({id: `rule|NVDA|r${seq}#1`, seq, symbol: 'NVDA', kind: 'rule', text: '高于 1.00 · 现价 5.00', created_at: at, unseen, started: false});
+  const posted = [];
+  const ui = await setup({
+    '/api/watchlist': wlData({triggers: [trig(7, false), trig(8, true), trig(9, true)], visible_triggers: [trig(9, true), trig(8, true), trig(7, false)], unseen_count: 2, trigger_total: 3}),
+    '/api/watchlist/seen': (options) => { posted.push(JSON.parse(options.body)); return wlData({unseen_count: 0}); },
+  });
+  try {
+    ui.ui.state.watchlist = null;
+    await ui.click('[data-page=watchlist]');
+    for (let i = 0; i < 8; i++) await settle();
+    assert.deepEqual(posted, [{upto_seq: 9}]);
+  } finally { ui.dom.window.close(); }
+});
+
+test('V2-WATCHLIST-POLISH W259/W260: the drawer refuses a price over 1e12, previews the typed digits, and an edit sends the rule type', async () => {
+  const posts = [];
+  const data = wlData();
+  const ui = await setup({
+    '/api/watchlist': () => data,
+    '/api/watchlist/seen': () => data,
+    '/api/watchlist/rules': (options) => { posts.push(JSON.parse(options.body)); return data; },
+  });
+  try {
+    await ui.click('[data-page=watchlist]');
+    await ui.click('[data-watch-rules="NVDA"]');
+    const drawer = () => ui.doc.querySelector('.rule-drawer');
+    await ui.click('[data-rule-edit="r1"]');
+    ui.fill('#rule-edit-value', '2000000000000');  // commit 8: 2e12 is now 「只能填半角数字」
+    await ui.click('#rule-edit-save');
+    assert.equal(drawer().querySelector('.rule-item--editing .rule-err').textContent, '价格不能超过 1 万亿（1e12）。');
+    assert.equal(posts.length, 0);
+    ui.fill('#rule-edit-value', '191.5');
+    await ui.click('#rule-edit-save');
+    assert.deepEqual(posts.at(-1), {op: 'update', rule_id: 'r1', kind: 'above', value: '191.5', symbol: 'NVDA'});
+    await ui.click('[data-rule-kinds="add"] [data-rule-kind="pct"]');
+    ui.fill('#rule-add-value', '3.14159');
+    assert.equal(drawer().querySelector('#rule-preview').textContent, '较昨收涨或跌 3.14159% 及以上时提醒。同一方向每个交易日只提醒一次。');
+    await ui.click('[data-rule-kinds="add"] [data-rule-kind="above"]');
+    ui.fill('#rule-add-value', '190.123456');
+    assert.equal(drawer().querySelector('#rule-preview').textContent, '价格涨到 190.123456 或以上时提醒一次。回到 190.123456 以下后重新生效。');
+  } finally { ui.dom.window.close(); }
+});
+
+test('V2-WATCHLIST-POLISH W-WL1: a last refresh or fetch time from another Beijing day carries its date', async () => {
+  const ui = await setup({'/api/watchlist': wlData(), '/api/watchlist/seen': wlData()});
+  try {
+    assert.equal(ui.ui.watchStamp('2026-11-13T14:35:04+00:00', true), '22:35:04');  // same Beijing day as the pinned now
+    assert.equal(ui.ui.watchStamp('2026-11-13T15:59:59+00:00'), '23:59');
+    assert.equal(ui.ui.watchStamp('2026-11-13T16:00:00+00:00'), '11-14 00:00');    // Beijing midnight, not UTC
+    ui.window.eval("watchNowMs = () => Date.parse('2026-11-16T00:50:05Z')");      // Monday 08:50 Beijing, before the open
+    await ui.click('[data-page=watchlist]');
+    assert.match(ui.doc.querySelector('.wl-status').textContent, /上次 北京 11-13 22:40:05/);
+    const rows = [...ui.doc.querySelectorAll('.watch-table tbody tr')];
+    assert.equal(rows[1].querySelector('.wl-meta').textContent, '较昨收（北京 08:00） · 取价 北京 11-13 22:35');
+    assert.doesNotMatch(ui.doc.querySelector('#page').textContent, /UTC/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('V2-WATCHLIST-POLISH W-WL2: triggers from the same second follow the table order, in the short and the full list', async () => {
+  const at = '2026-11-13T14:40:05+00:00';
+  const trig = (seq, symbol, created_at = at) => ({id: `rule|${symbol}|r${seq}#1`, seq, symbol, kind: 'rule', text: `${symbol} 命中`, created_at, checked: false, status_label: '未检查', unseen: true});
+  const triggers = [trig(1, '600519', '2026-11-13T14:00:00+00:00'), trig(2, 'BTC-USDT'), trig(3, 'XAUUSD'), trig(4, 'NVDA'), trig(5, 'NVDA')];
+  const order = () => [...ui.doc.querySelectorAll('.watch-triggers li .watch-symbol')].map((node) => node.textContent);
+  // without visible_triggers (an older server) the page orders the short list itself
+  const ui = await setup({'/api/watchlist': wlData({triggers, visible_triggers: undefined, trigger_total: 5}), '/api/watchlist/seen': wlData()});
+  try {
+    await ui.click('[data-page=watchlist]');
+    assert.deepEqual(order(), ['NVDA', 'NVDA', 'BTC-USDT', 'XAUUSD', '600519']);
+    assert.deepEqual([...ui.doc.querySelectorAll('.watch-triggers li')].slice(0, 2).map((li) => li.querySelector('.watch-change').textContent), ['NVDA 命中', 'NVDA 命中']);
+    ui.ui.state.watchlist.triggers = triggers.concat(Array.from({length: 20}, (_, i) => trig(10 + i, 'NVDA', `2026-11-13T15:${String(i).padStart(2, '0')}:00+00:00`)));
+    ui.ui.state.watchlist.trigger_total = 25;
+    ui.ui.state.watchAllTriggers = true;
+    ui.window.eval('paintWatchTable()');
+    assert.deepEqual(order().slice(-5), ['NVDA', 'NVDA', 'BTC-USDT', 'XAUUSD', '600519']);  // the full list too
+    const rows = ui.ui.watchTableOrder(triggers.slice().reverse(), wlItems());
+    assert.deepEqual(Array.from(rows, (row) => row.seq), [4, 5, 2, 3, 1]);  // same symbol: the order recorded
+    assert.deepEqual(Array.from(ui.ui.watchTableOrder(triggers.slice().reverse(), []), (row) => row.seq), [2, 3, 4, 5, 1]);
+  } finally { ui.dom.window.close(); }
+});
+
+test('V2-WATCHLIST-POLISH W-WL3: at phone width every trigger row is the same grid: text, time on its own line, status at the top right', () => {
+  const css = readFileSync(resolve(root, 'webui/static/app.css'), 'utf8');
+  const block = css.match(/W-WL3[\s\S]*?@media \(max-width: 700px\) \{([\s\S]*?)\n\}/);
+  assert.ok(block, 'the W-WL3 phone block exists');
+  assert.match(block[1], /\.watch-triggers li \{ display: grid; grid-template-columns: minmax\(0, 1fr\) auto;/);
+  assert.match(block[1], /\.watch-trigger-main \.watch-change \{ white-space: normal;/);
+  assert.match(block[1], /\.watch-trigger-main \.watch-when \{ display: block;/);
+  assert.match(block[1], /\.watch-triggers li > \.status-badge \{ justify-self: end;/);
+});
+
+test('V2-WATCHLIST-POLISH W259 ruling: labels keep the typed digits; more than 6 decimals is refused before any request', async () => {
+  const posts = [];
+  const data = wlData();
+  const ui = await setup({
+    '/api/watchlist': () => data,
+    '/api/watchlist/seen': () => data,
+    '/api/watchlist/rules': (options) => { posts.push(JSON.parse(options.body)); return data; },
+  });
+  try {
+    assert.equal(ui.ui.watchTypedText(' 0190.50 '), '190.50');
+    assert.equal(ui.ui.watchTypedText('.5'), '0.5');
+    assert.equal(ui.ui.watchTypedText('1e3'), '1000');
+    assert.equal(ui.ui.watchTypedText('abc'), null);
+    assert.equal(ui.ui.watchTypedText('-5'), null);
+    assert.deepEqual(['1452.35', '1452.30', '190', '0.5', '0.00001', '90000'].map((t) => ui.ui.watchThresholdText(t)),
+      ['1452.35', '1452.30', '190.00', '0.5000', '0.00001000', '90000.0']);
+    await ui.click('[data-page=watchlist]');
+    await ui.click('[data-watch-rules="NVDA"]');
+    const drawer = () => ui.doc.querySelector('.rule-drawer');
+    await ui.click('[data-rule-kinds="add"] [data-rule-kind="below"]');
+    ui.fill('#rule-add-value', '1452.30');
+    assert.equal(drawer().querySelector('#rule-preview').textContent, '价格跌到 1452.30 或以下时提醒一次。回到 1452.30 以上后重新生效。');
+    ui.fill('#rule-add-value', '1452.1234567');
+    await ui.click('#rule-add');
+    assert.equal(drawer().querySelector('.rule-err').textContent, '小数最多 6 位。');
+    assert.equal(posts.length, 0);
+    await ui.click('[data-rule-edit="r1"]');
+    ui.fill('#rule-edit-value', '0.1234567');
+    await ui.click('#rule-edit-save');
+    assert.equal(drawer().querySelector('.rule-item--editing .rule-err').textContent, '小数最多 6 位。');
+    assert.equal(posts.length, 0);
+    ui.fill('#rule-edit-value', '1452.30');
+    await ui.click('#rule-edit-save');
+    assert.equal(posts.at(-1).value, '1452.30');
+  } finally { ui.dom.window.close(); }
+});
+
+test('V2-WATCHLIST-POLISH commit 7: rule add and edit send the typed text as a string, never Number(value)', async () => {
+  const posts = [];
+  const data = wlData();
+  const ui = await setup({
+    '/api/watchlist': () => data,
+    '/api/watchlist/seen': () => data,
+    '/api/watchlist/rules': (options) => { posts.push(JSON.parse(options.body)); return data; },
+  });
+  try {
+    await ui.click('[data-page=watchlist]');
+    await ui.click('[data-watch-rules="NVDA"]');
+    await ui.click('[data-rule-kinds="add"] [data-rule-kind="below"]');
+    ui.fill('#rule-add-value', '1452.30');
+    await ui.click('#rule-add');
+    await ui.click('[data-rule-kinds="add"] [data-rule-kind="above"]');
+    ui.fill('#rule-add-value', '0190.50');
+    await ui.click('#rule-add');
+    await ui.click('[data-rule-kinds="add"] [data-rule-kind="pct"]');
+    ui.fill('#rule-add-value', ' 2.50 ');
+    await ui.click('#rule-add');
+    await ui.click('[data-rule-edit="r1"]');
+    ui.fill('#rule-edit-value', '190.10');
+    await ui.click('#rule-edit-save');
+    assert.deepEqual(posts.map((body) => [body.op, body.kind, body.value]),
+      [['add', 'below', '1452.30'], ['add', 'above', '0190.50'], ['add', 'pct', '2.50'], ['update', 'above', '190.10']]);
+    assert.ok(posts.every((body) => typeof body.value === 'string'));
+  } finally { ui.dom.window.close(); }
+});
+
+test('V2-WATCHLIST-POLISH commit 8: the drawer refuses exactly what the server refuses, with the same sentence', async () => {
+  const inputs = ['1452.30', ' +1452.30 ', '0190.50', '１２３', '１４５２.３０', '1452.３', '٣.٥', '१२३', '1_000', '1e-7', '1E3',
+    '1e309', '.5', '5.', '1.2.3', '0x10', '1,000', '++5', '', 'abc', 'inf', '-5', '0', '0.000000', '1452.1234567',
+    '1000000000000', '1000000000000.000000', '1000000000000.000001', '01000000000000.1', '0.000001', '50', '50.000001',
+    '0.1', '0.099999', '\u30001452.3\u3000'];
+  const kinds = ['above', 'below', 'pct', 'win'];
+  const server = JSON.parse(execFileSync(process.env.TRADINGAGENTS_TEST_PYTHON || 'python3', ['-c', `
+import json, sys
+from webui import watchlist
+out = {}
+for kind in ${JSON.stringify(kinds)}:
+    for raw in json.loads(sys.argv[1]):
+        try:
+            watchlist._rule_value(kind, raw)
+            out[kind + "|" + raw] = ""
+        except watchlist.WatchlistError as exc:
+            out[kind + "|" + raw] = str(exc)
+print(json.dumps(out, ensure_ascii=False))
+`, JSON.stringify(inputs)], {cwd: root, encoding: 'utf8'}));
+  const ui = await setup({'/api/watchlist': wlData(), '/api/watchlist/seen': wlData()});
+  try {
+    for (const kind of kinds) {
+      for (const raw of inputs) {
+        assert.equal(ui.ui.ruleValueError(kind, raw), server[`${kind}|${raw}`], `${kind} ${JSON.stringify(raw)}`);
+      }
+    }
+    assert.equal(ui.ui.ruleValueError('above', '１４５２.３０'), '只能填半角数字和小数点，例如 1452.30。');
+    assert.equal(ui.ui.rulePreview('below', '1e-7'), '');  // no 「1e-7.0」 preview
+    assert.equal(ui.ui.ruleValueError('above', '1000000000000.000001'), '价格不能超过 1 万亿（1e12）。');
+  } finally { ui.dom.window.close(); }
+});
+
+test('V2-WATCHLIST-POLISH commit 8: a full-width or exponent number is refused in the drawer before any request', async () => {
+  const posts = [];
+  const data = wlData();
+  const ui = await setup({
+    '/api/watchlist': () => data,
+    '/api/watchlist/seen': () => data,
+    '/api/watchlist/rules': (options) => { posts.push(JSON.parse(options.body)); return data; },
+  });
+  try {
+    await ui.click('[data-page=watchlist]');
+    await ui.click('[data-watch-rules="NVDA"]');
+    const drawer = () => ui.doc.querySelector('.rule-drawer');
+    await ui.click('[data-rule-kinds="add"] [data-rule-kind="below"]');
+    ui.fill('#rule-add-value', '1e-7');
+    assert.equal(drawer().querySelector('#rule-preview'), null);
+    await ui.click('#rule-add');
+    assert.equal(drawer().querySelector('.rule-err').textContent, '只能填半角数字和小数点，例如 1452.30。');
+    ui.fill('#rule-add-value', '１４５２.３０');
+    await ui.click('#rule-add');
+    assert.equal(drawer().querySelector('.rule-err').textContent, '只能填半角数字和小数点，例如 1452.30。');
+    await ui.click('[data-rule-edit="r1"]');
+    ui.fill('#rule-edit-value', '1000000000000.000001');
+    await ui.click('#rule-edit-save');
+    assert.equal(drawer().querySelector('.rule-item--editing .rule-err').textContent, '价格不能超过 1 万亿（1e12）。');
+    assert.equal(posts.length, 0);
+  } finally { ui.dom.window.close(); }
 });

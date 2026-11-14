@@ -1112,9 +1112,14 @@ table.ic-items th { font-size: 12px; color: var(--muted, #666); font-weight: 500
 .watch-trigger-main { min-width: 0; flex: 1 1 auto; }
 .watch-triggers .status-badge { flex: 0 0 auto; white-space: nowrap; }
 .watch-trigger-note { margin: 0; min-width: 0; }
+/* W-WL3: on a phone every trigger row has the same shape, long or short: symbol and text
+   flow on the first line(s), the time on its own line, the status at the top right. */
 @media (max-width: 700px) {
-  .watch-triggers li { flex-wrap: wrap; align-items: flex-start; justify-content: space-between; }
-  .watch-trigger-main { flex: 1 1 12rem; display: flex; flex-wrap: wrap; gap: 4px 8px; }
+  .watch-triggers li { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 10px; align-items: start; }
+  .watch-trigger-main { display: block; min-width: 0; line-height: 1.5; }
+  .watch-trigger-main .watch-change { white-space: normal; overflow-wrap: anywhere; }
+  .watch-trigger-main .watch-when { display: block; margin-top: 2px; }
+  .watch-triggers li > .status-badge { justify-self: end; margin-top: 1px; }
 }
 @media (max-width: 700px) {
   .watch-form { align-items: stretch; }
@@ -1238,6 +1243,7 @@ table.ic-items th { font-size: 12px; color: var(--muted, #666); font-weight: 500
 .watch-more { margin: 8px 0 0; }
 .wl-empty { padding: 28px 16px; text-align: center; color: var(--muted); border: 1px dashed var(--border); border-radius: 8px; }
 .wl-empty strong { display: block; color: var(--text); font-size: 15px; margin-bottom: 6px; }
+.wl-broken { border-style: solid; border-color: var(--danger); }
 .toast--alert .ck { background: #e3a008; color: #fff; font-weight: 700; }
 .link-button--danger { color: var(--danger); }
 .provider-drawer.rule-drawer { width: min(560px, 92vw); max-width: none; }

@@ -45,7 +45,9 @@ def test_four_kinds_with_the_mock_labels(tmp_path):
 def test_price_labels_follow_the_page_format_and_keep_typed_digits():
     assert watchlist.price_text(90000) == "90000.0"
     assert watchlist.price_text(0.5) == "0.5000"
-    assert watchlist.price_text(1452.35) == "1452.35"
+    # W259 PM ruling: a threshold label keeps the digits typed (price_text is the quote format).
+    assert watchlist.rule_label("above", 1452.35) == "高于 1452.35"
+    assert watchlist.rule_label("above", 1452.3, "1452.30") == "高于 1452.30"
 
 
 @pytest.mark.unit
@@ -116,7 +118,7 @@ def test_rule_changes_never_record_a_trigger_or_start(tmp_path):
 def test_old_files_load_without_rules(tmp_path):
     (tmp_path / "watchlist.json").write_text(json.dumps({
         "rule_version": "watch-1", "mode": "observe",
-        "items": [{"symbol": "NVDA", "enabled": True, "last_price": 10}, {"symbol": "AAPL", "rules": "bad"}],
+        "items": [{"symbol": "NVDA", "enabled": True, "last_price": 10}, {"symbol": "AAPL"}],
         "triggers": [{"id": "watch-1|NVDA|price|9->10", "symbol": "NVDA", "kind": "price", "rule_version": "watch-1",
                       "old_value": 9, "new_value": 10, "created_at": "2026-11-01T00:00:00+00:00"}],
     }), encoding="utf-8")
@@ -124,6 +126,18 @@ def test_old_files_load_without_rules(tmp_path):
     assert [item["rules"] for item in view["items"]] == [[], []]
     assert view["poll_minutes"] == 0 and view["has_rules"] is False
     assert [row["kind"] for row in view["triggers"]] == ["price"]  # R4: old stored triggers still show
+
+
+@pytest.mark.unit
+def test_a_rules_value_that_is_not_a_list_is_a_broken_file(tmp_path):
+    """V2-WATCHLIST-POLISH commit 8 (PM ruling): "rules": "bad" is damage, as W264 bad rows are."""
+    raw = json.dumps({"rule_version": "watch-1", "items": [{"symbol": "AAPL", "rules": "bad"}]}).encode("utf-8")
+    (tmp_path / "watchlist.json").write_bytes(raw)
+    with pytest.raises(watchlist.WatchlistError) as caught:
+        watchlist.list_watch(tmp_path)
+    assert (caught.value.status, caught.value.code) == (409, "watchlist_corrupt")
+    assert (tmp_path / "watchlist.json").read_bytes() == raw
+    assert len(list(tmp_path.glob("watchlist.json.corrupt-*"))) == 1
 
 
 @pytest.mark.unit

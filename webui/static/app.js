@@ -5689,13 +5689,34 @@ function watchTriggerLabelUnknown(item) {
   return typeof label === "string" && label !== "" && !WATCH_TRIGGER_LABELS.has(label);
 }
 
+// W-WL2: in a newest-first list, triggers recorded in the same second follow the table's
+// row order (then the order they were recorded), as the server orders visible_triggers.
+function watchTableOrder(rows, items) {
+  const place = new Map((items || []).map((item, index) => [item.symbol, index]));
+  const rank = (row) => (place.has(row.symbol) ? place.get(row.symbol) : place.size);
+  const out = [];
+  let run = [];
+  const flush = () => {
+    out.push(...run.map((row, index) => [row, index]).sort((a, b) => rank(a[0]) - rank(b[0]) || (Number(a[0].seq) || 0) - (Number(b[0].seq) || 0) || a[1] - b[1]).map(([row]) => row));
+    run = [];
+  };
+  rows.forEach((row) => {
+    if (run.length && row.created_at !== run[0].created_at) flush();
+    run.push(row);
+  });
+  flush();
+  return out;
+}
+
 function watchVisibleTriggers(data) {
-  if (Array.isArray(data.visible_triggers)) return data.visible_triggers;
+  if (Array.isArray(data.visible_triggers)) return data.visible_triggers;  // the server orders it (W-WL2)
   const rows = data.triggers || [];
   const recent = rows.slice(-20);
   const ids = new Set(recent.map((item) => item.id));
   const sticky = rows.filter((item) => item.checked && item.id && !ids.has(item.id));
-  return sticky.concat(recent).reverse();
+  const newestFirst = sticky.concat(recent).reverse();
+  // W-WL2: same-second rows in table order among the recent ones; sticky checked rows stay last.
+  return watchTableOrder(newestFirst.slice(0, recent.length), data.items).concat(newestFirst.slice(recent.length));
 }
 
 function watchTriggerText(item) {
@@ -6224,22 +6245,49 @@ async function watchAct(path, body) {
     syncWatchPolling();
     return true;
   } catch (error) {
-    watchError(error.message);
+    watchFailed(error);
     return false;
   }
+}
+
+// W261: a broken watchlist.json is not an empty list. The page says so, shows no table,
+// and offers no action that would write, until the file is fixed and the page reloaded.
+const WATCH_CORRUPT = "watchlist_corrupt";
+
+function watchFailed(error) {
+  if (error && error.code === WATCH_CORRUPT) {
+    state.watchlist = null;
+    state.watchlistBroken = error.message || "自选数据文件已损坏。";
+    clearWatchTimer();
+    const poll = watchPoll();
+    poll.nextAt = null;
+    poll.retryAt = null;
+    if (state.ruleDrawer) closeLayer();
+    paintWatchBroken();
+  }
+  watchError(error ? error.message : "");
+}
+
+function paintWatchBroken() {
+  const box = document.querySelector("#watch-table");
+  if (box) box.innerHTML = `<div class="wl-empty wl-broken" id="watch-broken"><strong>自选数据暂时不能用</strong>${punctBreakHtml("没有把它当成空列表，也不会写入。修复文件后刷新页面。")}</div>`;
+  document.querySelectorAll("#watch-form input, #watch-form button").forEach((node) => { node.disabled = true; });
+  paintWatchPoll();
 }
 
 async function loadWatchTable() {
   try {
     state.watchlist = await api("/api/watchlist");
+    state.watchlistBroken = null;
+    document.querySelectorAll("#watch-form input, #watch-form button[type=submit]").forEach((node) => { node.disabled = false; });
     paintWatchTable();
     syncWatchPolling();
   } catch (error) {
-    watchError(error.message);
+    watchFailed(error);
   } finally {
     const button = document.querySelector("#watch-refresh");
     // An empty list has nothing to refresh (the poll bar says so); a failed read may retry.
-    if (button) button.disabled = Boolean(state.watchlist && !(state.watchlist.items || []).length) || watchPoll().running;
+    if (button) button.disabled = Boolean(state.watchlistBroken) || Boolean(state.watchlist && !(state.watchlist.items || []).length) || watchPoll().running;
   }
 }
 
@@ -6330,9 +6378,23 @@ function watchChangeHtml(item) {
   return ` <span class="wl-chg ${dir}">${n > 0 ? "+" : ""}${n.toFixed(2)}%</span>`;
 }
 
+// The page's notion of now for date labels; tests pin it.
+function watchNowMs() {
+  return Date.now();
+}
+
+// W-WL1: a Beijing clock time, with MM-DD in front when that time is not today in Beijing.
+function watchStamp(value, seconds = false) {
+  const p = beijingParts(value);
+  if (!p) return "";
+  const today = beijingParts(new Date(watchNowMs()));
+  const clock = `${p.hour}:${p.minute}${seconds ? `:${p.second}` : ""}`;
+  return today && today.year === p.year && today.month === p.month && today.day === p.day ? clock : `${p.month}-${p.day} ${clock}`;
+}
+
 function watchFetchedText(item) {
   const at = item.quote_at || item.priced_at;
-  const clock = watchClock(at);
+  const clock = watchStamp(at);
   return clock ? `取价 北京 ${clock}` : "";
 }
 
@@ -6379,6 +6441,10 @@ function watchItemHit(item) {
 function paintWatchTable() {
   const box = document.querySelector("#watch-table");
   if (!box) return;
+  if (state.watchlistBroken) {
+    paintWatchBroken();
+    return;
+  }
   const data = state.watchlist || { items: [], triggers: [], rule_version: "" };
   const rule = document.querySelector("#watch-rule");
   if (rule) rule.innerHTML = watchBreakHtml(watchRuleText(data));
@@ -6400,7 +6466,7 @@ function paintWatchTable() {
     const ruleButton = (item.rules || []).length ? "提醒规则" : "添加规则";
     return `<tr${hit ? ` class="wl-row--hit"` : ""}><td><strong class="watch-symbol">${escapeHtml(item.symbol)}</strong><span class="cell-secondary">${escapeHtml(item.asset_label || "")}</span>${badge}</td><td>${watchPriceCell(item, rowView[item.symbol] || {})}</td><td class="wl-rules-cell"><div class="wl-rules">${watchRuleChips(item)}</div></td><td><div class="watch-actions"><button class="button button--secondary button--small" type="button" data-watch-rules="${escapeHtml(item.symbol)}">${ruleButton}</button><button class="button button--secondary button--small" type="button" data-watch-kline="${escapeHtml(item.symbol)}"${assetAttr}>打开K线</button><button class="button button--secondary button--small" type="button" data-watch-analyze="${escapeHtml(item.symbol)}">去分析</button><button class="button button--secondary button--small" type="button" data-watch-remove="${escapeHtml(item.symbol)}">移除</button></div></td></tr>`;
   }).join("");
-  const allTriggers = (data.triggers || []).slice().reverse();
+  const allTriggers = watchTableOrder((data.triggers || []).slice().reverse(), data.items);
   const shortList = watchVisibleTriggers(data);
   const visibleTriggers = state.watchAllTriggers ? allTriggers : shortList;
   const missingTrigger = visibleTriggers.some((item) => watchTriggerStatusMissing(item) || watchTriggerLabelUnknown(item))
@@ -6458,17 +6524,66 @@ function ruleUnit(item, kind) {
   return "美元";
 }
 
-function ruleValueError(kind, raw) {
+// W259 (PM ruling): a rule number reads exactly as typed, tidied but never rounded, as the
+// server's typed_text: "1452.30" stays "1452.30", "0190.5" -> "190.5", ".5" -> "0.5".
+function watchTypedText(raw) {
   const text = String(raw ?? "").trim();
+  const match = text.match(/^\+?(\d+)(?:\.(\d*))?$|^\+?\.(\d+)$/);
+  if (!match) {
+    const n = Number(text);
+    if (!text || !Number.isFinite(n) || n <= 0) return null;
+    const plain = String(n);
+    return /e/i.test(plain) ? null : watchTypedText(plain);
+  }
+  const whole = (match[3] === undefined ? match[1] : "0").replace(/^0+/, "") || "0";
+  const frac = match[3] === undefined ? match[2] || "" : match[3];
+  return frac ? `${whole}.${frac}` : whole;
+}
+
+// A price threshold in a label: every typed digit, padded with zeros up to the page's price
+// format (>= 1000 one decimal, >= 1 two, else four significant). Same as threshold_text.
+function watchThresholdText(text) {
+  const [whole, frac = ""] = text.split(".");
+  let page;
+  if (whole.length >= 4) page = 1;
+  else if (whole !== "0") page = 2;
+  else page = /[1-9]/.test(frac) ? frac.length - frac.replace(/^0+/, "").length + 4 : 3;
+  return `${whole}.${frac.padEnd(Math.max(page, frac.length), "0")}`;
+}
+
+// Commit 8 (W269/W270-1/W272): the server's rule, word for word. After the surrounding spaces
+// and one leading "+", only ASCII digits with at most 6 decimals are a number; full-width or
+// other scripts' digits, "_", ".5", "5." and 1e-7 get the server's 「只能填半角数字和小数点」.
+// Limits are checked on the digits, so 1e12 plus 0.000001 (written out) is over the cap.
+const RULE_NUMBER_TEXT = "只能填半角数字和小数点，例如 1452.30。";
+
+function ruleValueError(kind, raw) {
+  let text = String(raw ?? "").trim();
+  if (text.startsWith("+")) text = text.slice(1);
+  const price = kind === "above" || kind === "below";
+  const range = price ? "请输入大于 0 的价格。" : "涨跌幅填 0.1 到 50 之间。";
+  if (!/^[0-9]+(\.[0-9]{1,6})?$/.test(text)) {
+    if (/^[0-9]+\.[0-9]{7,}$/.test(text)) return "小数最多 6 位。";  // W259
+    if (/^-[0-9]+(\.[0-9]+)?$/.test(text) || !/\p{Nd}/u.test(text)) return range;
+    return RULE_NUMBER_TEXT;
+  }
+  const [rawWhole, frac = ""] = text.split(".");
+  const whole = rawWhole.replace(/^0+/, "");
+  if (!/[1-9]/.test(whole + frac)) return range;
+  if (price) {
+    const cap = `1${"0".repeat(12)}`;  // 1e12 written out
+    const over = whole.length > 13 || (whole.length === 13 && (whole !== cap || /[1-9]/.test(frac)));
+    return over ? "价格不能超过 1 万亿（1e12）。" : "";
+  }
   const n = Number(text);
-  if (kind === "above" || kind === "below") return text && Number.isFinite(n) && n > 0 ? "" : "请输入大于 0 的价格。";
-  return text && Number.isFinite(n) && n >= 0.1 && n <= 50 ? "" : "涨跌幅填 0.1 到 50 之间。";
+  return n >= 0.1 && n <= 50 ? "" : range;
 }
 
 function rulePreview(kind, raw) {
   if (ruleValueError(kind, raw)) return "";
-  const n = Number(raw);
-  const shown = kind === "above" || kind === "below" ? watchPrice(n) : `${n}%`;
+  const typed = watchTypedText(raw) || String(Number(raw));
+  // W259: the preview shows the number as typed, the same as the saved label.
+  const shown = kind === "above" || kind === "below" ? watchThresholdText(typed) : `${typed}%`;
   if (kind === "above") return `价格涨到 ${shown} 或以上时提醒一次。回到 ${shown} 以下后重新生效。`;
   if (kind === "below") return `价格跌到 ${shown} 或以下时提醒一次。回到 ${shown} 以上后重新生效。`;
   if (kind === "pct") return `较昨收涨或跌 ${shown} 及以上时提醒。同一方向每个交易日只提醒一次。`;
@@ -6495,7 +6610,7 @@ function ruleRowHtml(rule, item, ui) {
   if (ui.editing === rule.id) {
     const err = ui.editError ? `<p class="rule-err" role="alert">${escapeHtml(ui.editError)}</p>` : "";
     return `<li class="rule-item rule-item--editing"><div class="rule-form rule-form--edit">
-      <div class="row">${ruleKindSeg(rule.kind, {readonly: true, name: "edit"})}<input id="rule-edit-value"${ui.editError ? ' class="bad"' : ""} value="${escapeHtml(ui.editValue ?? String(rule.value))}" aria-label="数值" inputmode="decimal"><span class="unit">${escapeHtml(ruleUnit(item, rule.kind))}</span></div>
+      <div class="row">${ruleKindSeg(rule.kind, {readonly: true, name: "edit"})}<input id="rule-edit-value"${ui.editError ? ' class="bad"' : ""} value="${escapeHtml(ui.editValue ?? (rule.value_text || String(rule.value)))}" aria-label="数值" inputmode="decimal"><span class="unit">${escapeHtml(ruleUnit(item, rule.kind))}</span></div>
       ${err}
       <div class="row"><button class="button button--primary button--small" type="button" id="rule-edit-save">保存这条</button><button class="button button--secondary button--small" type="button" id="rule-edit-cancel">取消</button></div></div></li>`;
   }
@@ -6550,6 +6665,10 @@ async function ruleAct(body) {
     syncWatchPolling();
     return {ok: true};
   } catch (error) {
+    if (error.code === WATCH_CORRUPT) {
+      watchFailed(error);
+      return {ok: false, message: error.message, code: error.code, closed: true};
+    }
     return {ok: false, message: error.message || "保存失败。", code: error.code};
   }
 }
@@ -6593,7 +6712,7 @@ function paintRuleDrawer() {
       paintRuleDrawer();
       return;
     }
-    const result = await ruleAct({op: "add", kind: ui.addKind, value: Number(ui.addValue)});
+    const result = await ruleAct({op: "add", kind: ui.addKind, value: String(ui.addValue).trim()});
     ui.addError = result.ok ? "" : result.message;
     if (result.ok) ui.addValue = "";
     paintRuleDrawer();
@@ -6633,7 +6752,7 @@ function paintRuleDrawer() {
       paintRuleDrawer();
       return;
     }
-    const result = await ruleAct({op: "update", rule_id: ui.editing, value: Number(value)});
+    const result = await ruleAct({op: "update", rule_id: ui.editing, kind: rule ? rule.kind : undefined, value: String(value).trim()});
     if (result.ok) {
       ui.editing = null;
       ui.editValue = null;
@@ -6770,8 +6889,11 @@ async function markWatchSeen() {
   const unseen = Number(state.watchlist && state.watchlist.unseen_count) || 0;
   updateWatchBadge(0);
   if (!unseen) return;
+  // W262: say how far this page has shown, by trigger number, so a hit recorded by another
+  // tab in the same second is not counted as seen here.
+  const shown = Math.max(0, ...((state.watchlist && state.watchlist.triggers) || []).map((row) => Number(row.seq) || 0));
   try {
-    const view = await api("/api/watchlist/seen", {method: "POST", body: "{}"});
+    const view = await api("/api/watchlist/seen", {method: "POST", body: JSON.stringify({upto_seq: shown})});
     if (state.watchlist && view) state.watchlist.unseen_count = view.unseen_count;
   } catch (_) { /* the badge comes back on the next read */ }
 }
@@ -6787,23 +6909,24 @@ function watchStatusHtml() {
   const minutes = watchPollMinutes();
   const items = (state.watchlist && state.watchlist.items) || [];
   const last = poll.lastAt || watchLatestQuoteTime(items);
-  const lastText = last ? `上次 北京 ${watchClock(last, true)}${poll.lastManual && !minutes ? "（手动）" : ""}` : "";
+  const lastText = last ? `上次 北京 ${watchStamp(last, true)}${poll.lastManual && !minutes ? "（手动）" : ""}` : "";
   const span = (text) => (text ? `<span>${text}</span>` : "");
+  if (state.watchlistBroken) return `<span class="wl-status wl-status--warn"><i></i><span><b>已停止：自选数据文件损坏</b></span></span>`;
   if (!items.length) return `<span class="wl-status wl-status--paused"><i></i><span>还没有自选，不会刷新。</span></span>`;
   if (poll.running && poll.progress) {
     return `<span class="wl-status"><span><span class="wl-spin" aria-hidden="true"></span><b>正在刷新 ${poll.progress.done}/${poll.progress.total}</b></span>${span(lastText)}</span>`;
   }
   if (poll.pausedFor === "rate_limited" || poll.pausedFor === "error") {
     const head = poll.pausedFor === "rate_limited" ? "已暂停：行情源限流" : "已暂停：取价出错";
-    const ok = poll.lastOkAt ? `上次成功 北京 ${watchClock(poll.lastOkAt, true)}` : "";
-    const retry = poll.retryAt && minutes ? `${watchClock(poll.retryAt)} 自动重试` : "稍后可以手动刷新";
+    const ok = poll.lastOkAt ? `上次成功 北京 ${watchStamp(poll.lastOkAt, true)}` : "";
+    const retry = poll.retryAt && minutes ? `${watchStamp(poll.retryAt)} 自动重试` : "稍后可以手动刷新";
     return `<span class="wl-status wl-status--warn"><i></i><span><b>${head}</b></span>${span(ok)}${span(retry)}</span>`;
   }
   if (!minutes) return `<span class="wl-status wl-status--paused"><i></i><span><b>自动刷新已关</b></span>${span(lastText)}</span>`;
   if (poll.pausedFor === "hidden") {
     return `<span class="wl-status wl-status--paused"><i></i><span><b>已暂停：页面在后台</b></span>${span(lastText)}<span>回到页面后马上刷新一次</span></span>`;
   }
-  const next = poll.nextAt ? `下次 ${watchClock(poll.nextAt)}` : "";
+  const next = poll.nextAt ? `下次 ${watchStamp(poll.nextAt)}` : "";
   return `<span class="wl-status"><i></i><span><b>自动刷新中</b> · 每 ${minutes} 分钟</span>${span(lastText)}${span(next)}</span>`;
 }
 
@@ -6816,7 +6939,7 @@ function paintWatchPoll() {
   const bar = document.querySelector("#watch-poll-bar");
   if (!bar) return;
   const data = state.watchlist || {};
-  const empty = !(data.items || []).length;
+  const empty = !(data.items || []).length || Boolean(state.watchlistBroken);
   const minutes = watchPollMinutes();
   const seg = `<div class="seg${empty ? " seg--disabled" : ""}" id="watch-poll" role="group" aria-label="自动刷新">${WATCH_POLL_CHOICES.map(([value, label]) => `<button type="button" class="seg-item${value === minutes ? " on" : ""}" data-poll="${value}"${empty ? " disabled" : ""} aria-pressed="${value === minutes}">${label}</button>`).join("")}</div>`;
   bar.innerHTML = `<span class="wl-poll-label">自动刷新</span>${seg}${watchStatusHtml()}`;
@@ -6834,7 +6957,7 @@ function paintWatchPoll() {
     try {
       state.watchlist = await api("/api/watchlist/poll", {method: "POST", body: JSON.stringify({minutes: value})});
     } catch (error) {
-      watchError(error.message);
+      watchFailed(error);
       return;
     }
     const poll = watchPoll();
@@ -6867,7 +6990,7 @@ async function runWatchRefresh({manual = false} = {}) {
   const poll = watchPoll();
   if (poll.running) return;
   if (!state.watchlist) {
-    try { state.watchlist = await api("/api/watchlist"); } catch (error) { watchError(error.message); return; }
+    try { state.watchlist = await api("/api/watchlist"); } catch (error) { watchFailed(error); return; }
   }
   const all = watchItemsToFetch();
   if (!all.length) {
@@ -6918,6 +7041,13 @@ async function runWatchRefresh({manual = false} = {}) {
       fired = state.watchlist.fired || [];
     } catch (error) {
       failed.push(...Object.keys(quotes));
+      if (error.code === WATCH_CORRUPT) {
+        poll.running = false;
+        poll.progress = null;
+        state.watchRowView = {};
+        watchFailed(error);
+        return;
+      }
       watchError(error.message);
     }
   }
@@ -6943,7 +7073,7 @@ async function runWatchRefresh({manual = false} = {}) {
   else if (poll.retryAt && all.length) scheduleWatchAt(null);
   const notes = [];
   if (limited.length) {
-    const retry = poll.retryAt && minutes ? `${watchClock(poll.retryAt)} 自动重试，也可以稍后手动刷新。` : "稍后可以手动刷新。";
+    const retry = poll.retryAt && minutes ? `${watchStamp(poll.retryAt)} 自动重试，也可以稍后手动刷新。` : "稍后可以手动刷新。";
     notes.push(`${limited.join("、")} 这次没拿到最新价：行情源限流。表里是上次的价格，不拿旧价判断规则。${retry}`);
   }
   if (failed.length) notes.push(`${failed.join("、")} 这次没拿到最新价。表里是上次的价格，不拿旧价判断规则。`);

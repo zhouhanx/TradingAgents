@@ -450,7 +450,7 @@ class Handler(BaseHTTPRequestHandler):
             ),
             "/api/watchlist/rules": lambda: watchlist.change_rule(body),
             "/api/watchlist/poll": lambda: watchlist.set_poll(body.get("minutes")),
-            "/api/watchlist/seen": lambda: watchlist.mark_seen(),
+            "/api/watchlist/seen": lambda: watchlist.mark_seen(upto_seq=body.get("upto_seq")),
             "/api/watchlist/kline": lambda: watchlist.open_kline(body.get("symbol")),
             "/api/watchlist/analyze": lambda: watchlist.explicit_analyze(body.get("symbol")),
             "/api/schedule": lambda: schedule.create_schedule(body.get("symbol"), body.get("at")),
